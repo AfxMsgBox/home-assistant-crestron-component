@@ -1,0 +1,1008 @@
+# Generated from custom_components/crestron/68.xlsx
+# Source sheet: TSE-300
+# HA acts as the XSIG TCP server on port 10200.
+
+crestron:
+  port: 10200
+
+light:
+  # B2.车库
+  - platform: crestron
+    name: "B2.车库 天花灯带"
+    type: brightness
+    brightness_join: 1
+    color_temp_join: 201
+  - platform: crestron
+    name: "B2.车库 天花线条灯带"
+    type: brightness
+    brightness_join: 2
+    color_temp_join: 202
+  - platform: crestron
+    name: "B2.车库 背景灯带"
+    type: brightness
+    brightness_join: 3
+    color_temp_join: 203
+  - platform: crestron
+    name: "B2.车库 吊灯"
+    type: brightness
+    brightness_join: 4
+  - platform: crestron
+    name: "B2.车库 吊灯 2"
+    type: brightness
+    brightness_join: 5
+  # B2.入户连廊
+  - platform: crestron
+    name: "B2.入户连廊 N.入户射灯"
+    type: brightness
+    brightness_join: 6
+    color_temp_join: 206
+  - platform: crestron
+    name: "B2.入户连廊 N.入户墙身灯带"
+    type: brightness
+    brightness_join: 7
+    color_temp_join: 207
+  - platform: crestron
+    name: "B2.入户连廊 N.入户天花灯带"
+    type: brightness
+    brightness_join: 8
+    color_temp_join: 208
+  - platform: crestron
+    name: "B2.入户连廊 N.入户吊灯"
+    type: brightness
+    brightness_join: 9
+  - platform: crestron
+    name: "B2.入户连廊 E.拐角射灯"
+    type: brightness
+    brightness_join: 10
+    color_temp_join: 210
+  - platform: crestron
+    name: "B2.入户连廊 E.拖把池射灯"
+    type: brightness
+    brightness_join: 11
+    color_temp_join: 211
+  - platform: crestron
+    name: "B2.入户连廊 W.过道射灯"
+    type: brightness
+    brightness_join: 12
+    color_temp_join: 212
+  - platform: crestron
+    name: "B2.入户连廊 W.吊灯"
+    type: brightness
+    brightness_join: 13
+  - platform: crestron
+    name: "B2.入户连廊 S.屋檐射灯"
+    type: brightness
+    brightness_join: 14
+    color_temp_join: 214
+  - platform: crestron
+    name: "B2.入户连廊 N.入户照墙灯"
+    type: brightness
+    brightness_join: 15
+    color_temp_join: 215
+  # B2.玄关
+  - platform: crestron
+    name: "B2.玄关 射灯"
+    type: brightness
+    brightness_join: 16
+    color_temp_join: 216
+  - platform: crestron
+    name: "B2.玄关 天花灯带"
+    type: brightness
+    brightness_join: 17
+    color_temp_join: 217
+  # B2.会客厅
+  - platform: crestron
+    name: "B2.会客厅 天花灯带1"
+    type: brightness
+    brightness_join: 18
+    color_temp_join: 218
+  - platform: crestron
+    name: "B2.会客厅 天花灯带2"
+    type: brightness
+    brightness_join: 19
+    color_temp_join: 219
+  - platform: crestron
+    name: "B2.会客厅 天花灯带3"
+    type: brightness
+    brightness_join: 20
+    color_temp_join: 220
+  - platform: crestron
+    name: "B2.会客厅 天花灯带4"
+    type: brightness
+    brightness_join: 21
+    color_temp_join: 221
+  - platform: crestron
+    name: "B2.会客厅 天花灯带5"
+    type: brightness
+    brightness_join: 22
+    color_temp_join: 222
+  - platform: crestron
+    name: "B2.会客厅 天花灯带6"
+    type: brightness
+    brightness_join: 23
+    color_temp_join: 223
+  - platform: crestron
+    name: "B2.会客厅 壁灯"
+    type: brightness
+    brightness_join: 24
+    color_temp_join: 224
+  - platform: crestron
+    name: "B2.会客厅 吊灯"
+    type: brightness
+    brightness_join: 25
+    color_temp_join: 225
+  # B2.过道
+  - platform: crestron
+    name: "B2.过道 过道射灯"
+    type: brightness
+    brightness_join: 26
+    color_temp_join: 226
+  - platform: crestron
+    name: "B2.过道 屏风射灯"
+    type: brightness
+    brightness_join: 27
+    color_temp_join: 227
+  - platform: crestron
+    name: "B2.过道 电梯灯带"
+    type: brightness
+    brightness_join: 28
+    color_temp_join: 228
+  - platform: crestron
+    name: "B2.过道 壁灯"
+    type: brightness
+    brightness_join: 29
+  # B2.男主卧
+  - platform: crestron
+    name: "B2.男主卧 天花灯带"
+    type: brightness
+    brightness_join: 30
+    color_temp_join: 230
+  - platform: crestron
+    name: "B2.男主卧 吊灯"
+    type: brightness
+    brightness_join: 31
+  # B2.男主卧衣帽间
+  - platform: crestron
+    name: "B2.男主卧衣帽间 天花灯带"
+    type: brightness
+    brightness_join: 32
+    color_temp_join: 232
+  # B2.男主卫生间
+  - platform: crestron
+    name: "B2.男主卫生间 天花灯带"
+    type: brightness
+    brightness_join: 33
+    color_temp_join: 233
+  - platform: crestron
+    name: "B2.男主卫生间 淋浴灯带"
+    type: brightness
+    brightness_join: 34
+    color_temp_join: 234
+  - platform: crestron
+    name: "B2.男主卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 35
+    color_temp_join: 235
+  # B2.长辈房
+  - platform: crestron
+    name: "B2.长辈房 玄关射灯"
+    type: brightness
+    brightness_join: 36
+    color_temp_join: 236
+  - platform: crestron
+    name: "B2.长辈房 天花灯带"
+    type: brightness
+    brightness_join: 37
+    color_temp_join: 237
+  - platform: crestron
+    name: "B2.长辈房 吊灯"
+    type: brightness
+    brightness_join: 38
+  # B2.长辈房卫生间
+  - platform: crestron
+    name: "B2.长辈房卫生间 过道射灯"
+    type: brightness
+    brightness_join: 39
+    color_temp_join: 239
+  - platform: crestron
+    name: "B2.长辈房卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 40
+    color_temp_join: 240
+  - platform: crestron
+    name: "B2.长辈房卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 41
+    color_temp_join: 241
+  - platform: crestron
+    name: "B2.长辈房卫生间 天花灯带"
+    type: brightness
+    brightness_join: 42
+    color_temp_join: 242
+  - platform: crestron
+    name: "B2.长辈房卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 43
+    color_temp_join: 243
+  # B2.工人房
+  - platform: crestron
+    name: "B2.工人房 过道射灯"
+    type: brightness
+    brightness_join: 44
+    color_temp_join: 244
+  - platform: crestron
+    name: "B2.工人房 床尾射灯"
+    type: brightness
+    brightness_join: 45
+    color_temp_join: 245
+  - platform: crestron
+    name: "B2.工人房 天花灯带"
+    type: brightness
+    brightness_join: 46
+    color_temp_join: 246
+  # B2.工人房卫生间
+  - platform: crestron
+    name: "B2.工人房卫生间 洗漱射灯"
+    type: brightness
+    brightness_join: 47
+    color_temp_join: 247
+  - platform: crestron
+    name: "B2.工人房卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 48
+    color_temp_join: 248
+  - platform: crestron
+    name: "B2.工人房卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 49
+    color_temp_join: 249
+  - platform: crestron
+    name: "B2.工人房卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 50
+    color_temp_join: 250
+  # B2.公卫
+  - platform: crestron
+    name: "B2.公卫 洗漱射灯"
+    type: brightness
+    brightness_join: 51
+    color_temp_join: 251
+  - platform: crestron
+    name: "B2.公卫 如厕射灯"
+    type: brightness
+    brightness_join: 52
+    color_temp_join: 252
+  - platform: crestron
+    name: "B2.公卫 壁龛灯"
+    type: brightness
+    brightness_join: 53
+    color_temp_join: 253
+  # B2.洗衣房
+  - platform: crestron
+    name: "B2.洗衣房 射灯"
+    type: brightness
+    brightness_join: 54
+    color_temp_join: 254
+  # B2.茶水间
+  - platform: crestron
+    name: "B2.茶水间 射灯"
+    type: brightness
+    brightness_join: 55
+    color_temp_join: 255
+  # B2.书房
+  - platform: crestron
+    name: "B2.书房 沙发射灯"
+    type: brightness
+    brightness_join: 56
+    color_temp_join: 256
+  - platform: crestron
+    name: "B2.书房 天花灯带"
+    type: brightness
+    brightness_join: 57
+    color_temp_join: 257
+  - platform: crestron
+    name: "B2.书房 背景灯带"
+    type: brightness
+    brightness_join: 58
+    color_temp_join: 258
+  # B1.过道
+  - platform: crestron
+    name: "B1.过道 电梯灯带"
+    type: brightness
+    brightness_join: 59
+    color_temp_join: 259
+  - platform: crestron
+    name: "B1.过道 过道灯带"
+    type: brightness
+    brightness_join: 60
+    color_temp_join: 260
+  - platform: crestron
+    name: "B1.过道 飘台射灯"
+    type: brightness
+    brightness_join: 61
+    color_temp_join: 261
+  - platform: crestron
+    name: "B1.过道 明装射灯"
+    type: brightness
+    brightness_join: 62
+    color_temp_join: 262
+  - platform: crestron
+    name: "B1.过道 过道壁灯"
+    type: brightness
+    brightness_join: 63
+  # B1.健身房
+  - platform: crestron
+    name: "B1.健身房 天花灯带"
+    type: brightness
+    brightness_join: 64
+    color_temp_join: 264
+  # B1.保姆房
+  - platform: crestron
+    name: "B1.保姆房 衣帽间灯带"
+    type: brightness
+    brightness_join: 65
+    color_temp_join: 265
+  - platform: crestron
+    name: "B1.保姆房 起居间灯带"
+    type: brightness
+    brightness_join: 66
+    color_temp_join: 266
+  - platform: crestron
+    name: "B1.保姆房 床天花灯带"
+    type: brightness
+    brightness_join: 67
+    color_temp_join: 267
+  # B1.客房
+  - platform: crestron
+    name: "B1.客房 入门灯带"
+    type: brightness
+    brightness_join: 68
+    color_temp_join: 268
+  - platform: crestron
+    name: "B1.客房 过道灯带"
+    type: brightness
+    brightness_join: 69
+    color_temp_join: 269
+  - platform: crestron
+    name: "B1.客房 背景天花灯带"
+    type: brightness
+    brightness_join: 70
+    color_temp_join: 270
+  # B1.储物间
+  - platform: crestron
+    name: "B1.储物间 大储物间灯带"
+    type: brightness
+    brightness_join: 71
+    color_temp_join: 271
+  - platform: crestron
+    name: "B1.储物间 小储物间灯带"
+    type: brightness
+    brightness_join: 72
+    color_temp_join: 272
+  # B1.卫生间
+  - platform: crestron
+    name: "B1.卫生间 洗漱射灯"
+    type: brightness
+    brightness_join: 73
+    color_temp_join: 273
+  - platform: crestron
+    name: "B1.卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 74
+    color_temp_join: 274
+  - platform: crestron
+    name: "B1.卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 75
+    color_temp_join: 275
+  - platform: crestron
+    name: "B1.卫生间 天花灯带"
+    type: brightness
+    brightness_join: 76
+    color_temp_join: 276
+  - platform: crestron
+    name: "B1.卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 77
+    color_temp_join: 277
+  # B1.清洁间
+  - platform: crestron
+    name: "B1.清洁间 射灯"
+    type: brightness
+    brightness_join: 78
+    color_temp_join: 278
+  # 1F.客餐厅
+  - platform: crestron
+    name: "1F.客餐厅 天花灯带"
+    type: brightness
+    brightness_join: 79
+    color_temp_join: 279
+  - platform: crestron
+    name: "1F.客餐厅 窗帘灯带"
+    type: brightness
+    brightness_join: 80
+    color_temp_join: 280
+  - platform: crestron
+    name: "1F.客餐厅 吊灯"
+    type: brightness
+    brightness_join: 81
+  - platform: crestron
+    name: "1F.客餐厅 过道射灯"
+    type: brightness
+    brightness_join: 82
+    color_temp_join: 282
+  # 1F.花园
+  - platform: crestron
+    name: "1F.花园 1.客厅屋檐射灯"
+    type: brightness
+    brightness_join: 83
+    color_temp_join: 283
+  - platform: crestron
+    name: "1F.花园 3.设备玄关灯带"
+    type: brightness
+    brightness_join: 84
+    color_temp_join: 284
+  # 1F.书房
+  - platform: crestron
+    name: "1F.书房 天花灯带"
+    type: brightness
+    brightness_join: 85
+    color_temp_join: 285
+  # 1F.玄关
+  - platform: crestron
+    name: "1F.玄关 玄关射灯"
+    type: brightness
+    brightness_join: 86
+    color_temp_join: 286
+  - platform: crestron
+    name: "1F.玄关 玄关壁灯"
+    type: brightness
+    brightness_join: 87
+  # 1F.厨房
+  - platform: crestron
+    name: "1F.厨房 岛台射灯"
+    type: brightness
+    brightness_join: 88
+    color_temp_join: 288
+  - platform: crestron
+    name: "1F.厨房 水台射灯"
+    type: brightness
+    brightness_join: 89
+    color_temp_join: 289
+  - platform: crestron
+    name: "1F.厨房 天花灯带"
+    type: brightness
+    brightness_join: 90
+    color_temp_join: 290
+  # 1F.客卫
+  - platform: crestron
+    name: "1F.客卫 天花灯带"
+    type: brightness
+    brightness_join: 91
+    color_temp_join: 291
+  # 1F.儿子房
+  - platform: crestron
+    name: "1F.儿子房 天花灯带"
+    type: brightness
+    brightness_join: 92
+    color_temp_join: 292
+  - platform: crestron
+    name: "1F.儿子房 吊灯"
+    type: brightness
+    brightness_join: 93
+  - platform: crestron
+    name: "1F.儿子房 衣帽间灯带"
+    type: brightness
+    brightness_join: 94
+    color_temp_join: 294
+  # 1F.儿子房卫生间
+  - platform: crestron
+    name: "1F.儿子房卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 95
+    color_temp_join: 295
+  - platform: crestron
+    name: "1F.儿子房卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 96
+    color_temp_join: 296
+  - platform: crestron
+    name: "1F.儿子房卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 97
+    color_temp_join: 297
+  - platform: crestron
+    name: "1F.儿子房卫生间 天花灯带"
+    type: brightness
+    brightness_join: 98
+    color_temp_join: 298
+  # 1F.客卫玄关
+  - platform: crestron
+    name: "1F.客卫玄关 玄关射灯"
+    type: brightness
+    brightness_join: 99
+    color_temp_join: 299
+  - platform: crestron
+    name: "1F.客卫玄关 玄关景灯"
+    type: brightness
+    brightness_join: 100
+    color_temp_join: 300
+  - platform: crestron
+    name: "1F.客卫玄关 玄关灯带"
+    type: brightness
+    brightness_join: 101
+    color_temp_join: 301
+  # 2F.休闲区
+  - platform: crestron
+    name: "2F.休闲区 天花灯带"
+    type: brightness
+    brightness_join: 102
+    color_temp_join: 302
+  - platform: crestron
+    name: "2F.休闲区 窗帘灯带"
+    type: brightness
+    brightness_join: 103
+    color_temp_join: 303
+  - platform: crestron
+    name: "2F.休闲区 吊灯"
+    type: brightness
+    brightness_join: 104
+  - platform: crestron
+    name: "2F.休闲区 茶水间"
+    type: brightness
+    brightness_join: 105
+    color_temp_join: 305
+  - platform: crestron
+    name: "2F.休闲区 过道射灯"
+    type: brightness
+    brightness_join: 106
+    color_temp_join: 306
+  # 2F.女主卧
+  - platform: crestron
+    name: "2F.女主卧 天花灯带"
+    type: brightness
+    brightness_join: 107
+    color_temp_join: 307
+  - platform: crestron
+    name: "2F.女主卧 吊灯"
+    type: brightness
+    brightness_join: 108
+  # 2F.女主衣帽间
+  - platform: crestron
+    name: "2F.女主衣帽间 天花灯带"
+    type: brightness
+    brightness_join: 109
+    color_temp_join: 309
+  - platform: crestron
+    name: "2F.女主衣帽间 吊灯"
+    type: brightness
+    brightness_join: 110
+  # 2F.女主卧卫生间
+  - platform: crestron
+    name: "2F.女主卧卫生间 天花灯带"
+    type: brightness
+    brightness_join: 111
+    color_temp_join: 311
+  - platform: crestron
+    name: "2F.女主卧卫生间 吊灯"
+    type: brightness
+    brightness_join: 112
+  - platform: crestron
+    name: "2F.女主卧卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 113
+    color_temp_join: 313
+  - platform: crestron
+    name: "2F.女主卧卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 114
+    color_temp_join: 314
+  - platform: crestron
+    name: "2F.女主卧卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 115
+    color_temp_join: 315
+  # 2F.女儿房
+  - platform: crestron
+    name: "2F.女儿房 天花灯带"
+    type: brightness
+    brightness_join: 116
+    color_temp_join: 316
+  - platform: crestron
+    name: "2F.女儿房 吊灯"
+    type: brightness
+    brightness_join: 117
+  # 2F.女儿卫生间
+  - platform: crestron
+    name: "2F.女儿卫生间 洗漱射灯"
+    type: brightness
+    brightness_join: 118
+    color_temp_join: 318
+  - platform: crestron
+    name: "2F.女儿卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 119
+    color_temp_join: 319
+  - platform: crestron
+    name: "2F.女儿卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 120
+    color_temp_join: 320
+  - platform: crestron
+    name: "2F.女儿卫生间 天花灯带"
+    type: brightness
+    brightness_join: 121
+    color_temp_join: 321
+  - platform: crestron
+    name: "2F.女儿卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 122
+    color_temp_join: 322
+  # 楼梯
+  - platform: crestron
+    name: "楼梯 B2-B1壁灯"
+    type: brightness
+    brightness_join: 123
+  - platform: crestron
+    name: "楼梯 B2-B1壁灯 2"
+    type: brightness
+    brightness_join: 124
+  - platform: crestron
+    name: "楼梯 B1-1F壁灯"
+    type: brightness
+    brightness_join: 125
+  - platform: crestron
+    name: "楼梯 B1-1F壁灯 2"
+    type: brightness
+    brightness_join: 126
+  - platform: crestron
+    name: "楼梯 1F-2F壁灯"
+    type: brightness
+    brightness_join: 127
+  - platform: crestron
+    name: "楼梯 1F-2F壁灯 2"
+    type: brightness
+    brightness_join: 128
+  # B1.客房卫生间
+  - platform: crestron
+    name: "B1.客房卫生间 淋浴射灯"
+    type: brightness
+    brightness_join: 129
+    color_temp_join: 329
+  - platform: crestron
+    name: "B1.客房卫生间 洗漱射灯"
+    type: brightness
+    brightness_join: 130
+    color_temp_join: 330
+  - platform: crestron
+    name: "B1.客房卫生间 如厕射灯"
+    type: brightness
+    brightness_join: 131
+    color_temp_join: 331
+  - platform: crestron
+    name: "B1.客房卫生间 壁龛灯"
+    type: brightness
+    brightness_join: 132
+    color_temp_join: 332
+
+switch:
+  # B2.车库
+  - platform: crestron
+    name: "B2.车库 柜灯"
+    on_join: 1
+    off_join: 2
+  - platform: crestron
+    name: "B2.车库 柜灯 2"
+    on_join: 3
+    off_join: 4
+  - platform: crestron
+    name: "B2.车库 柜灯 3"
+    on_join: 5
+    off_join: 6
+  # B2.玄关
+  - platform: crestron
+    name: "B2.玄关 壁灯"
+    on_join: 7
+    off_join: 8
+  - platform: crestron
+    name: "B2.玄关 画灯"
+    on_join: 9
+    off_join: 10
+  # B2.会客厅
+  - platform: crestron
+    name: "B2.会客厅 柜灯"
+    on_join: 11
+    off_join: 12
+  - platform: crestron
+    name: "B2.会客厅 画灯"
+    on_join: 13
+    off_join: 14
+  # B2.男主卧
+  - platform: crestron
+    name: "B2.男主卧 壁灯"
+    on_join: 15
+    off_join: 16
+  # B2.男主卫生间
+  - platform: crestron
+    name: "B2.男主卫生间 柜灯"
+    on_join: 17
+    off_join: 18
+  - platform: crestron
+    name: "B2.男主卫生间 镜前灯"
+    on_join: 19
+    off_join: 20
+  # B2.长辈房
+  - platform: crestron
+    name: "B2.长辈房 玄关柜灯"
+    on_join: 21
+    off_join: 22
+  # B2.长辈房卫生间
+  - platform: crestron
+    name: "B2.长辈房卫生间 镜灯"
+    on_join: 23
+    off_join: 24
+  # B2.工人房卫生间
+  - platform: crestron
+    name: "B2.工人房卫生间 柜灯"
+    on_join: 25
+    off_join: 26
+  # B2.公卫
+  - platform: crestron
+    name: "B2.公卫 洗手台灯"
+    on_join: 27
+    off_join: 28
+  # B2.洗衣房
+  - platform: crestron
+    name: "B2.洗衣房 柜灯"
+    on_join: 29
+    off_join: 30
+  - platform: crestron
+    name: "B2.洗衣房 柜灯 2"
+    on_join: 31
+    off_join: 32
+  # B2.茶水间
+  - platform: crestron
+    name: "B2.茶水间 柜灯"
+    on_join: 33
+    off_join: 34
+  # B2.书房
+  - platform: crestron
+    name: "B2.书房 主柜灯"
+    on_join: 35
+    off_join: 36
+  - platform: crestron
+    name: "B2.书房 侧柜灯"
+    on_join: 37
+    off_join: 38
+  # B1.卫生间
+  - platform: crestron
+    name: "B1.卫生间 镜灯"
+    on_join: 39
+    off_join: 40
+  # 1F.客餐厅
+  - platform: crestron
+    name: "1F.客餐厅 电梯壁灯"
+    on_join: 41
+    off_join: 42
+  # 1F.花园
+  - platform: crestron
+    name: "1F.花园 2.儿子房屋檐射灯"
+    on_join: 43
+    off_join: 44
+  - platform: crestron
+    name: "1F.花园 5.大门外绿植灯"
+    on_join: 45
+    off_join: 46
+  - platform: crestron
+    name: "1F.花园 6.入户绿植竹灯"
+    on_join: 47
+    off_join: 48
+  - platform: crestron
+    name: "1F.花园 7.竹灯"
+    on_join: 49
+    off_join: 50
+  - platform: crestron
+    name: "1F.花园 8.柠檬树灯"
+    on_join: 51
+    off_join: 52
+  - platform: crestron
+    name: "1F.花园 9.树灯"
+    on_join: 53
+    off_join: 54
+  - platform: crestron
+    name: "1F.花园 10.绿植灯"
+    on_join: 55
+    off_join: 56
+  - platform: crestron
+    name: "1F.花园 11.杜鹃树灯"
+    on_join: 57
+    off_join: 58
+  - platform: crestron
+    name: "1F.花园 12.绿植灯(书房)"
+    on_join: 59
+    off_join: 60
+  - platform: crestron
+    name: "1F.花园 13.踢脚灯(拱门)"
+    on_join: 61
+    off_join: 62
+  - platform: crestron
+    name: "1F.花园 14.踢脚灯(露台)"
+    on_join: 63
+    off_join: 64
+  - platform: crestron
+    name: "1F.花园 15.踢脚灯(书房)"
+    on_join: 65
+    off_join: 66
+  # 1F.厨房
+  - platform: crestron
+    name: "1F.厨房 柜灯"
+    on_join: 67
+    off_join: 68
+  # 1F.客卫
+  - platform: crestron
+    name: "1F.客卫 柜灯"
+    on_join: 69
+    off_join: 70
+  # 1F.儿子房
+  - platform: crestron
+    name: "1F.儿子房 衣帽间柜灯"
+    on_join: 71
+    off_join: 72
+  # 1F.儿子房卫生间
+  - platform: crestron
+    name: "1F.儿子房卫生间 镜子灯带"
+    on_join: 73
+    off_join: 74
+  # 2F.休闲区
+  - platform: crestron
+    name: "2F.休闲区 柜灯"
+    on_join: 75
+    off_join: 76
+  - platform: crestron
+    name: "2F.休闲区 电梯壁灯"
+    on_join: 77
+    off_join: 78
+  # 2F.休闲区阳台
+  - platform: crestron
+    name: "2F.休闲区阳台 阳台壁灯"
+    on_join: 79
+    off_join: 80
+  # 2F.女主衣帽间
+  - platform: crestron
+    name: "2F.女主衣帽间 岛台灯"
+    on_join: 81
+    off_join: 82
+  - platform: crestron
+    name: "2F.女主衣帽间 柜灯"
+    on_join: 83
+    off_join: 84
+  - platform: crestron
+    name: "2F.女主衣帽间 柜灯 2"
+    on_join: 85
+    off_join: 86
+  - platform: crestron
+    name: "2F.女主衣帽间 柜灯 3"
+    on_join: 87
+    off_join: 88
+  # 2F.女主卧卫生间
+  - platform: crestron
+    name: "2F.女主卧卫生间 柜灯"
+    on_join: 89
+    off_join: 90
+  - platform: crestron
+    name: "2F.女主卧卫生间 壁灯"
+    on_join: 91
+    off_join: 92
+  # 2F.女主卧阳台
+  - platform: crestron
+    name: "2F.女主卧阳台 阳台壁灯"
+    on_join: 93
+    off_join: 94
+  # 2F.女儿卫生间
+  - platform: crestron
+    name: "2F.女儿卫生间 柜灯"
+    on_join: 95
+    off_join: 96
+  # 后庭院
+  - platform: crestron
+    name: "后庭院 连廊竹灯(玄关)"
+    on_join: 97
+    off_join: 98
+  - platform: crestron
+    name: "后庭院 小桥灯"
+    on_join: 99
+    off_join: 100
+  - platform: crestron
+    name: "后庭院 凉亭罗汉松灯"
+    on_join: 101
+    off_join: 102
+  - platform: crestron
+    name: "后庭院 鱼池罗汉松灯"
+    on_join: 103
+    off_join: 104
+  - platform: crestron
+    name: "后庭院 小桥绿植灯"
+    on_join: 105
+    off_join: 106
+  - platform: crestron
+    name: "后庭院 小桥绿植灯 2"
+    on_join: 107
+    off_join: 108
+  - platform: crestron
+    name: "后庭院 后墙植物灯"
+    on_join: 109
+    off_join: 110
+  - platform: crestron
+    name: "后庭院 小榕树灯"
+    on_join: 111
+    off_join: 112
+  - platform: crestron
+    name: "后庭院 绿植灯(机房外)"
+    on_join: 113
+    off_join: 114
+  - platform: crestron
+    name: "后庭院 后庭绿植灯"
+    on_join: 115
+    off_join: 116
+  - platform: crestron
+    name: "后庭院 后庭树灯"
+    on_join: 117
+    off_join: 118
+  - platform: crestron
+    name: "后庭院 大凉亭壁灯"
+    on_join: 119
+    off_join: 120
+  - platform: crestron
+    name: "后庭院 小凉亭壁灯"
+    on_join: 121
+    off_join: 122
+  - platform: crestron
+    name: "后庭院 鱼池灯"
+    on_join: 123
+    off_join: 124
+  - platform: crestron
+    name: "后庭院 鱼池灯 2"
+    on_join: 125
+    off_join: 126
+  - platform: crestron
+    name: "后庭院 鱼池灯 3"
+    on_join: 127
+    off_join: 128
+  - platform: crestron
+    name: "后庭院 连廊踢脚灯"
+    on_join: 129
+    off_join: 130
+  - platform: crestron
+    name: "后庭院 大凉亭踢脚灯"
+    on_join: 131
+    off_join: 132
+  - platform: crestron
+    name: "后庭院 小凉亭踢脚灯"
+    on_join: 133
+    off_join: 134
+  # B2.连廊
+  - platform: crestron
+    name: "B2.连廊 连廊壁灯"
+    on_join: 135
+    off_join: 136
+  - platform: crestron
+    name: "B2.连廊 连廊书房壁灯"
+    on_join: 137
+    off_join: 138
+  - platform: crestron
+    name: "B2.连廊 连廊花园壁灯"
+    on_join: 139
+    off_join: 140
+  - platform: crestron
+    name: "B2.连廊 连廊壁灯 2"
+    on_join: 141
+    off_join: 142
+  - platform: crestron
+    name: "B2.连廊 连廊入户壁灯"
+    on_join: 143
+    off_join: 144
+  # B1.客房卫生间
+  - platform: crestron
+    name: "B1.客房卫生间 镜灯"
+    on_join: 145
+    off_join: 146

@@ -6,13 +6,11 @@ import logging
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
-    SUPPORT_SELECT_SOURCE,
-    SUPPORT_TURN_OFF,
-    SUPPORT_TURN_ON,
-    SUPPORT_VOLUME_MUTE,
-    SUPPORT_VOLUME_SET,
+    MediaPlayerEntityFeature,
+    MediaPlayerDeviceClass,
+    MediaPlayerState,
 )
-from homeassistant.const import STATE_ON, STATE_OFF, CONF_NAME
+from homeassistant.const import CONF_NAME
 from .const import (
     HUB,
     DOMAIN,
@@ -21,10 +19,11 @@ from .const import (
     CONF_SOURCE_NUM_JOIN,
     CONF_SOURCES,
 )
+from .schema import analog_join, digital_join
 
 _LOGGER = logging.getLogger(__name__)
 
-SOURCES_SCHEMA = vol.Schema (
+SOURCES_SCHEMA = vol.Schema(
     {
         cv.positive_int: cv.string,
     }
@@ -33,13 +32,14 @@ SOURCES_SCHEMA = vol.Schema (
 PLATFORM_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): cv.string,
-        vol.Required(CONF_MUTE_JOIN): cv.positive_int,           
-        vol.Required(CONF_SOURCE_NUM_JOIN): cv.positive_int,           
-        vol.Required(CONF_VOLUME_JOIN): cv.positive_int,
+        vol.Required(CONF_MUTE_JOIN): digital_join,
+        vol.Required(CONF_SOURCE_NUM_JOIN): analog_join,
+        vol.Required(CONF_VOLUME_JOIN): analog_join,
         vol.Required(CONF_SOURCES): SOURCES_SCHEMA,
     },
     extra=vol.ALLOW_EXTRA,
 )
+
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     hub = hass.data[DOMAIN][HUB]
@@ -48,49 +48,47 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 class CrestronRoom(MediaPlayerEntity):
+    _attr_should_poll = False
+    _attr_device_class = MediaPlayerDeviceClass.SPEAKER
+    _attr_supported_features = (
+        MediaPlayerEntityFeature.SELECT_SOURCE
+        | MediaPlayerEntityFeature.VOLUME_MUTE
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.TURN_ON
+        | MediaPlayerEntityFeature.TURN_OFF
+    )
+
     def __init__(self, hub, config):
         self._hub = hub
-        self._name = config.get(CONF_NAME)
-        self._device_class = "speaker"
-        self._supported_features = (
-            SUPPORT_SELECT_SOURCE
-            | SUPPORT_VOLUME_MUTE
-            | SUPPORT_VOLUME_SET
-            | SUPPORT_TURN_OFF
-        )
+        self._attr_name = config.get(CONF_NAME)
         self._mute_join = config.get(CONF_MUTE_JOIN)
         self._volume_join = config.get(CONF_VOLUME_JOIN)
         self._source_number_join = config.get(CONF_SOURCE_NUM_JOIN)
         self._sources = config.get(CONF_SOURCES)
+        self._attr_unique_id = f"crestron_media_{self._source_number_join}"
+        self._last_source_num = next(iter(self._sources), None)
 
     async def async_added_to_hass(self):
-        self._hub.register_callback(self.process_callback)
+        joins = [
+            f"d{self._mute_join}",
+            f"a{self._volume_join}",
+            f"a{self._source_number_join}",
+        ]
+        self._hub.register_callback(self.process_callback, joins=joins)
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
 
     async def process_callback(self, cbtype, value):
+        if cbtype == f"a{self._source_number_join}":
+            current = self._hub.get_analog(self._source_number_join)
+            if current and current in self._sources:
+                self._last_source_num = current
         self.async_write_ha_state()
 
     @property
     def available(self):
         return self._hub.is_available()
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def should_poll(self):
-        return False
-
-    @property
-    def device_class(self):
-        return self._device_class
-
-    @property
-    def supported_features(self):
-        return self._supported_features
 
     @property
     def source_list(self):
@@ -101,15 +99,13 @@ class CrestronRoom(MediaPlayerEntity):
         source_num = self._hub.get_analog(self._source_number_join)
         if source_num == 0:
             return None
-        else:
-            return self._sources[source_num]
+        return self._sources.get(source_num)
 
     @property
     def state(self):
         if self._hub.get_analog(self._source_number_join) == 0:
-            return STATE_OFF
-        else:
-            return STATE_ON
+            return MediaPlayerState.OFF
+        return MediaPlayerState.ON
 
     @property
     def is_volume_muted(self):
@@ -129,6 +125,11 @@ class CrestronRoom(MediaPlayerEntity):
         for input_num, name in self._sources.items():
             if name == source:
                 self._hub.set_analog(self._source_number_join, input_num)
+                return
+
+    async def async_turn_on(self):
+        if self._last_source_num is not None:
+            self._hub.set_analog(self._source_number_join, self._last_source_num)
 
     async def async_turn_off(self):
         self._hub.set_analog(self._source_number_join, 0)

@@ -3,42 +3,51 @@
 import voluptuous as vol
 import logging
 
-from homeassistant.helpers.entity import Entity
+from homeassistant.components.sensor import SensorEntity, CONF_STATE_CLASS
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS, CONF_UNIT_OF_MEASUREMENT
 import homeassistant.helpers.config_validation as cv
 
 from .const import HUB, DOMAIN, CONF_VALUE_JOIN, CONF_DIVISOR
+from .schema import analog_join
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORM_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): cv.string,
-        vol.Required(CONF_VALUE_JOIN): cv.positive_int,           
-        vol.Required(CONF_DEVICE_CLASS): cv.string,
-        vol.Required(CONF_UNIT_OF_MEASUREMENT): cv.string,
-        vol.Required(CONF_DIVISOR): int,
+        vol.Required(CONF_VALUE_JOIN): analog_join,
+        vol.Optional(CONF_DEVICE_CLASS): cv.string,
+        vol.Optional(CONF_STATE_CLASS): cv.string,
+        vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
+        vol.Optional(CONF_DIVISOR, default=1): vol.Coerce(float),
     },
     extra=vol.ALLOW_EXTRA,
 )
 
+
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     hub = hass.data[DOMAIN][HUB]
-    entity = [CrestronSensor(hub, config)]
-    async_add_entities(entity)
+    async_add_entities([CrestronSensor(hub, config)])
 
 
-class CrestronSensor(Entity):
+class CrestronSensor(SensorEntity):
+    _attr_should_poll = False
+
     def __init__(self, hub, config):
         self._hub = hub
-        self._name = config.get(CONF_NAME)
+        self._attr_name = config.get(CONF_NAME)
         self._join = config.get(CONF_VALUE_JOIN)
-        self._device_class = config.get(CONF_DEVICE_CLASS)
-        self._unit_of_measurement = config.get(CONF_UNIT_OF_MEASUREMENT)
-        self._divisor = config.get(CONF_DIVISOR, 1)
+        self._attr_device_class = config.get(CONF_DEVICE_CLASS)
+        self._attr_state_class = config.get(CONF_STATE_CLASS)
+        self._attr_native_unit_of_measurement = config.get(CONF_UNIT_OF_MEASUREMENT)
+        divisor = config.get(CONF_DIVISOR, 1)
+        self._divisor = divisor if divisor else 1
+        self._attr_unique_id = f"crestron_sensor_{self._join}"
 
     async def async_added_to_hass(self):
-        self._hub.register_callback(self.process_callback)
+        self._hub.register_callback(
+            self.process_callback, joins=[f"a{self._join}"]
+        )
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
@@ -51,21 +60,5 @@ class CrestronSensor(Entity):
         return self._hub.is_available()
 
     @property
-    def name(self):
-        return self._name
-
-    @property
-    def should_poll(self):
-        return False
-
-    @property
-    def state(self):
+    def native_value(self):
         return self._hub.get_analog(self._join) / self._divisor
-
-    @property
-    def device_class(self):
-        return self._device_class
-
-    @property
-    def unit_of_measurement(self):
-        return self._unit_of_measurement
