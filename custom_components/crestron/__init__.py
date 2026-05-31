@@ -174,13 +174,13 @@ class CrestronHub:
         except Exception:
             _LOGGER.exception("from_joins script for %s failed", cbtype)
 
-    def _set_join(self, join_key, result):
+    def _set_join(self, key, result):
         """Coerce template result and send to control system."""
-        kind = join_key[:1]
+        kind = key[:1]
         try:
-            number = int(join_key[1:])
+            number = int(key[1:])
         except ValueError:
-            _LOGGER.warning(f"Invalid join key: {join_key}")
+            _LOGGER.warning(f"Invalid join key: {key}")
             return
         if kind == "d":
             digital = to_digital(result)
@@ -206,4 +206,10 @@ class CrestronHub:
     async def sync_joins_to_hub(self):
         _LOGGER.debug("Syncing joins to control system")
         for join, template in self.to_hub.items():
-            self._set_join(join, template.async_render())
+            # Isolate per-join failures: a single bad template (e.g. referencing
+            # an unknown entity attribute) must not abort the rest of the sync
+            # or bubble up and tear down the XSIG connection.
+            try:
+                self._set_join(join, template.async_render())
+            except Exception:
+                _LOGGER.exception("Failed to sync join %s to control system", join)

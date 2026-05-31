@@ -62,7 +62,12 @@ class CrestronLight(LightEntity):
 
     @property
     def brightness(self):
-        return int(self._hub.get_analog(self._brightness_join) / 65535 * 255)
+        analog = self._hub.get_analog(self._brightness_join)
+        if analog <= 0:
+            return 0
+        # Never round a non-zero level down to 0: HA treats brightness 0 as off,
+        # which would contradict is_on (analog > 0) for very dim levels.
+        return max(1, round(analog / 65535 * 255))
 
     @property
     def color_temp_kelvin(self):
@@ -83,7 +88,7 @@ class CrestronLight(LightEntity):
     async def async_turn_on(self, **kwargs):
         if "brightness" in kwargs:
             self._hub.set_analog(
-                self._brightness_join, int(kwargs["brightness"] / 255 * 65535)
+                self._brightness_join, round(kwargs["brightness"] / 255 * 65535)
             )
         elif not self.is_on:
             # Only restore to full brightness when the light is currently off.
