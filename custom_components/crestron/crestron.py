@@ -158,7 +158,10 @@ class CrestronXsig:
                     join = ((data[0] & 0b00011111) << 7 | data[1]) + 1
                     value = ~data[0] >> 5 & 0b1
                     self._digital[join] = bool(value)
-                    _LOGGER.debug(f"Got Digital: {join} = {value}")
+                    # Lazy %-formatting: on a 1000+ join cold-start sync this
+                    # parser runs thousands of times in a burst; an f-string
+                    # would build the message even when debug is disabled.
+                    _LOGGER.debug("Got Digital: %s = %s", join, value)
                     await self._dispatch(f"d{join}", str(value))
 
                 # Analog Join: 11vv 0jjj  0jjj jjjj  0vvv vvvv  0vvv vvvv
@@ -176,7 +179,7 @@ class CrestronXsig:
                         (data[0] & 0b00110000) << 10 | data[2] << 7 | data[3]
                     )
                     self._analog[join] = value
-                    _LOGGER.debug(f"Got Analog: {join} = {value}")
+                    _LOGGER.debug("Got Analog: %s = %s", join, value)
                     await self._dispatch(f"a{join}", str(value))
 
                 # Serial Join: 1100 1jjj  0jjj jjjj  <UTF-8>  0xFF
@@ -195,11 +198,12 @@ class CrestronXsig:
                         _LOGGER.warning(f"Invalid UTF-8 on serial join {join}")
                         continue
                     self._serial[join] = string
-                    _LOGGER.debug(f"Got String: {join} = {string}")
+                    _LOGGER.debug("Got String: %s = %s", join, string)
                     await self._dispatch(f"s{join}", string)
 
                 else:
-                    _LOGGER.debug(f"Unknown Packet: {data.hex()}")
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug("Unknown Packet: %s", data.hex())
 
         except Exception as exc:
             _LOGGER.warning(f"XSIG connection error: {exc}")
@@ -257,7 +261,7 @@ class CrestronXsig:
             value & 0b01111111,
         )
         self._write(data)
-        _LOGGER.debug(f"Sending Analog: {join}, {value}")
+        _LOGGER.debug("Sending Analog: %s, %s", join, value)
 
     def set_digital(self, join, value):
         """Send Digital Join to Crestron XSIG symbol."""
@@ -273,7 +277,7 @@ class CrestronXsig:
             (join - 1) & 0b01111111,
         )
         self._write(data)
-        _LOGGER.debug(f"Sending Digital: {join}, {bool(value)}")
+        _LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
 
     def set_serial(self, join, string):
         """Send String Join to Crestron XSIG symbol."""
@@ -295,4 +299,4 @@ class CrestronXsig:
         data += encoded
         data += b"\xff"
         self._write(data)
-        _LOGGER.debug(f"Sending Serial: {join}, {string}")
+        _LOGGER.debug("Sending Serial: %s, %s", join, string)
