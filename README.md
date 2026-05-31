@@ -344,4 +344,17 @@ crestron:
 
 ## 测试
 
-当前仓库未附带自动化测试套件。`crestron.py`（XSIG 协议解析/序列化）与 `value_coercion.py`（模板值→XSIG 值转换）均为纯逻辑、不依赖 Home Assistant 运行时，便于后续补充 unittest；实体级测试则需要 `pytest-homeassistant-custom-component`。
+仓库自带一套 unittest 套件（`tests/`），覆盖不依赖 Home Assistant 运行时的纯逻辑模块。仅 `tests/test_schema.py` 需要 `voluptuous`（不装会自动跳过）：
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+覆盖范围：
+
+- `tests/test_xsig.py`：用真实 TCP server + ephemeral 端口跑 XSIG 协议端到端——digital/analog/serial 帧入站解析、字节流被拆碎重组、`set_*` 出站序列化、模拟越界裁剪、串行超长丢弃、`0xFB` 同步请求、按 join 精细回调过滤、回调异常隔离、可用性去抖与断连置不可用。
+- `tests/test_value_coercion.py`：纯函数测试模板值→XSIG 值转换（`unknown`/`unavailable`/`on/off`/数字字符串/越界裁剪等）。
+- `tests/test_schema.py`：`join_key` 与数字 join 校验器的格式/范围边界。
+- `tests/loader.py`：把上述模块挂到合成包下单独加载，绕开会 `import homeassistant` 的真实 `__init__.py`。
+
+> 实体级测试（light / switch / cover / climate / media_player）需要 `pytest-homeassistant-custom-component`，本仓库未集成。
