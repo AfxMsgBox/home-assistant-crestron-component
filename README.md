@@ -1,117 +1,151 @@
-# home-assistant-crestron-component
-Integration for Home Assistant for the Crestron XSIG symbol
+# Home Assistant Crestron XSIG 集成
 
-Currently supported devices:
-  - Lights
-  - Thermostats
-  - Shades 
-  - Binary Sensor
-  - Sensor 
-  - Switch 
-  - Media Player
+通过 Crestron 控制系统的 **XSIG（Intersystem Communication）** 符号，将 Crestron 系统的数字/模拟/串行 join 与 Home Assistant 实体双向打通。本仓库在原版基础上扩展了灯光色温、瞬动开关、瞬动窗帘等控制方式。
 
-## Adding the component to Home Assistant
+支持的实体类型：`light`、`climate`、`cover`、`switch`、`binary_sensor`、`sensor`、`media_player`。
 
-  - Add the `crestron` directory to `config/custom_components`
-  - Add the appropriate sections to `configuration.yaml` (see below)
-  - Add a `crestron:` block to the root of your `configuration.yaml`
-    - The component acts as a TCP server, so you must specify the port number to listen on using the `port:` parameter.
-  - Restart Home Assistant
+当前版本 `0.3.0`（YAML 配置，无 config flow）。详细变更见 [CHANGES.md](CHANGES.md)。
 
-## On the control system
- - Add a TCP/IP Client device to the control system
- - Configure the client device with the IP address of Home Assistant
- - Set the port number on the TCP/IP client symbol to match what you have configured for `port:` in `configuration.yaml`
- - Wire up logic to the `Connect` signal of your TCP/IP client (or just set it to `1` to have it connected all the time)
- - Add an "Intersystem Communication" symbol (quick key = xsig).
- - Connect the TX & RX of the XSIG symbol to the TCP/IP Client.
- - Attach your Analog, Serial and Digital signals to the input/output joins.
-   - Note you can use multiple XSIGs attached to the same TCP/IP Client serials.  I found its simplest to use one for digitals and one for analogs/serials to keep the numbering simpler (see below).
-  
-> Caution: Join numbers can be confusing when mixing analog/serials and digtals on the same XSIG symbol.  Even though the symbol starts numbering the digitals at "1", the XSIG will actually send the join number corresponding to where the signal appears sequentially in the entire list of signals.
-> For example, if you have 25 analog signals followed by 10 digital signals attached to the same XSIG, the digitals will be sent as 26-35, even though they are labeled 1 - 10 on the symbol.  You can either account for this in your configuration on the HA side, or just use one symbol for Analogs and another for Digitals.
-> Since the XSIG lets you combine Analog/Serial joins on the same symbol, you can have one XSIG for Analog/Serial joins and another for digitals.  This keeps the join numbering simple.
- 
-## Home Assistant configuration.yaml
+## 架构
 
-The `crestron:` entry is mandatory as is the `port:` definition under it.  So at a minimum, you will need:
+```
+┌──────────────────┐         TCP          ┌────────────────────────────┐
+│ Crestron 控制系统 │  ◄─ XSIG 二进制帧 ─► │  Home Assistant (本集成)    │
+│  ┌────────────┐  │                      │  ┌──────────────────────┐  │
+│  │ XSIG 符号  │◄─┼──────────────────────┼─►│ CrestronXsig (TCP)    │  │
+│  └────────────┘  │                      │  │  joins 状态字典        │  │
+│  数字/模拟/串行  │                      │  │  回调分发              │  │
+│      joins       │                      │  └──────────┬───────────┘  │
+└──────────────────┘                      │             │              │
+                                          │  ┌──────────▼───────────┐  │
+                                          │  │ CrestronHub          │  │
+                                          │  │  to_joins / from_joins│ │
+                                          │  └──────────┬───────────┘  │
+                                          │             │              │
+                                          │  ┌──────────▼───────────┐  │
+                                          │  │ 平台实体 (light等)    │  │
+                                          │  └──────────────────────┘  │
+                                          └────────────────────────────┘
+```
+
+- 所有 join 状态缓存在 `CrestronXsig` 内存字典中；任何 join 变更触发已注册的回调，实体收到后调用 `async_write_ha_state()`。
+
+### 连接关系
+
+**HA 是 TCP 服务端，Crestron 控制系统主动发起连接**。HA 不需要知道控制系统的 IP，控制系统断网/重启后会自动重连。
+
+```
+Crestron (TCP Client)  ──发起连接──►  HA (TCP Server, 监听 port)
+        ◄────────── 长连接，双向 XSIG 帧互传 ──────────►
+```
+
+生命周期：
+
+1. HA 启动时 `CrestronXsig.listen(port)` 在 `0.0.0.0:<port>` 开 server，等待连接。
+2. Crestron 侧的 TCP/IP Client 符号（IP=HA 主机，端口=HA 监听端口）`Connect` 信号置 1 后发起连接。
+3. HA 收到连接立刻发 `0xFD`，要求控制系统全量上报所有 join 当前值（冷启动同步）。
+4. 长连接期间双方按 XSIG 帧格式互发 join 变更。
+5. 控制系统可随时发 `0xFB`，触发 HA 重新下发所有 `to_joins` 配置的值。
+6. 连接断开时，所有实体的 `available` 变为 `False`。
+
+## 核心逻辑
+
+### XSIG 协议（`crestron.py`）
+
+按字节首位掩码区分三类帧：
+
+| 类型 | 字节数 | 帧格式（位）                                           | join 编号范围 | 值范围            |
+|------|--------|--------------------------------------------------------|---------------|-------------------|
+| 数字 | 2      | `100v jjjj  0jjj jjjj`（v=电平反相）                  | 1–4096        | 0/1               |
+| 模拟 | 4      | `110v vjjj  0jjj jjjj  0vvv vvvv  0vvv vvvv`           | 1–1024        | 0–65535           |
+| 串行 | 不定   | `1100 1jjj  0jjj jjjj  <UTF-8 bytes>  0xFF`            | 1–1024        | UTF-8 ≤ 252 字节  |
+
+控制字符：
+- `0xFD`（HA → 控制系统）：请求控制系统上报所有 join 当前值。
+- `0xFB`（控制系统 → HA）：请求 HA 下发所有已配置的 `to_joins` 值。
+
+> 串行长度按 **UTF-8 字节** 计算（不是字符数）：常见汉字一个 3 字节，因此 252 字节约等于 84 个汉字。超过时该帧会被丢弃并打 warning，不会污染连接。  
+> Join 编号越界（`d>4096` / `a/s>1024`）的写入会在运行时被丢弃；YAML schema 也会拒绝越界配置。
+
+### Hub 与回调（`__init__.py`）
+
+`CrestronHub` 包裹 `CrestronXsig`，承担两件事：
+1. 把 `to_joins` 中每条配置统一封装成 HA Template，通过 `async_track_template_result` 监听；模板结果变化即调用 `set_digital/set_analog/set_serial` 推给控制系统。
+2. 注册 join 变更回调，匹配 `from_joins` 配置并以 `value` 变量执行对应 HA `script`。数字 join 的 `1→0` 跳变会被忽略，避免点动按钮触发两次。
+
+### 平台实体
+
+所有平台实体均：
+- 在 `async_added_to_hass` 中向 hub 注册一个回调，回调实现就是 `self.async_write_ha_state()`——任何 join 变更都让该实体重新渲染状态。
+- 通过 hub 的 `is_available()` 反映 TCP 连接状态。
+- 写操作直接调 `hub.set_*`，按 XSIG 协议序列化下发。
+
+模拟 join 的 0–65535 范围在各平台内部映射到对应业务单位（亮度 0–255、位置 0–100、音量 0–1、温度 ×10 等）。
+
+## 安装
+
+1. 复制 `custom_components/crestron/` 到 HA 配置目录的 `config/custom_components/` 下。
+2. 在 `configuration.yaml` 配置 `crestron:` 块及各平台（见下文）。
+3. 重启 Home Assistant。
+
+## 控制系统侧配置
+
+1. 添加 **TCP/IP Client** 设备，IP 指向 HA 主机，端口与 HA `crestron.port` 一致。
+2. 把 `Connect` 信号置 1（或接业务逻辑）。
+3. 加入 **Intersystem Communication** 符号（快捷键 `xsig`），TX/RX 与 TCP/IP Client 互连。
+4. 把要交换的数字/模拟/串行信号挂到 XSIG 输入/输出 join 上。
+
+> **Join 编号陷阱**：同一 XSIG 上把模拟/串行与数字混挂时，数字 join 的实际编号是它在整个信号列表中的顺序位（例如 25 个模拟之后的第 1 个数字 = join 26）。推荐**用两个 XSIG 分别承载数字与模拟/串行**，让编号从 1 起。
+
+## HA 配置
+
+### 基础配置
 
 ```yaml
 crestron:
-  port: 16384
+  port: 10200          # 必填，HA 监听端口
+  to_joins:            # 可选：HA → 控制系统同步
+    - ...
+  from_joins:          # 可选：控制系统 → HA 触发脚本
+    - ...
 ```
 
-Then, if you want to make use of the control surface (touchpanels/kepads) syncing capability, you will need to add either a `to_joins`, a `from_joins` section, or both (see below).
+平台与设备类型对应关系：
 
-Finally, add entries for each HA component/platform type to your configuration.yaml for the appropriate entity type in Home Assistant:
+| Crestron 设备             | HA 平台          |
+|---------------------------|------------------|
+| 调光灯（模拟亮度+可选色温）| `light`          |
+| 恒温器                    | `climate`        |
+| 窗帘/卷帘                 | `cover`          |
+| 多区域音频切换器          | `media_player`   |
+| 只读数字 join             | `binary_sensor`  |
+| 只读模拟 join             | `sensor`         |
+| 可读写数字 join           | `switch`         |
 
-|Crestron Device|Home Assistant component type|
-|---|---|
-|Light|light|
-|Thermostat|climate|
-|Shades|cover|
-|read-only Digital Join|binary_sensor|
-|read-only Analog Join|sensor|
-|read-write Digital Join|switch|
-|Audio/Video Switcher|media_player|
+### Light（灯光）
 
->To be clear: if you configure multiple platforms (light, cover, climate, ...) plus synchronization in both directions, your configuration.yaml will look something like:
-
-```yaml
-crestron:
-  port: 32768
-  to_joins:
-  ...
-  from_joins:
-  ...
-light:
-  - platform: crestron
-  ...
-climate:
-  - platform: crestron
-  ...
-cover:
-  - platform: crestron
-  ...
-binary_sensor:
-  - platform: crestron
-  ...
-sensor:
-  - platform: crestron
-  ...
-switch:
-  - platform: crestron
-  ...
-media_player:
-  - platform: crestron
-  ...
-```
-
-### Lights
-
-This platform supports monochromatic "brightness" type lights (basically, anything that can have its brightness represented by an analog join on the control system).  I tested this with a CLX-1DIM8 panel and multiple CLW-DIMEX switches.
+支持亮度控制，可选色温（1500–5000 K，直接以 K 值写入模拟 join，需控制系统侧解析）。
 
 ```yaml
 light:
   - platform: crestron
-    name: "Dummy Light"
-    brightness_join: 9
+    name: "射灯"
     type: brightness
+    brightness_join: 1
+    color_temp_join: 101   # 可选
 ```
- - _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
- - _brightness_join_: The analog join on the XSIG symbol that represents the light's brightness.
- - _type_: The only supported value for now is *brightness*.  TODO: add support for other HA light types.
 
-### Thermostat
+- `brightness_join`：模拟 join，0–65535 ↔ HA 0–255。
+- `color_temp_join`：可选模拟 join，K 值直接读写。
 
-This platform should work with anything that looks like a CHV-TSTAT/THSTAT (analog joins for heat, cooling setpoints, digital joins for modes, fan modes, and relay states).  I tested this with multiple CHV-TSTAT and CHV-THSTATs.
+### Climate（恒温器）
 
->TODO: Add support for humidity control on CHV_THSTAT.
+适用于 CHV-TSTAT/THSTAT 类设备。温度传输时 ×10（740 = 74.0°）。
 
 ```yaml
 climate:
   - platform: crestron
-    name: "Upstairs Thermostat"
+    name: "二楼空调"
     heat_sp_join: 2
     cool_sp_join: 3
     reg_temp_join: 4
@@ -122,113 +156,116 @@ climate:
     fan_on_join: 5
     fan_auto_join: 6
     h1_join: 7
-    h2_join: 8
     c1_join: 9
     fa_join: 10
+    h2_join: 8        # 可选，二级加热
+    c2_join: 11       # 可选，二级制冷
 ```
 
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _heat_sp_join_: analog join that represents the heat setpoint
-- _cool_sp_join_: analog join that represents the cool setpoint
-- _reg_temp_join_: analog join that represents the room temperature read by the thermostat.  The CHV-TSTAT calls this the "regulation temperture" because it my be derived from averaging a bunch of room temperature sensors.  This is so called because it is the temperature used by the thermostat to decide when to make calls for heating or cooling.
-- _mode_heat_join_: digital feedback (read-only) join that is high when the thermostat is in heating mode
-- _mode_heat_join_: digital feedback (read-only) join that is high when the thermostat is in cooling mode
-- _mode_auto_join_: digital feedback (read-only) join that is high when the thermostat is in auto mode
-- _mode_off_join_: digital feedback (read-only) join that is high when the thermostat mode is set to off
-- _fan_on_join_: digital feedback (read-only) join that is high when the thermostat fan mode is set to (always) on
-- _fan_on_join_: digital feedback (read-only) join that is high when the thermostat fan mode is set to auto
-- _h1_join_: digital feedback (read-only) join that represents the state of the stage 1 heat relay
-- _h2_join_: digital feedback (read-only) join that represents the state of the stage 2 heat relay
-- _c1_join_: digital feedback (read-only) join that represents the state of the stage 1 cool relay
-- _fa_join_: digital feedback (read-only) join that represents the state of the stage fan relay
+- `*_sp_join`：制热/制冷设定点（模拟，×10）。
+- `reg_temp_join`：当前调节温度（模拟，×10）。
+- `mode_*_join`：模式反馈数字 join。
+- `fan_*_join`：风扇模式反馈数字 join。
+- `h1/h2/c1/c2/fa_join`：继电器动作反馈，用于推导 `hvac_action`。
 
-### Shades
+### Cover（窗帘/卷帘）
 
-This should work with any shade that uses an analog join for position plus digital joins for is_opening/closing, is_closed and stop.  I tested with CSM-QMTDC shades.
+支持两类驱动：**模拟位置**（CSM-QMTDC 等）或**瞬动开/关**（普通电机+继电器）。
 
 ```yaml
+# 模拟位置型
 cover:
   - platform: crestron
-    name: "Living Room Shades"
+    name: "客厅卷帘"
     type: shade
     pos_join: 26
     is_opening_join: 41
     is_closing_join: 42
-    stop_join: 43
     is_closed_join: 44
+    stop_join: 43
+
+# 瞬动开/关型
+  - platform: crestron
+    name: "茶室窗帘"
+    type: curtain
+    open_join: 15
+    close_join: 16
+    stop_join: 17
+    is_closed_join: 18
 ```
 
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _pos_join_: analog join that represents the shade position.  The value follow the typical definition for a Crestron analog shade (0 = closed, 65535 = open).
-- _is_opening_join_: digital feedback (read-only) join that is high when shade is in the process of opening
-- _is_closing_join_: digital feedback (read-only) join that is high when shade is in the process of closed
-- _is_closed_join_: digital feedback (read-only) join that is high when shade is fully closed
-- _stop_join_: digital join that can be pulsed high to stop the shade opening/closing
+- `type`：`shade`（卷帘）或 `curtain`（窗帘），影响设备类别。
+- `pos_join`：可选，模拟 join，0=全关 65535=全开；存在时启用 `SET_POSITION` 能力。
+- `open_join` / `close_join`：可选数字 join，写入时自动 200 ms 高电平脉冲。
+- `stop_join`：必填，停止脉冲。
+- `is_opening/closing/closed_join`：可选反馈。
+- 若同时配置 `open/close_join` 且无 `pos_join`，`set_position` 按 50% 阈值映射为开/关。
 
-### Binary Sensor
+### Switch（开关）
 
-This can represent any read-only digital signal on the control system.  I typically comment out the "in" signals on the XSIG symbol to keep the "in" and "out" signals lined up.
+支持两种工作模式：
+
+```yaml
+# 模式 A：单 join 直接置位
+switch:
+  - platform: crestron
+    name: "排气扇"
+    switch_join: 65
+
+# 模式 B：瞬动开/关 + 可选独立状态反馈
+  - platform: crestron
+    name: "灯组 1"
+    on_join: 1          # 触发开（200 ms 脉冲）
+    off_join: 2         # 触发关（200 ms 脉冲）
+    state_join: 50      # 可选，纯瞬动模式建议配置
+```
+
+三种合法组合（schema 会拒绝其他写法）：
+
+| 配置 | 写入 | 状态读取 |
+|---|---|---|
+| 仅 `switch_join` | 直写电平 | 同 `switch_join` |
+| `on_join` + `off_join`（+ 可选 `state_join`） | 各自 200 ms 脉冲 | `state_join` 优先；无 `state_join` 时用 HA 本地乐观状态 |
+
+不允许：
+- 单独 `on_join` 或单独 `off_join`（必须成对）
+- `switch_join` 与 `on_join`/`off_join` 混用（脉冲模式下要反馈请用 `state_join`）
+
+无反馈 join 的纯瞬动模式可以工作，但**重启或重载 HA 后真实状态会丢失**，强烈建议补 `state_join`。
+
+### Binary Sensor（只读数字）
 
 ```yaml
 binary_sensor:
   - platform: crestron
-    name: "Air Compressor"
+    name: "空压机"
     is_on_join: 57
     device_class: power
 ```
 
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _is_on_join_: digital feedback (read-only) join to represent as a binary sensor in Home Assistant
-- _device_class_: any device class [supported by the binary_sensor](https://www.home-assistant.io/integrations/binary_sensor/) integration.  This mostly affects how the value will be expressed in various UIs.
-
-### Sensor
-
-This can represent any read-only analog signal on the control system.  I typically comment out the "in" signals on the XSIG symbol to keep the "in" and "out" signals lined up.  Remember that an analog join on the control system is a 16-bit value that can range from 0-65535.  So for many symbol types (especially those representing a brightness or percent) you will need to make use of the `divisor:` parameter.
-
-Example divisors:
- - For sensors that return 10ths of a degree: 10
- - For joins that represent a percent: 655.35 (to convert the 1-65535 range to 1-100)
+### Sensor（只读模拟）
 
 ```yaml
 sensor:
   - platform: crestron
-    name: "Outside Temperature"
+    name: "室外温度"
     value_join: 1
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "F"
-    divisor: 10
+    state_class: measurement   # 可选，启用长期统计
+    divisor: 10                # 模拟值除以 10 得到工程值
 ```
 
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _value_join_: analog join to represent as a sensor in Home Assistant
-- _device_class_: any device class [supported by the sensor](https://www.home-assistant.io/integrations/sensor/) integration.  This mostly affects how the value will be expressed in various UIs.
-- _unit_of_measurement_: Unit of measurement appropriate for the device class as documented [here](https://developers.home-assistant.io/docs/core/entity/sensor/).
-- _divisor_: (optional) number to divide the analog join by to get the correct sensor value.  For example, a crestron temperature sensor returns tenths of a degree (754 represents 75.4 degrees), so you would use a divisor of 10.  Defaults to 1.
+`divisor` 常用：温度 ×10 → 10；百分比 → 655.35。可选填 `state_class`（`measurement` / `total` / `total_increasing`）以接入 HA 长期统计。
 
-### Switch
+### Media Player（多区域音频）
 
-This could represent any digital signal on the contol system that you want to be able to control/view from HA.
-
-```yaml
-switch:
-  - platform: crestron
-    name: "Dummy Switch"
-    switch_join: 65
-```
-
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _switch_join_: digital join to represent as a switch in Home Assistant
-
-### Media Player
-
-Use media_player to represent the output of a multi-zone switcher.  For example a PAD-8A is an 8x8 (8 inputs x 8 outputs) audio switcher.  This can be represented by 8 media player components (one for each output).  The component supports source selection (input selection) and volume + mute control.  So it is modeled as a "speaker" media player type in Home Assistant.
-
-This works rather nicely with the template media player integration to allow intuitive control of source devices connected to a multi-zone switcher like the PAD8A.
+适用于 PAD-8A 等多区域切换器，每路输出建一个实体。
 
 ```yaml
 media_player:
   - platform: crestron
-    name: "Kitchen Speakers"
+    name: "厨房音箱"
     mute_join: 27
     volume_join: 19
     source_number_join: 13
@@ -236,117 +273,85 @@ media_player:
       1: "Android TV"
       2: "Roku"
       3: "Apple TV"
-      4: "Chromecast"
       7: "Volumio"
-      8: "Crestron Streamer"
 ```
 
-- _name_: The entity id will be derived from this string (lower-cased with _ for spaces).  The friendly name will be set to this string.
-- _mute_join_: digital join that represents the mute state of the channel.  Note this is not a toggle. Both to and from the control system True = muted, False = not muted.  This might require some extra logic on the control system side if you only have logic that takes a toggle.
-- _volume_join_: analog join that represents the volume of the channel (0-65535)
-- _source_number_join_: analog join that represents the selected input for the output channel.  1 would correspond to input 1, 2 to input 2, and so on.
-- _sources_: a dictionary of _input_ to _name_ mappings.  The input number is the actual input (corresponding to the source_number_join) number, whereas the name will be shown in the UI when selecting inputs/sources.  So when a user selects the _name_ in the UI, the _source_number_join_ will be set to _input_.
+- `mute_join`：数字，True=静音（非 toggle，需控制系统侧直绑）。
+- `volume_join`：模拟，0–65535 ↔ HA 0–1。
+- `source_number_join`：模拟，写 0 即视为关机。
+- `sources`：`输入编号: 显示名` 映射。
 
-### Control Surface Sync
+## 控制面板同步（to_joins / from_joins）
 
-If you have Crestron touch panels or keypads, it can be useful to keep certain feedback/display joins in sync with Home Assistant state and to be able to invoke Home Assistant functionality (via a script) when a button is pressed or a join changes.  This functionality was added with v0.2.  There are two directions to sync: from HA states to control system joins and from control system joins to HA (using scripts).
+把 HA 状态推到 Crestron 触摸屏/按键面板的反馈 join，或在面板按下时触发 HA 脚本。
 
-There are two sections in `configuration.yaml` under the root `crestron:` key:
-- `to_joins` for syncing HA state to control system joins
-- `from_joins` for invoking HA scripts when control system joins change
+Join 写法：`d<N>` 数字、`a<N>` 模拟、`s<N>` 串行。Key 在配置加载时即校验格式与范围（`d1`–`d4096` / `a1`–`a1024` / `s1`–`s1024`），写错（如 `x1`、`d99999`、`a0`）会在 HA 启动期报错而不是运行期静默丢弃。
+
+### HA → 控制系统（`to_joins`）
 
 ```yaml
 crestron:
-  port: 5555
-  to_joins:
-  ...
-  from_joins:
-  ...
-```
-
- #### From HA to the Control System
-
-The `to_joins` section will list all the joins you want to map HA state changes to.  For each join, you list either:
- - a simple `entity_id` with optional `attribute` to map entity state directly to a join.
- - a `value_template` that lets you map almost any combination of state values (including the full power of [template logic](https://www.home-assistant.io/docs/configuration/templating/)) to the listed join.
-
-```yaml
-crestron:
-  port: 12345
-  ...
+  port: 10200
   to_joins:
     - join: d12
       entity_id: switch.compressor
     - join: a35
-      value_template: "{{value|int * 10}}"
+      value_template: "{{ value | int * 10 }}"
     - join: s4
-      value_template: "Current weather conditions: {{state('weather.home')}}"
+      value_template: "当前天气：{{ states('weather.home') }}"
     - join: a2
       entity_id: media_player.kitchen
       attribute: volume_level
-    - join: s4
-      value_template: "http://homeassistant:8123{{ state_attr('media_player.volumio', 'entity_picture') }}"
-```  
- 
- - _to_joins_: begins the section
- - _join_: for each join, list the join type and number.  The type prefix is 'a' for analog joins, 'd' for digital joins and 's' for serial joins.  So s32 would be serial join #32.  The value of this join will be set to either the state/attribute of the configured entity ID or the output of the configured template.
- - _entity_id_: the entity ID to sync this join to.  If no _attribute_ is listed the join will be set to entity's state value whenever the state changes.
- - _attribute_: use the listed attribute value for the join value instead of the entity's state.
- - _value_template_: used instead of _entity_id_/_attribute_ if you need more flexibility on how to set the value (prefix/suffix or math operations) or even to set the join value based on multiple entity IDs/state values.  You have the full power of [HA templating](https://www.home-assistant.io/docs/configuration/templating/) to work with here.
+```
 
- >Note that when you specify an `entity_id`, all changes to that entity_id will result in a join update being sent to the control system.  When you specify a `value_template` a change to any referenced entity will trigger a join update.
+三种写法二选一：
+- `entity_id`：以实体 state 作为值。
+- `entity_id` + `attribute`：以实体属性作为值。
+- `value_template`：任意 [HA 模板](https://www.home-assistant.io/docs/configuration/templating/)，可引用多个实体。
 
- #### From Control System to HA
- 
- The `from_joins` section will list all the joins you want to track from the control system.  When each join changes the configured functionality will be invoked.
+数字 join 接受 `on/off/True/False`；模拟 join 自动 `int()`；串行 join 自动 `str()`。
 
- ```yaml
+### 控制系统 → HA（`from_joins`）
+
+```yaml
 crestron:
-  port: 54321
-  ...
+  port: 10200
   from_joins:
     - join: a2
       script:
         service: input_text.set_value
         data:
-          entity_id: input_text.test
-          value: "Master BR temperature is {{value|int / 10}}"
+          entity_id: input_text.master_br_temp
+          value: "主卧温度 {{ value | int / 10 }}"
     - join: d35
       script:
         service: media_player.media_previous_track
         data:
           entity_id: media_player.volumio
-    - join: d36
-      script:
-        service: media_player.media_play_pause
-        data:
-          entity_id: media_player.volumio
-    - join: d37
-      script:
-        service: media_player.media_next_track
-        data:
-          entity_id: media_player.volumio
-    - join: d74
-      script:
-        service: media_player.select_source
-        data:
-          entity_id: media_player.volumio
-          source: "{{state_attr('media_player.volumio', 'source_list')[0]}}"
-    - join: d75
-      script:
-        service: media_player.select_source
-        data:
-          entity_id: media_player.volumio
-          source: "{{state_attr('media_player.volumio', 'source_list')[1]}}"
-    - join: d76
-      script:
-        service: media_player.select_source
-        data:
-          entity_id: media_player.volumio
-          source: "{{state_attr('media_player.volumio', 'source_list')[2]}}"
 ```
 
- - _from_joins_: begins the section
- - _join_: for each join, list the join type and number.  The type prefix is 'a' for analog joins, 'd' for digital joins and 's' for serial joins.  So s32 would be serial join #32.  Any change in the listed join will invoke the configured behavior.
- - _script_: This is a standard HA script.  It follows the [HA scripting sytax](https://www.home-assistant.io/docs/scripts/).
+`script` 段为标准 [HA Script](https://www.home-assistant.io/docs/scripts/) 语法。脚本上下文中 `value` 变量即该 join 的当前值。数字 join 仅在 `0→1` 上升沿触发（按钮点动只会执行一次）。
 
+## 稳定性说明
+
+- **HA 是 server**：Crestron 主动连，断网/重启会自动重连，HA 不需要配置目标 IP。
+- **新连接接管**：旧 TCP 连接未正常关闭时，新连接到来会替换它，旧连接 finally 不再误置 `available=False`。
+- **回调异常隔离**：单个 `from_joins` 脚本或实体回调抛异常不会拖垮 TCP 会话——错误会被记录并跳过，其他订阅照常工作。
+- **可用性去抖**：`_notify_available` 在状态未变化时静默，避免实体反复刷新。
+- **乐观状态**：纯瞬动开关（仅 `on_join + off_join`，无 `state_join`）写出后立即更新 HA 本地状态；**重启 HA 会丢失真实状态**，建议补 `state_join`。
+
+## 测试
+
+仓库提供 unittest 套件（不依赖 Home Assistant 环境，仅在校验 `schema.py` 时需要 `voluptuous`）：
+
+```bash
+python3 -m unittest discover tests
+```
+
+覆盖范围：
+
+- `tests/test_xsig.py`：用真实 TCP server + ephemeral 端口跑 XSIG 协议端到端——digital/analog/serial 帧入站解析、字节流被拆碎、`set_*` 写出回环、模拟越界裁剪、UTF-8 长度边界、回调隔离、可用性去抖、按 join 精细回调过滤。
+- `tests/test_value_coercion.py`：纯函数测试模板值→XSIG 值的转换（`unknown`/`unavailable`/`on/off`/数字字符串/越界等）。
+- `tests/test_schema.py`：`join_key` 校验器边界。
+
+实体级测试（light / switch / cover / climate / media_player）需要 `pytest-homeassistant-custom-component`，本仓库未集成。
