@@ -83,7 +83,11 @@ class CrestronXsig:
             )
 
     async def _dispatch(self, cbtype, value):
-        join_targets = self._join_callbacks.get(cbtype, ())
+        # Snapshot the callback sets before iterating: each callback is awaited,
+        # and during those awaits another task (e.g. an entity being added or
+        # removed) may register/remove callbacks and mutate these sets, which
+        # would otherwise raise "Set changed size during iteration".
+        join_targets = tuple(self._join_callbacks.get(cbtype, ()))
         if not self._broadcast_callbacks:
             for cb in join_targets:
                 await self._safe_call(cb, cbtype, value)
@@ -93,7 +97,7 @@ class CrestronXsig:
         for cb in join_targets:
             seen.add(cb)
             await self._safe_call(cb, cbtype, value)
-        for cb in self._broadcast_callbacks:
+        for cb in tuple(self._broadcast_callbacks):
             if cb not in seen:
                 await self._safe_call(cb, cbtype, value)
 
@@ -146,7 +150,7 @@ class CrestronXsig:
                     break
                 data = head + second
 
-                # Digital Join: 100v jjjj  0jjj jjjj
+                # Digital Join: 10v jjjjj  0jjj jjjj  (v = inverted level)
                 if (
                     data[0] & 0b11000000 == 0b10000000
                     and data[1] & 0b10000000 == 0b00000000
@@ -157,7 +161,7 @@ class CrestronXsig:
                     _LOGGER.debug(f"Got Digital: {join} = {value}")
                     await self._dispatch(f"d{join}", str(value))
 
-                # Analog Join: 110v vjjj  0jjj jjjj  0vvv vvvv  0vvv vvvv
+                # Analog Join: 11vv 0jjj  0jjj jjjj  0vvv vvvv  0vvv vvvv
                 elif (
                     data[0] & 0b11001000 == 0b11000000
                     and data[1] & 0b10000000 == 0b00000000

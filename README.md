@@ -4,7 +4,7 @@
 
 支持的实体类型：`light`、`climate`、`cover`、`switch`、`binary_sensor`、`sensor`、`media_player`。
 
-当前版本 `0.3.0`（YAML 配置，无 config flow）。详细变更见 [CHANGES.md](CHANGES.md)。
+当前版本 `0.3.0`（YAML 配置，无 config flow）。
 
 ## 架构
 
@@ -342,16 +342,4 @@ crestron:
 
 ## 测试
 
-仓库提供 unittest 套件（不依赖 Home Assistant 环境，仅在校验 `schema.py` 时需要 `voluptuous`）：
-
-```bash
-python3 -m unittest discover tests
-```
-
-覆盖范围：
-
-- `tests/test_xsig.py`：用真实 TCP server + ephemeral 端口跑 XSIG 协议端到端——digital/analog/serial 帧入站解析、字节流被拆碎、`set_*` 写出回环、模拟越界裁剪、UTF-8 长度边界、回调隔离、可用性去抖、按 join 精细回调过滤。
-- `tests/test_value_coercion.py`：纯函数测试模板值→XSIG 值的转换（`unknown`/`unavailable`/`on/off`/数字字符串/越界等）。
-- `tests/test_schema.py`：`join_key` 校验器边界。
-
-实体级测试（light / switch / cover / climate / media_player）需要 `pytest-homeassistant-custom-component`，本仓库未集成。
+当前仓库未附带自动化测试套件。`crestron.py`（XSIG 协议解析/序列化）与 `value_coercion.py`（模板值→XSIG 值转换）均为纯逻辑、不依赖 Home Assistant 运行时，便于后续补充 unittest；实体级测试则需要 `pytest-homeassistant-custom-component`。
