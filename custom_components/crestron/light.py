@@ -106,4 +106,14 @@ class CrestronLight(LightEntity):
             self._hub.set_analog(self._color_temp_join, color_temp)
 
     async def async_turn_off(self, **kwargs):
+        # Crestron dimmer blocks commonly act only on a *change* of the level
+        # value they receive from HA. When the light was switched on at the
+        # physical keypad, HA has never commanded a level, so a bare 0 ("off")
+        # can look like "no change" to the control system and be ignored — the
+        # bulb stays lit. Re-assert the current level first so the following 0
+        # is an unambiguous high->0 transition. This automates the manual
+        # "nudge the brightness, then turn off" workaround.
+        current = self._hub.get_analog(self._brightness_join)
+        if current > 0:
+            self._hub.set_analog(self._brightness_join, current)
         self._hub.set_analog(self._brightness_join, 0)
