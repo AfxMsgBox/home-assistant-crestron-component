@@ -106,13 +106,10 @@ class CrestronLight(LightEntity):
             self._hub.set_analog(self._color_temp_join, color_temp)
 
     async def async_turn_off(self, **kwargs):
-        # Crestron dimmer blocks commonly act only on a *change* of the level
-        # value they receive from HA. When the light was switched on at the
-        # physical keypad, HA has never commanded a level, so a bare 0 ("off")
-        # can look like "no change" to the control system and be ignored — the
-        # bulb stays lit. Re-assert the current level first so the following 0
-        # is an unambiguous high->0 transition. This automates the manual
-        # "nudge the brightness, then turn off" workaround.
+        # 快思聪调光模块通常只在 HA 下发的电平“发生变化”时才动作。
+        # 物理开关开灯后，HA 从未主动下发过电平，直接写 0 在控制系统看来
+        # 像“没变化”而被忽略，灯泡关不掉。所以先把当前电平原样重发一次，
+        # 让紧接着的 0 成为一次明确的“高→0”跳变——等价于手动“先调亮度再关”。
         current = self._hub.get_analog(self._brightness_join)
         if current > 0:
             self._hub.set_analog(self._brightness_join, current)
