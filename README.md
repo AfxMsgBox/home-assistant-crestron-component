@@ -117,7 +117,7 @@ crestron:
 | Crestron 设备             | HA 平台          |
 |---------------------------|------------------|
 | 调光灯（模拟亮度+可选色温）| `light`          |
-| 恒温器                    | `climate`        |
+| 空调（开关/设定点/风速）  | `climate`        |
 | 窗帘/卷帘                 | `cover`          |
 | 多区域音频切换器          | `media_player`   |
 | 只读数字 join             | `binary_sensor`  |
@@ -140,35 +140,35 @@ light:
 - `brightness_join`：模拟 join，0–65535 ↔ HA 0–255。
 - `color_temp_join`：可选模拟 join，K 值直接读写。
 
-### Climate（恒温器）
+### Climate（空调）
 
-适用于 CHV-TSTAT/THSTAT 类设备。温度传输时 ×10（740 = 74.0°）。
+面向「开关 + 单设定点 + 风速 + 当前温度」的空调：**不开放模式选择**，当前在制冷/制热/除湿/送风通过只读的 `hvac_action` 显示。温度按**原值整数**读写（26 = 26°C，不缩放）。
 
 ```yaml
 climate:
   - platform: crestron
-    name: "二楼空调"
-    heat_sp_join: 2
-    cool_sp_join: 3
-    reg_temp_join: 4
-    mode_heat_join: 1
-    mode_cool_join: 2
-    mode_auto_join: 3
-    mode_off_join: 4
-    fan_on_join: 5
-    fan_auto_join: 6
-    h1_join: 7
-    c1_join: 9
-    fa_join: 10
-    h2_join: 8        # 可选，二级加热
-    c2_join: 11       # 可选，二级制冷
+    name: "B2.洗衣房 空调"
+    on_join: 505          # 数字：开机命令（200ms 脉冲）
+    off_join: 506         # 数字：关机命令（200ms 脉冲）
+    set_temp_join: 414    # 模拟：温度设定点（原值整数）
+    reg_temp_join: 415    # 模拟：当前室温（原值整数）
+    mode_cool_join: 507   # 可选：制冷 运行反馈
+    mode_heat_join: 508   # 可选：制热 运行反馈
+    mode_fan_join: 510    # 可选：通风 运行反馈
+    mode_dry_join: 511    # 可选：除湿 运行反馈
+    fan_low_join: 512     # 可选：低速
+    fan_med_join: 513     # 可选：中速
+    fan_high_join: 514    # 可选：高速
+    fan_auto_join: 515    # 可选：自动
 ```
 
-- `*_sp_join`：制热/制冷设定点（模拟，×10）。
-- `reg_temp_join`：当前调节温度（模拟，×10）。
-- `mode_*_join`：模式反馈数字 join。
-- `fan_*_join`：风扇模式反馈数字 join。
-- `h1/h2/c1/c2/fa_join`：继电器动作反馈，用于推导 `hvac_action`。
+- `on_join` / `off_join`：必填，开/关机点动命令。
+- `set_temp_join` / `reg_temp_join`：必填，设定点 / 当前温度（模拟，原值整数）。
+- `mode_*_join`：可选，运行模式反馈。**任一为 1 即视为开机**（HA 据此判断 on/off）；同时用于显示 `hvac_action`（制冷/制热/除湿/送风）。
+- `fan_*_join`：可选，风速反馈/选择（设选中、清其余）；配了任一即启用风速选择（low/medium/high/auto）。
+- HA 模式只有 `off` / `auto`（auto 即"开机"），开关即通过它或电源开关完成。
+
+> 字段名/编号可由 `tools/xlsx_to_yaml.py` 从快思聪 join 表（xlsx）自动生成，见「批量生成配置」。
 
 ### Cover（窗帘/卷帘）
 
@@ -334,6 +334,33 @@ crestron:
 
 `script` 段为标准 [HA Script](https://www.home-assistant.io/docs/scripts/) 语法。脚本上下文中 `value` 变量即该 join 的当前值。数字 join 仅在 `0→1` 上升沿触发（按钮点动只会执行一次）。
 
+## 批量生成配置（xlsx → YAML）
+
+`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成按 HA 平台分好的 YAML，省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
+
+```bash
+python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
+```
+
+工作簿约定每个 sheet 一类设备：
+
+| sheet | 列 | 产出 |
+|-------|----|------|
+| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `light.yaml` + `switch.yaml` |
+| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `climate.yaml` |
+| `窗帘` | 楼层 房间 名称 开 关 停止 | `cover.yaml` |
+
+- **灯光按"列是否有值"判断能力**：有 `亮度` → light（有 `色温` 再加色温）；只有 `开/关` → switch；空行/占位（如 `//`）自动跳过。
+- 实体名 = `楼层.房间 名字`，同名自动追加 ` 2`/` 3`。
+- 输出文件是实体**列表**，直接 `!include` 到对应平台键：
+
+```yaml
+light:   !include crestron/light.yaml
+switch:  !include crestron/switch.yaml
+cover:   !include crestron/cover.yaml
+climate: !include crestron/climate.yaml
+```
+
 ## 稳定性说明
 
 - **HA 是 server**：Crestron 主动连，断网/重启会自动重连，HA 不需要配置目标 IP。
@@ -355,6 +382,7 @@ python3 -m unittest discover -s tests
 - `tests/test_xsig.py`：用真实 TCP server + ephemeral 端口跑 XSIG 协议端到端——digital/analog/serial 帧入站解析、字节流被拆碎重组、`set_*` 出站序列化、模拟越界裁剪、串行超长丢弃、`0xFB` 同步请求、按 join 精细回调过滤、回调异常隔离、可用性去抖与断连置不可用。
 - `tests/test_value_coercion.py`：纯函数测试模板值→XSIG 值转换（`unknown`/`unavailable`/`on/off`/数字字符串/越界裁剪等）。
 - `tests/test_schema.py`：`join_key` 与数字 join 校验器的格式/范围边界。
+- `tests/test_xlsx_to_yaml.py`：`tools/xlsx_to_yaml.py` 的行→实体映射（灯光拆分 light/switch、空调字段、窗帘 type、重名去重）。
 - `tests/loader.py`：把上述模块挂到合成包下单独加载，绕开会 `import homeassistant` 的真实 `__init__.py`。
 
 > 实体级测试（light / switch / cover / climate / media_player）需要 `pytest-homeassistant-custom-component`，本仓库未集成。
