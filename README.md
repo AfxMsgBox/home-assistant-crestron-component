@@ -366,32 +366,33 @@ crestron:
 
 ## 批量生成配置（xlsx → YAML）
 
-`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成按 HA 平台分好的 YAML，省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
+`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成 **HA package 文件，一个设备类型（sheet）一个文件**，省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
 
 ```bash
 python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 ```
 
-工作簿约定每个 sheet 一类设备：
+工作簿约定每个 sheet 一类设备，每个 sheet 产出**一个 package 文件**（文件内含多个平台段）：
 
-| sheet | 列 | 产出 |
-|-------|----|------|
-| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `light.yaml` + `switch.yaml` |
-| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `switch.yaml`(电源) + `number.yaml`(温度) + `select.yaml`(风速) + `sensor.yaml`(室温/模式) |
-| `窗帘` | 楼层 房间 名称 开 关 停止 | `cover.yaml` |
+| sheet | 列 | 产出文件 | 含平台段 |
+|-------|----|---------|---------|
+| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `lights.yaml` | `light:` + `switch:` |
+| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `aircon.yaml` | `switch:`+`number:`+`select:`+`sensor:` |
+| `窗帘` | 楼层 房间 名称 开 关 停止 | `covers.yaml` | `cover:` |
 
 - **灯光按"列是否有值"判断能力**：有 `亮度` → light（有 `色温` 再加色温）；只有 `开/关` → switch；空行/占位（如 `//`）自动跳过。
+- **空调拆成 5 个实体**（电源 switch / 温度 number / 风速 select / 室温 sensor / 模式 sensor），但靠相同 `device_id` 在 HA 里**归到同一个设备**。
 - 实体名 = `楼层.房间 名字`，同名自动追加 ` 2`/` 3`。
-- 输出文件是实体**列表**，直接 `!include` 到对应平台键：
+- 文件名用 ASCII slug（HA package 名要求 slug），文件内容/注释仍是中文。
+
+把产出目录（如 `crestron_packages/`）放到 HA 配置目录下，在 `configuration.yaml` **启用 packages**（一次即可）：
 
 ```yaml
-light:   !include crestron/light.yaml
-switch:  !include crestron/switch.yaml
-cover:   !include crestron/cover.yaml
-number:  !include crestron/number.yaml
-select:  !include crestron/select.yaml
-sensor:  !include crestron/sensor.yaml
+homeassistant:
+  packages: !include_dir_named crestron_packages/
 ```
+
+HA 会自动把各 package 文件里的同名平台段合并（例如 `lights.yaml` 的继电器开关与 `aircon.yaml` 的空调电源会一起归到 `switch`）。
 
 ## 稳定性说明
 

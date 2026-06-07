@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Generate per-platform Crestron YAML from a multi-sheet xlsx join table.
+"""Generate Crestron HA *package* YAML from a multi-sheet xlsx join table.
 
 Usage:
     python3 tools/xlsx_to_yaml.py <input.xlsx> <output_dir>
 
-The workbook has one sheet per device category:
-  - 灯光  -> light.yaml + switch.yaml   (split by which columns carry a join)
-  - 空调  -> climate.yaml
-  - 窗帘  -> cover.yaml
+One file per device-type sheet (a Home Assistant package = one file holding
+several platform sections):
+  - 灯光  -> lights.yaml   (light: + switch: sections)
+  - 空调  -> aircon.yaml   (switch: + number: + select: + sensor: sections)
+  - 窗帘  -> covers.yaml   (cover: section)
 
-Each output file is a YAML *list* of entities, ready to be pulled into
-configuration.yaml with e.g.  ``light: !include light.yaml``.
+Enable the output in configuration.yaml with:
+    homeassistant:
+      packages: !include_dir_named crestron_packages/
 
 Pure standard library — no openpyxl/pandas/PyYAML required.
 """
@@ -276,8 +278,22 @@ def dedup_names(entities):
 
 
 # --------------------------------------------------------------------------- #
-# YAML emitting (hand-rolled; entities are flat scalars)
+# YAML emitting (hand-rolled) — one HA "package" file per sheet
 # --------------------------------------------------------------------------- #
+# One file per device-type sheet. HA package names must be slugs (lowercase
+# ASCII), so the file stems are slugs even though the content stays Chinese.
+SHEET_SLUG = {"灯光": "lights", "空调": "aircon", "窗帘": "covers"}
+
+# Stable, readable order for platform sections within a package file.
+_PLATFORM_ORDER = ["light", "switch", "cover", "number", "select",
+                   "sensor", "binary_sensor", "media_player", "climate"]
+
+
+def _slug(name):
+    s = "".join(c if (c.isalnum() and c.isascii()) else "_" for c in name)
+    return s.strip("_").lower() or "package"
+
+
 def _yaml_scalar(value):
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -291,30 +307,50 @@ def _yaml_scalar(value):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def emit_yaml(entities, source, platform):
+def _emit_entity(ent, indent):
+    """Render one entity as YAML list-item lines; '- ' bullet at `indent` cols."""
+    pad = " " * indent
+    lines = []
+    first = True
+    for key, value in ent.items():
+        if key == "_group":
+            continue
+        bullet = "- " if first else "  "
+        if isinstance(value, dict):
+            lines.append(f"{pad}{bullet}{key}:")
+            for k, v in value.items():
+                lines.append(f"{pad}    {_yaml_scalar(k)}: {_yaml_scalar(v)}")
+        else:
+            lines.append(f"{pad}{bullet}{key}: {_yaml_scalar(value)}")
+        first = False
+    return lines
+
+
+def emit_package(platforms, source, sheet):
+    """platforms: {platform: [entities]} -> one HA package file (a mapping of
+    platform -> entity list)."""
     lines = [
-        f"# Generated from {source} by tools/xlsx_to_yaml.py",
-        f"# Include in configuration.yaml as:  {platform}: !include {platform}.yaml",
+        f'# Generated from {source} sheet "{sheet}" by tools/xlsx_to_yaml.py',
+        "# Enable in configuration.yaml:",
+        "#   homeassistant:",
+        "#     packages: !include_dir_named crestron_packages/",
         "",
     ]
-    last_group = None
-    for ent in entities:
-        group = ent.get("_group")
-        if group and group != last_group:
-            lines.append(f"# {group}")
-            last_group = group
-        first = True
-        for key, value in ent.items():
-            if key == "_group":
-                continue
-            prefix = "- " if first else "  "
-            if isinstance(value, dict):
-                lines.append(f"{prefix}{key}:")
-                for k, v in value.items():
-                    lines.append(f"    {_yaml_scalar(k)}: {_yaml_scalar(v)}")
-            else:
-                lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
-            first = False
+    ordered = sorted(
+        platforms,
+        key=lambda p: (_PLATFORM_ORDER.index(p) if p in _PLATFORM_ORDER
+                       else len(_PLATFORM_ORDER), p),
+    )
+    for platform in ordered:
+        lines.append(f"{platform}:")
+        last_group = None
+        for ent in platforms[platform]:
+            group = ent.get("_group")
+            if group and group != last_group:
+                lines.append(f"  # {group}")
+                last_group = group
+            lines.extend(_emit_entity(ent, 2))
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -323,14 +359,16 @@ def emit_yaml(entities, source, platform):
 # --------------------------------------------------------------------------- #
 def generate(xlsx_path, out_dir):
     sheets = parse_xlsx(xlsx_path)
-    by_platform = {}  # platform -> list of entities (in sheet order)
     source = os.path.basename(xlsx_path)
+    by_sheet = {}     # sheet -> {platform: [entities]}  (one file per sheet)
+    by_platform = {}  # platform -> [entities]           (for global de-dup)
 
     for sheet_name, rows in sheets.items():
         builder = SHEET_BUILDERS.get(sheet_name)
         if builder is None:
             print(f"  [skip] unknown sheet {sheet_name!r}")
             continue
+        bucket = by_sheet.setdefault(sheet_name, {})
         skipped = 0
         for row in rows:
             result = builder(row)
@@ -340,21 +378,25 @@ def generate(xlsx_path, out_dir):
             if isinstance(result, tuple):
                 result = [result]  # single-entity builders
             for platform, ent in result:
+                bucket.setdefault(platform, []).append(ent)
                 by_platform.setdefault(platform, []).append(ent)
         if skipped:
             print(f"  [{sheet_name}] skipped {skipped} placeholder/empty row(s)")
 
-    os.makedirs(out_dir, exist_ok=True)
-    for platform, entities in sorted(by_platform.items()):
-        before = [e["name"] for e in entities]
+    # Global per-platform name de-dup: HA merges same-platform lists across all
+    # package files, so duplicate friendly names must be resolved globally.
+    for entities in by_platform.values():
         dedup_names(entities)
-        renamed = sum(1 for a, e in zip(before, entities) if a != e["name"])
-        path = os.path.join(out_dir, f"{platform}.yaml")
+
+    os.makedirs(out_dir, exist_ok=True)
+    for sheet_name, platforms in by_sheet.items():
+        slug = SHEET_SLUG.get(sheet_name) or _slug(sheet_name)
+        path = os.path.join(out_dir, f"{slug}.yaml")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(emit_yaml(entities, source, platform))
-        note = f" ({renamed} renamed for dup names)" if renamed else ""
-        print(f"  wrote {path}: {len(entities)} entities{note}")
-    return by_platform
+            f.write(emit_package(platforms, source, sheet_name))
+        counts = ", ".join(f"{p}:{len(e)}" for p, e in platforms.items())
+        print(f"  wrote {path}  ({counts})")
+    return by_sheet
 
 
 def main(argv):
