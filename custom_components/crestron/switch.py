@@ -7,6 +7,7 @@ import logging
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
+from homeassistant.helpers.restore_state import RestoreEntity
 from .const import (
     HUB,
     DOMAIN,
@@ -70,7 +71,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(CrestronSwitch(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
-class CrestronSwitch(SwitchEntity):
+class CrestronSwitch(SwitchEntity, RestoreEntity):
     _attr_should_poll = False
 
     def __init__(self, hub, config):
@@ -99,11 +100,19 @@ class CrestronSwitch(SwitchEntity):
         elif self._switch_join is not None:
             joins.append(f"d{self._switch_join}")
         self._hub.register_callback(self.process_callback, joins=joins)
-        # Prime from current feedback so we don't show a stale state before the
-        # first join update arrives after (re)connect.
-        fb = self._feedback_is_on()
-        if fb is not None:
-            self._optimistic_state = fb
+        # Initial state. If the hub is already connected, trust its live
+        # feedback. Otherwise (cold start: Crestron hasn't reconnected yet)
+        # restore the last-known state from before the restart so we don't
+        # wrongly default to "off" until the control system next pushes the
+        # join — process_callback reconciles to real feedback once it arrives.
+        if self._hub.is_available():
+            fb = self._feedback_is_on()
+            if fb is not None:
+                self._optimistic_state = fb
+        else:
+            last = await self.async_get_last_state()
+            if last is not None and last.state in ("on", "off"):
+                self._optimistic_state = last.state == "on"
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
