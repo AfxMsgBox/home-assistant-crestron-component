@@ -22,6 +22,7 @@ from .const import (
     CONF_POS_JOIN,
 )
 from .schema import analog_join, digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class CrestronShade(CoverEntity):
         self._attr_unique_id = (
             f"crestron_cover_{self._pos_join or self._open_join or self._close_join}"
         )
+        self._attr_device_info = device_info(config)
         if config.get(CONF_TYPE) == "curtain":
             self._attr_device_class = CoverDeviceClass.CURTAIN
         else:

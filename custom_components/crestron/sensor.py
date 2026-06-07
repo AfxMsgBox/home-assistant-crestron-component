@@ -15,6 +15,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import HUB, DOMAIN, CONF_VALUE_JOIN, CONF_DIVISOR, CONF_MODE_JOINS
 from .schema import analog_join, digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class CrestronSensor(SensorEntity):
             self._attr_unique_id = f"crestron_sensor_mode_{first}"
         else:
             self._attr_unique_id = f"crestron_sensor_{self._join}"
+        self._attr_device_info = device_info(config)
 
     async def async_added_to_hass(self):
         if self._mode_joins:

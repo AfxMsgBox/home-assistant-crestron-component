@@ -14,6 +14,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import HUB, DOMAIN, CONF_OPTIONS
 from .schema import digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class CrestronSelect(SelectEntity):
         self._attr_options = list(self._joins.keys())
         first_join = next(iter(self._joins.values()))
         self._attr_unique_id = f"crestron_select_{first_join}"
+        self._attr_device_info = device_info(config)
 
     async def async_added_to_hass(self):
         joins = [f"d{j}" for j in self._joins.values()]

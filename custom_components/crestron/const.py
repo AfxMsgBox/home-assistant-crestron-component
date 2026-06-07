@@ -45,3 +45,6 @@ CONF_OPTIONS = "options"
 CONF_MIN = "min"
 CONF_MAX = "max"
 CONF_STEP = "step"
+# Device grouping: entities sharing device_id show under one HA device.
+CONF_DEVICE_ID = "device_id"
+CONF_DEVICE_NAME = "device_name"

@@ -131,22 +131,28 @@ def build_light_or_switch(row):
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
     if bri is not None:
+        name = _name(row, "名字")
         ent = {
             "platform": "crestron",
-            "name": _name(row, "名字"),
+            "name": name,
             "type": "brightness",
             "brightness_join": bri,
         }
         if cct is not None:
             ent["color_temp_join"] = cct
+        ent["device_id"] = f"light_{bri}"
+        ent["device_name"] = name
         ent["_group"] = _group(row)
         return "light", ent
     if on is not None and off is not None:
+        name = _name(row, "名字")
         ent = {
             "platform": "crestron",
-            "name": _name(row, "名字"),
+            "name": name,
             "on_join": on,
             "off_join": off,
+            "device_id": f"switch_{on}",
+            "device_name": name,
             "_group": _group(row),
         }
         return "switch", ent
@@ -162,13 +168,16 @@ def build_cover(row):
         return None
     label = row.get("名称", "").strip()
     cover_type = "shade" if label.startswith("卷") else "curtain"
+    name = _name(row, "名称")
     return "cover", {
         "platform": "crestron",
-        "name": _name(row, "名称"),
+        "name": name,
         "type": cover_type,
         "open_join": op,
         "close_join": cl,
         "stop_join": stop,
+        "device_id": f"cover_{op}",
+        "device_name": name,
         "_group": _group(row),
     }
 
@@ -233,7 +242,15 @@ def build_ac(row):
             "platform": "crestron", "name": f"{base} 模式",
             "mode_joins": dict(modes), "_group": group,
         }))
-    return out or None
+    if not out:
+        return None
+    # Group all of this AC's entities under one HA device.
+    key = on if on is not None else (set_temp if set_temp is not None else room_temp)
+    device_id = f"ac_{key}"
+    for _, ent in out:
+        ent["device_id"] = device_id
+        ent["device_name"] = base
+    return out
 
 
 SHEET_BUILDERS = {

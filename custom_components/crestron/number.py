@@ -13,6 +13,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import HUB, DOMAIN, CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
 from .schema import analog_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class CrestronNumber(NumberEntity):
         self._attr_device_class = config.get(CONF_DEVICE_CLASS)
         self._attr_native_unit_of_measurement = config.get(CONF_UNIT_OF_MEASUREMENT)
         self._attr_unique_id = f"crestron_number_{self._join}"
+        self._attr_device_info = device_info(config)
 
     async def async_added_to_hass(self):
         self._hub.register_callback(self.process_callback, joins=[f"a{self._join}"])

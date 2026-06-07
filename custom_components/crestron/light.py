@@ -7,6 +7,7 @@ from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.const import CONF_NAME, CONF_TYPE
 from .const import HUB, DOMAIN, CONF_BRIGHTNESS_JOIN, CONF_COLOR_TEMP_JOIN
 from .schema import analog_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class CrestronLight(LightEntity):
         self._brightness_join = config.get(CONF_BRIGHTNESS_JOIN)
         self._color_temp_join = config.get(CONF_COLOR_TEMP_JOIN)
         self._attr_unique_id = f"crestron_light_{self._brightness_join}"
+        self._attr_device_info = device_info(config)
         if self._color_temp_join is not None:
             self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
             self._attr_color_mode = ColorMode.COLOR_TEMP

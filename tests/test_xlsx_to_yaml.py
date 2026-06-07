@@ -120,6 +120,12 @@ class AcTests(unittest.TestCase):
         mode_sensor = next(e for e in by_plat["sensor"] if "mode_joins" in e)
         self.assertEqual(mode_sensor["mode_joins"]["除湿"], 511)
 
+        # all five entities belong to one HA device
+        device_ids = {e["device_id"] for _, e in result}
+        device_names = {e["device_name"] for _, e in result}
+        self.assertEqual(device_ids, {"ac_505"})
+        self.assertEqual(device_names, {"B2.洗衣房 空调"})
+
     def test_missing_dry_mode_omitted(self):
         row = self._full()
         row["除湿"] = ""
