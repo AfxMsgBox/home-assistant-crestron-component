@@ -10,6 +10,7 @@ from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
 from .const import (
     HUB,
     DOMAIN,
+    YAML_CONF,
     CONF_SWITCH_JOIN,
     CONF_ON_JOIN,
     CONF_OFF_JOIN,
@@ -63,9 +64,10 @@ PLATFORM_SCHEMA = vol.All(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronSwitch(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("switch", [])
+    async_add_entities(CrestronSwitch(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronSwitch(SwitchEntity):

@@ -12,7 +12,7 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.const import CONF_NAME
 import homeassistant.helpers.config_validation as cv
 
-from .const import HUB, DOMAIN, CONF_OPTIONS
+from .const import HUB, DOMAIN, YAML_CONF, CONF_OPTIONS
 from .schema import digital_join
 from .device import device_info
 
@@ -27,9 +27,10 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronSelect(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("select", [])
+    async_add_entities(CrestronSelect(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronSelect(SelectEntity):

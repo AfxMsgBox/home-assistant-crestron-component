@@ -30,6 +30,7 @@ from homeassistant.const import CONF_NAME, ATTR_TEMPERATURE, UnitOfTemperature
 from .const import (
     HUB,
     DOMAIN,
+    YAML_CONF,
     CONF_ON_JOIN,
     CONF_OFF_JOIN,
     CONF_SET_TEMP_JOIN,
@@ -73,9 +74,10 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronAC(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("climate", [])
+    async_add_entities(CrestronAC(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronAC(ClimateEntity):

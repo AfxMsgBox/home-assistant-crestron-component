@@ -5,7 +5,7 @@ import logging
 import homeassistant.helpers.config_validation as cv
 from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.const import CONF_NAME, CONF_TYPE
-from .const import HUB, DOMAIN, CONF_BRIGHTNESS_JOIN, CONF_COLOR_TEMP_JOIN
+from .const import HUB, DOMAIN, YAML_CONF, CONF_BRIGHTNESS_JOIN, CONF_COLOR_TEMP_JOIN
 from .schema import analog_join
 from .device import device_info
 
@@ -22,9 +22,10 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronLight(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("light", [])
+    async_add_entities(CrestronLight(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronLight(LightEntity):

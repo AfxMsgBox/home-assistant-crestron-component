@@ -11,7 +11,7 @@ from homeassistant.const import (
 )
 import homeassistant.helpers.config_validation as cv
 
-from .const import HUB, DOMAIN, CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
+from .const import HUB, DOMAIN, YAML_CONF, CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
 from .schema import analog_join
 from .device import device_info
 
@@ -31,9 +31,10 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronNumber(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("number", [])
+    async_add_entities(CrestronNumber(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronNumber(NumberEntity):

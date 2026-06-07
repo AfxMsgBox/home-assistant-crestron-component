@@ -1,6 +1,7 @@
 {
   "domain": "crestron",
   "name": "Crestron XSIG Integration",
+  "config_flow": true,
   "documentation": "https://github.com/zqyuan/home-assistant-crestron-component/blob/master/README.md",
   "dependencies": [],
   "codeowners": ["@zqyuan"],

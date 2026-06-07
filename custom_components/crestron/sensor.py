@@ -13,7 +13,7 @@ from homeassistant.components.sensor import SensorEntity, CONF_STATE_CLASS
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS, CONF_UNIT_OF_MEASUREMENT
 import homeassistant.helpers.config_validation as cv
 
-from .const import HUB, DOMAIN, CONF_VALUE_JOIN, CONF_DIVISOR, CONF_MODE_JOINS
+from .const import HUB, DOMAIN, YAML_CONF, CONF_VALUE_JOIN, CONF_DIVISOR, CONF_MODE_JOINS
 from .schema import analog_join, digital_join
 from .device import device_info
 
@@ -49,9 +49,10 @@ PLATFORM_SCHEMA = vol.All(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronSensor(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("sensor", [])
+    async_add_entities(CrestronSensor(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronSensor(SensorEntity):

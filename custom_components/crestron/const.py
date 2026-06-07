@@ -1,4 +1,7 @@
 HUB = "hub"
+# hass.data[DOMAIN] keys for the YAML config blob and the hub wrapper.
+YAML_CONF = "yaml_config"
+HUB_WRAPPER = "hub_wrapper"
 DOMAIN = "crestron"
 CONF_PORT = "port"
 CONF_TO_HUB = "to_joins"

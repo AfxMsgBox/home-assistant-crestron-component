@@ -146,5 +146,34 @@ class DedupTests(unittest.TestCase):
                           "B2.车库 柜灯 3", "B2.车库 吊灯"])
 
 
+class EmitDomainTests(unittest.TestCase):
+    def test_domain_yaml_structure(self):
+        by_platform = {
+            "switch": [{
+                "platform": "crestron", "name": "B2.洗衣房 空调",
+                "on_join": 505, "mode_joins": {"制冷": 507},
+                "device_id": "ac_505", "device_name": "B2.洗衣房 空调",
+                "_group": "B2.洗衣房",
+            }],
+            "number": [{
+                "platform": "crestron", "name": "B2.洗衣房 空调 温度",
+                "value_join": 414, "device_id": "ac_505", "_group": "B2.洗衣房",
+            }],
+        }
+        out = g.emit_domain(by_platform, "x.xlsx")
+        # top-level mapping with port + platform sections; no stray list root
+        self.assertIn("\nport: 10200", out)
+        self.assertIn("\nswitch:\n", out)
+        self.assertIn("\nnumber:\n", out)
+        # legacy 'platform:' key and internal '_group' must not be emitted
+        self.assertNotIn("platform: crestron", out)
+        self.assertNotIn("_group", out)
+        # entities are indented one level under their platform key
+        self.assertIn('\n  - name: "B2.洗衣房 空调"', out)
+        # nested dict (mode_joins) renders as a block
+        self.assertIn("\n    mode_joins:\n", out)
+        self.assertIn('\n      "制冷": 507', out)
+
+
 if __name__ == "__main__":
     unittest.main()

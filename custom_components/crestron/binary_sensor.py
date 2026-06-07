@@ -7,7 +7,7 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
 import homeassistant.helpers.config_validation as cv
 
-from .const import HUB, DOMAIN, CONF_IS_ON_JOIN
+from .const import HUB, DOMAIN, YAML_CONF, CONF_IS_ON_JOIN
 from .schema import digital_join
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,9 +22,12 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronBinarySensor(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("binary_sensor", [])
+    async_add_entities(
+        CrestronBinarySensor(hub, PLATFORM_SCHEMA(item)) for item in items
+    )
 
 
 class CrestronBinarySensor(BinarySensorEntity):

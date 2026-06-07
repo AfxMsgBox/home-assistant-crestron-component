@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Generate Crestron HA *package* YAML from a multi-sheet xlsx join table.
+"""Generate the Crestron `crestron:` domain YAML from a multi-sheet xlsx table.
 
 Usage:
     python3 tools/xlsx_to_yaml.py <input.xlsx> <output_dir>
 
-One file per device-type sheet (a Home Assistant package = one file holding
-several platform sections):
-  - 灯光  -> lights.yaml   (light: + switch: sections)
-  - 空调  -> aircon.yaml   (switch: + number: + select: + sensor: sections)
-  - 窗帘  -> covers.yaml   (cover: section)
+Writes a single `crestron.yaml` holding the port plus all entities grouped by
+platform key (light:/switch:/number:/select:/sensor:/cover:). The integration
+imports this into a config entry, which lets Home Assistant group an AC's
+several entities into one device (device_id/device_name).
 
-Enable the output in configuration.yaml with:
-    homeassistant:
-      packages: !include_dir_named crestron_packages/
+Include it in configuration.yaml with:
+    crestron: !include crestron.yaml
 
 Pure standard library — no openpyxl/pandas/PyYAML required.
 """
@@ -278,20 +276,11 @@ def dedup_names(entities):
 
 
 # --------------------------------------------------------------------------- #
-# YAML emitting (hand-rolled) — one HA "package" file per sheet
+# YAML emitting (hand-rolled) — one `crestron.yaml` domain config file
 # --------------------------------------------------------------------------- #
-# One file per device-type sheet. HA package names must be slugs (lowercase
-# ASCII), so the file stems are slugs even though the content stays Chinese.
-SHEET_SLUG = {"灯光": "lights", "空调": "aircon", "窗帘": "covers"}
-
-# Stable, readable order for platform sections within a package file.
+# Stable, readable order for the platform sections under `crestron:`.
 _PLATFORM_ORDER = ["light", "switch", "cover", "number", "select",
                    "sensor", "binary_sensor", "media_player", "climate"]
-
-
-def _slug(name):
-    s = "".join(c if (c.isalnum() and c.isascii()) else "_" for c in name)
-    return s.strip("_").lower() or "package"
 
 
 def _yaml_scalar(value):
@@ -300,20 +289,20 @@ def _yaml_scalar(value):
     if isinstance(value, int):
         return str(value)
     s = str(value)
-    # Leave plain ASCII identifiers bare (crestron/brightness/curtain/...),
-    # double-quote anything else (names with spaces, dots, Chinese, etc.).
+    # Leave plain ASCII identifiers bare (brightness/curtain/...), double-quote
+    # anything else (names with spaces, dots, Chinese, etc.).
     if s and all(c.isalnum() or c == "_" for c in s) and s.isascii():
         return s
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _emit_entity(ent, indent):
+def _emit_entity(ent, indent, skip=("_group",)):
     """Render one entity as YAML list-item lines; '- ' bullet at `indent` cols."""
     pad = " " * indent
     lines = []
     first = True
     for key, value in ent.items():
-        if key == "_group":
+        if key in skip:
             continue
         bullet = "- " if first else "  "
         if isinstance(value, dict):
@@ -326,30 +315,35 @@ def _emit_entity(ent, indent):
     return lines
 
 
-def emit_package(platforms, source, sheet):
-    """platforms: {platform: [entities]} -> one HA package file (a mapping of
-    platform -> entity list)."""
+def emit_domain(by_platform, source):
+    """by_platform: {platform: [entities]} -> the `crestron:` domain config.
+
+    Entities live under their platform key (light:/switch:/number:/...) so they
+    are set up via the integration's config entry and grouped into HA devices.
+    """
     lines = [
-        f'# Generated from {source} sheet "{sheet}" by tools/xlsx_to_yaml.py',
-        "# Enable in configuration.yaml:",
-        "#   homeassistant:",
-        "#     packages: !include_dir_named crestron_packages/",
+        f"# Generated from {source} by tools/xlsx_to_yaml.py",
+        "# Include in configuration.yaml as:  crestron: !include crestron.yaml",
+        "",
+        "port: 10200  # <- 改成你的快思聪 XSIG 端口；如有 to_joins/from_joins 也放这里",
         "",
     ]
     ordered = sorted(
-        platforms,
+        by_platform,
         key=lambda p: (_PLATFORM_ORDER.index(p) if p in _PLATFORM_ORDER
                        else len(_PLATFORM_ORDER), p),
     )
     for platform in ordered:
         lines.append(f"{platform}:")
         last_group = None
-        for ent in platforms[platform]:
+        for ent in by_platform[platform]:
             group = ent.get("_group")
             if group and group != last_group:
                 lines.append(f"  # {group}")
                 last_group = group
-            lines.extend(_emit_entity(ent, 2))
+            # Drop the legacy `platform:` key — under the domain config the
+            # platform is implied by the section key.
+            lines.extend(_emit_entity(ent, 2, skip=("_group", "platform")))
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -360,15 +354,13 @@ def emit_package(platforms, source, sheet):
 def generate(xlsx_path, out_dir):
     sheets = parse_xlsx(xlsx_path)
     source = os.path.basename(xlsx_path)
-    by_sheet = {}     # sheet -> {platform: [entities]}  (one file per sheet)
-    by_platform = {}  # platform -> [entities]           (for global de-dup)
+    by_platform = {}  # platform -> [entities]  (in sheet order)
 
     for sheet_name, rows in sheets.items():
         builder = SHEET_BUILDERS.get(sheet_name)
         if builder is None:
             print(f"  [skip] unknown sheet {sheet_name!r}")
             continue
-        bucket = by_sheet.setdefault(sheet_name, {})
         skipped = 0
         for row in rows:
             result = builder(row)
@@ -378,25 +370,20 @@ def generate(xlsx_path, out_dir):
             if isinstance(result, tuple):
                 result = [result]  # single-entity builders
             for platform, ent in result:
-                bucket.setdefault(platform, []).append(ent)
                 by_platform.setdefault(platform, []).append(ent)
         if skipped:
             print(f"  [{sheet_name}] skipped {skipped} placeholder/empty row(s)")
 
-    # Global per-platform name de-dup: HA merges same-platform lists across all
-    # package files, so duplicate friendly names must be resolved globally.
     for entities in by_platform.values():
         dedup_names(entities)
 
     os.makedirs(out_dir, exist_ok=True)
-    for sheet_name, platforms in by_sheet.items():
-        slug = SHEET_SLUG.get(sheet_name) or _slug(sheet_name)
-        path = os.path.join(out_dir, f"{slug}.yaml")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(emit_package(platforms, source, sheet_name))
-        counts = ", ".join(f"{p}:{len(e)}" for p, e in platforms.items())
-        print(f"  wrote {path}  ({counts})")
-    return by_sheet
+    path = os.path.join(out_dir, "crestron.yaml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(emit_domain(by_platform, source))
+    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
+    print(f"  wrote {path}  ({counts})")
+    return by_platform
 
 
 def main(argv):

@@ -13,6 +13,7 @@ from homeassistant.const import CONF_NAME, CONF_TYPE
 from .const import (
     HUB,
     DOMAIN,
+    YAML_CONF,
     CONF_IS_OPENING_JOIN,
     CONF_IS_CLOSING_JOIN,
     CONF_IS_CLOSED_JOIN,
@@ -62,9 +63,10 @@ PLATFORM_SCHEMA = vol.All(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronShade(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("cover", [])
+    async_add_entities(CrestronShade(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronShade(CoverEntity):

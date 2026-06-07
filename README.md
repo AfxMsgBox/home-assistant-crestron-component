@@ -87,8 +87,11 @@ Crestron (TCP Client)  ──发起连接──►  HA (TCP Server, 监听 port)
 ## 安装
 
 1. 复制 `custom_components/crestron/` 到 HA 配置目录的 `config/custom_components/` 下。
-2. 在 `configuration.yaml` 配置 `crestron:` 块及各平台（见下文）。
-3. 重启 Home Assistant。
+2. 在 `configuration.yaml` 配置 `crestron:` 块，**所有实体都写在 `crestron:` 之下**（见下文）。
+3. 重启 Home Assistant。集成会自动从 YAML 创建一个**配置项（config entry）**，实体随之归属到对应**设备**下（例如一台空调的开关/温度/风速/室温/模式会聚成一个设备）。
+
+> **为什么实体要写在 `crestron:` 之下、而不是顶层 `light:` / `switch:`？**
+> Home Assistant 只为「配置项（config entry）式」的集成创建**设备**。老式 `light: - platform: crestron` 这种 YAML 平台写法没有配置项，HA 不会给它建设备（设备列永远是 `—`）。本集成把实体收在 `crestron:` 下、经配置项统一建立，才能让 `device_id` 把同一台设备的多个实体归到一起。
 
 ## 控制系统侧配置
 
@@ -103,6 +106,8 @@ Crestron (TCP Client)  ──发起连接──►  HA (TCP Server, 监听 port)
 
 ### 基础配置
 
+所有实体都是 `crestron:` 下的**平台键列表**（`light:` / `switch:` / `number:` / `select:` / `sensor:` / `cover:` …）：
+
 ```yaml
 crestron:
   port: 10200          # 必填，HA 监听端口
@@ -110,7 +115,24 @@ crestron:
     - ...
   from_joins:          # 可选：控制系统 → HA 触发脚本
     - ...
+  light:               # 各平台实体直接列在 crestron: 之下
+    - name: "射灯"
+      type: brightness
+      brightness_join: 1
+  switch:
+    - name: "B2.洗衣房 空调"
+      on_join: 505
+      off_join: 506
+      mode_joins: { 制冷: 507, 制热: 508, 通风: 510, 除湿: 511 }
+      device_id: ac_505            # 同 id 的实体在 HA 里归到同一个设备
+      device_name: "B2.洗衣房 空调"
+  number:
+    - name: "B2.洗衣房 空调 温度"
+      value_join: 414
+      device_id: ac_505
 ```
+
+> **下面各平台小节的示例沿用旧写法**（顶层 `light:` + `- platform: crestron`），仅用于说明**字段**。新格式里请把它们**缩进到 `crestron:` 之下、并删掉 `- platform: crestron` 那一行**，其余字段照搬。整张表用 `tools/xlsx_to_yaml.py` 一键生成即可（见「批量生成配置」），无需手写。
 
 平台与设备类型对应关系：
 
@@ -366,33 +388,33 @@ crestron:
 
 ## 批量生成配置（xlsx → YAML）
 
-`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成 **HA package 文件，一个设备类型（sheet）一个文件**，省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
+`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成**一个 `crestron.yaml`**（`crestron:` 域配置：port + 各平台实体），省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
 
 ```bash
 python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 ```
 
-工作簿约定每个 sheet 一类设备，每个 sheet 产出**一个 package 文件**（文件内含多个平台段）：
+工作簿约定每个 sheet 一类设备，全部并入同一个 `crestron.yaml` 的对应平台键：
 
-| sheet | 列 | 产出文件 | 含平台段 |
-|-------|----|---------|---------|
-| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `lights.yaml` | `light:` + `switch:` |
-| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `aircon.yaml` | `switch:`+`number:`+`select:`+`sensor:` |
-| `窗帘` | 楼层 房间 名称 开 关 停止 | `covers.yaml` | `cover:` |
+| sheet | 列 | 产出平台键 |
+|-------|----|-----------|
+| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `light:` + `switch:` |
+| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `switch:`+`number:`+`select:`+`sensor:` |
+| `窗帘` | 楼层 房间 名称 开 关 停止 | `cover:` |
 
 - **灯光按"列是否有值"判断能力**：有 `亮度` → light（有 `色温` 再加色温）；只有 `开/关` → switch；空行/占位（如 `//`）自动跳过。
-- **空调拆成 5 个实体**（电源 switch / 温度 number / 风速 select / 室温 sensor / 模式 sensor），但靠相同 `device_id` 在 HA 里**归到同一个设备**。
+- **空调拆成 5 个实体**（电源 switch / 温度 number / 风速 select / 室温 sensor / 模式 sensor），靠相同 `device_id` 在 HA 里**归到同一个设备**。
 - 实体名 = `楼层.房间 名字`，同名自动追加 ` 2`/` 3`。
-- 文件名用 ASCII slug（HA package 名要求 slug），文件内容/注释仍是中文。
 
-把产出目录（如 `crestron_packages/`）放到 HA 配置目录下，在 `configuration.yaml` **启用 packages**（一次即可）：
+把生成的 `crestron.yaml` 放到 HA 配置目录，在 `configuration.yaml` 里用一行引入；生成器输出顶部已带 `port: 10200` 占位，改成你的端口、有 `to_joins/from_joins` 也并进这个文件：
 
 ```yaml
-homeassistant:
-  packages: !include_dir_named crestron_packages/
+crestron: !include crestron.yaml
 ```
 
-HA 会自动把各 package 文件里的同名平台段合并（例如 `lights.yaml` 的继电器开关与 `aircon.yaml` 的空调电源会一起归到 `switch`）。
+重启 HA，集成会从该 YAML 导入一个**配置项**并建立设备；空调的 5 个实体会出现在同一个「设备」下。
+
+> 升级提示：早期版本把实体写在顶层 `light:`/`switch:` 或 packages 里。迁移时把它们全部挪到 `crestron:` 之下、删掉 `- platform: crestron` 行即可（用本工具重新生成最省事）。`unique_id` 不变，旧实体会平滑归入新设备、历史保留；旧的 `climate.*` 空调实体如仍残留，可在设置里删除。
 
 ## 稳定性说明
 
