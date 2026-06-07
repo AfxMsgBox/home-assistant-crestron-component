@@ -120,11 +120,13 @@ def _group(row):
 # row -> (platform, entity) builders  (pure, unit-tested)
 # --------------------------------------------------------------------------- #
 def build_light_or_switch(row):
-    """灯光 sheet row -> ('light'|'switch', entity) or None.
+    """灯光 sheet row -> ('light', entity) or None.
 
     Capability is read from which columns carry a join, not from the 功能
     label: a brightness join -> dimmable light (color_temp optional); an
-    on/off pair -> relay switch; neither -> skip (e.g. the '//' placeholder).
+    on/off pair -> on/off-only light (relay-style, no brightness); neither ->
+    skip (e.g. the '//' placeholder). A single-function ceiling light is still
+    a *light*, not a switch.
     """
     bri = _to_int(row.get("亮度"))
     cct = _to_int(row.get("色温"))
@@ -151,11 +153,11 @@ def build_light_or_switch(row):
             "name": name,
             "on_join": on,
             "off_join": off,
-            "device_id": f"switch_{on}",
+            "device_id": f"light_onoff_{on}",
             "device_name": name,
             "_group": _group(row),
         }
-        return "switch", ent
+        return "light", ent
     return None
 
 
@@ -196,61 +198,54 @@ def _join_map(row, cols):
     return out
 
 
-def build_ac(row):
-    """空调 sheet row -> list of (platform, entity).
+# 空调风速列 -> climate fan_*_join 字段名
+_AC_FAN_JOIN_KEYS = {
+    "低速": "fan_low_join",
+    "中速": "fan_med_join",
+    "高速": "fan_high_join",
+    "自动": "fan_auto_join",
+}
+# 空调模式列 -> climate mode_*_join 字段名(只读，仅用于显示运行模式)
+_AC_MODE_JOIN_KEYS = {
+    "制冷": "mode_cool_join",
+    "制热": "mode_heat_join",
+    "通风": "mode_fan_join",
+    "除湿": "mode_dry_join",
+}
 
-    Each AC becomes several plain HA entities (no climate, so no "auto"):
-      switch(电源, 开/关按钮 + 运行模式属性) / number(温度) / select(风速) /
-      sensor(室温) / sensor(模式).
+
+def build_ac(row):
+    """空调 sheet row -> ('climate', entity) or None.
+
+    One climate entity per AC = one device, one thermostat card, and it shows
+    up in HA's "空调"(climate) category. Power is a real on/off button (pulsed
+    on/off joins); temperature setpoint and fan speed are settable; the running
+    mode (制冷/制热/通风/除湿) is read-only (centrally controlled, shown via
+    hvac_action). Needs power joins; without them the AC can't be a climate.
     """
-    base = _name(row, None) + " 空调"
-    group = _group(row)
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
+    if on is None or off is None:
+        return None
+    base = _name(row, None) + " 空调"
     set_temp = _to_int(row.get("温度"))
     room_temp = _to_int(row.get("室温"))
     modes = _join_map(row, _AC_MODE_COLS)
     fans = _join_map(row, _AC_FAN_COLS)
 
-    out = []
-    if on is not None and off is not None:
-        ent = {"platform": "crestron", "name": base, "on_join": on, "off_join": off}
-        if modes:
-            ent["mode_joins"] = dict(modes)  # on-state + 运行模式属性
-        ent["_group"] = group
-        out.append(("switch", ent))
+    ent = {"platform": "crestron", "name": base, "on_join": on, "off_join": off}
     if set_temp is not None:
-        out.append(("number", {
-            "platform": "crestron", "name": f"{base} 温度",
-            "value_join": set_temp, "min": 16, "max": 30, "step": 1,
-            "unit_of_measurement": "°C", "device_class": "temperature",
-            "_group": group,
-        }))
-    if fans:
-        out.append(("select", {
-            "platform": "crestron", "name": f"{base} 风速",
-            "options": dict(fans), "_group": group,
-        }))
+        ent["set_temp_join"] = set_temp
     if room_temp is not None:
-        out.append(("sensor", {
-            "platform": "crestron", "name": f"{base} 室温",
-            "value_join": room_temp, "device_class": "temperature",
-            "unit_of_measurement": "°C", "_group": group,
-        }))
-    if modes:
-        out.append(("sensor", {
-            "platform": "crestron", "name": f"{base} 模式",
-            "mode_joins": dict(modes), "_group": group,
-        }))
-    if not out:
-        return None
-    # Group all of this AC's entities under one HA device.
-    key = on if on is not None else (set_temp if set_temp is not None else room_temp)
-    device_id = f"ac_{key}"
-    for _, ent in out:
-        ent["device_id"] = device_id
-        ent["device_name"] = base
-    return out
+        ent["reg_temp_join"] = room_temp
+    for label, join in modes.items():
+        ent[_AC_MODE_JOIN_KEYS[label]] = join
+    for label, join in fans.items():
+        ent[_AC_FAN_JOIN_KEYS[label]] = join
+    ent["device_id"] = f"ac_{on}"
+    ent["device_name"] = base
+    ent["_group"] = _group(row)
+    return "climate", ent
 
 
 SHEET_BUILDERS = {

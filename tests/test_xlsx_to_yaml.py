@@ -46,14 +46,17 @@ class LightSwitchTests(unittest.TestCase):
         self.assertEqual(plat, "light")
         self.assertEqual(ent["color_temp_join"], 224)
 
-    def test_relay_is_switch(self):
+    def test_relay_is_onoff_light(self):
+        # An on/off-only light stays a light (no brightness), not a switch.
         plat, ent = g.build_light_or_switch(
             light_row(名字="柜灯", 功能="Relay", 开="1", 关="2")
         )
-        self.assertEqual(plat, "switch")
+        self.assertEqual(plat, "light")
         self.assertEqual(ent["on_join"], 1)
         self.assertEqual(ent["off_join"], 2)
         self.assertNotIn("type", ent)
+        self.assertNotIn("brightness_join", ent)
+        self.assertEqual(ent["device_id"], "light_onoff_1")
 
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light_or_switch(light_row(名字="x", 功能="//")))
@@ -91,46 +94,37 @@ class AcTests(unittest.TestCase):
                 "低速": "512", "中速": "513", "高速": "514", "自动": "515",
                 "温度": "414", "室温": "415"}
 
-    def test_full_row_produces_five_entities(self):
-        result = g.build_ac(self._full())
-        by_plat = {}
-        for plat, ent in result:
-            by_plat.setdefault(plat, []).append(ent)
-        # switch + number + select + 2 sensors
-        self.assertEqual(len(result), 5)
-        self.assertEqual(len(by_plat["sensor"]), 2)
-
-        sw = by_plat["switch"][0]
-        self.assertEqual(sw["name"], "B2.洗衣房 空调")
-        self.assertEqual((sw["on_join"], sw["off_join"]), (505, 506))
-        self.assertEqual(sw["mode_joins"],
-                         {"制冷": 507, "制热": 508, "通风": 510, "除湿": 511})
-
-        num = by_plat["number"][0]
-        self.assertEqual(num["name"], "B2.洗衣房 空调 温度")
-        self.assertEqual(num["value_join"], 414)
-        self.assertEqual(num["unit_of_measurement"], "°C")
-
-        sel = by_plat["select"][0]
-        self.assertEqual(sel["options"],
-                         {"低速": 512, "中速": 513, "高速": 514, "自动": 515})
-
-        names = {e["name"] for e in by_plat["sensor"]}
-        self.assertEqual(names, {"B2.洗衣房 空调 室温", "B2.洗衣房 空调 模式"})
-        mode_sensor = next(e for e in by_plat["sensor"] if "mode_joins" in e)
-        self.assertEqual(mode_sensor["mode_joins"]["除湿"], 511)
-
-        # all five entities belong to one HA device
-        device_ids = {e["device_id"] for _, e in result}
-        device_names = {e["device_name"] for _, e in result}
-        self.assertEqual(device_ids, {"ac_505"})
-        self.assertEqual(device_names, {"B2.洗衣房 空调"})
+    def test_full_row_produces_one_climate(self):
+        plat, ent = g.build_ac(self._full())
+        self.assertEqual(plat, "climate")
+        self.assertEqual(ent["name"], "B2.洗衣房 空调")
+        self.assertEqual((ent["on_join"], ent["off_join"]), (505, 506))
+        self.assertEqual(ent["set_temp_join"], 414)
+        self.assertEqual(ent["reg_temp_join"], 415)
+        self.assertEqual(
+            (ent["mode_cool_join"], ent["mode_heat_join"],
+             ent["mode_fan_join"], ent["mode_dry_join"]),
+            (507, 508, 510, 511),
+        )
+        self.assertEqual(
+            (ent["fan_low_join"], ent["fan_med_join"],
+             ent["fan_high_join"], ent["fan_auto_join"]),
+            (512, 513, 514, 515),
+        )
+        self.assertEqual(ent["device_id"], "ac_505")
+        self.assertEqual(ent["device_name"], "B2.洗衣房 空调")
 
     def test_missing_dry_mode_omitted(self):
         row = self._full()
         row["除湿"] = ""
-        sw = next(e for p, e in g.build_ac(row) if p == "switch")
-        self.assertNotIn("除湿", sw["mode_joins"])
+        _, ent = g.build_ac(row)
+        self.assertNotIn("mode_dry_join", ent)
+
+    def test_no_power_skipped(self):
+        row = self._full()
+        row["开"] = ""
+        row["关"] = ""
+        self.assertIsNone(g.build_ac(row))
 
     def test_empty_row_skipped(self):
         self.assertIsNone(g.build_ac({"楼层": "B2", "房间": "x"}))
