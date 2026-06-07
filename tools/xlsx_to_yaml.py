@@ -173,42 +173,73 @@ def build_cover(row):
     }
 
 
-# 空调 column -> climate yaml key (only emitted when the cell has a join)
-_CLIMATE_MAP = [
-    ("开", "on_join"),
-    ("关", "off_join"),
-    ("制冷", "mode_cool_join"),
-    ("制热", "mode_heat_join"),
-    ("通风", "mode_fan_join"),
-    ("除湿", "mode_dry_join"),
-    ("低速", "fan_low_join"),
-    ("中速", "fan_med_join"),
-    ("高速", "fan_high_join"),
-    ("自动", "fan_auto_join"),
-    ("温度", "set_temp_join"),
-    ("室温", "reg_temp_join"),
-]
+_AC_MODE_COLS = ("制冷", "制热", "通风", "除湿")
+_AC_FAN_COLS = ("低速", "中速", "高速", "自动")
 
 
-def build_climate(row):
-    """空调 sheet row -> ('climate', entity) or None."""
-    ent = {"platform": "crestron", "name": _name(row, None) + " 空调"}
-    found = False
-    for col, key in _CLIMATE_MAP:
+def _join_map(row, cols):
+    """{col_label: join} for the columns that carry a join."""
+    out = {}
+    for col in cols:
         v = _to_int(row.get(col))
         if v is not None:
-            ent[key] = v
-            found = True
-    if not found:
-        return None
-    ent["_group"] = _group(row)
-    return "climate", ent
+            out[col] = v
+    return out
+
+
+def build_ac(row):
+    """空调 sheet row -> list of (platform, entity).
+
+    Each AC becomes several plain HA entities (no climate, so no "auto"):
+      switch(电源, 开/关按钮 + 运行模式属性) / number(温度) / select(风速) /
+      sensor(室温) / sensor(模式).
+    """
+    base = _name(row, None) + " 空调"
+    group = _group(row)
+    on = _to_int(row.get("开"))
+    off = _to_int(row.get("关"))
+    set_temp = _to_int(row.get("温度"))
+    room_temp = _to_int(row.get("室温"))
+    modes = _join_map(row, _AC_MODE_COLS)
+    fans = _join_map(row, _AC_FAN_COLS)
+
+    out = []
+    if on is not None and off is not None:
+        ent = {"platform": "crestron", "name": base, "on_join": on, "off_join": off}
+        if modes:
+            ent["mode_joins"] = dict(modes)  # on-state + 运行模式属性
+        ent["_group"] = group
+        out.append(("switch", ent))
+    if set_temp is not None:
+        out.append(("number", {
+            "platform": "crestron", "name": f"{base} 温度",
+            "value_join": set_temp, "min": 16, "max": 30, "step": 1,
+            "unit_of_measurement": "°C", "device_class": "temperature",
+            "_group": group,
+        }))
+    if fans:
+        out.append(("select", {
+            "platform": "crestron", "name": f"{base} 风速",
+            "options": dict(fans), "_group": group,
+        }))
+    if room_temp is not None:
+        out.append(("sensor", {
+            "platform": "crestron", "name": f"{base} 室温",
+            "value_join": room_temp, "device_class": "temperature",
+            "unit_of_measurement": "°C", "_group": group,
+        }))
+    if modes:
+        out.append(("sensor", {
+            "platform": "crestron", "name": f"{base} 模式",
+            "mode_joins": dict(modes), "_group": group,
+        }))
+    return out or None
 
 
 SHEET_BUILDERS = {
     "灯光": build_light_or_switch,
     "窗帘": build_cover,
-    "空调": build_climate,
+    "空调": build_ac,
 }
 
 
@@ -260,7 +291,12 @@ def emit_yaml(entities, source, platform):
             if key == "_group":
                 continue
             prefix = "- " if first else "  "
-            lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
+            if isinstance(value, dict):
+                lines.append(f"{prefix}{key}:")
+                for k, v in value.items():
+                    lines.append(f"    {_yaml_scalar(k)}: {_yaml_scalar(v)}")
+            else:
+                lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
             first = False
     return "\n".join(lines) + "\n"
 
@@ -281,11 +317,13 @@ def generate(xlsx_path, out_dir):
         skipped = 0
         for row in rows:
             result = builder(row)
-            if result is None:
+            if not result:
                 skipped += 1
                 continue
-            platform, ent = result
-            by_platform.setdefault(platform, []).append(ent)
+            if isinstance(result, tuple):
+                result = [result]  # single-entity builders
+            for platform, ent in result:
+                by_platform.setdefault(platform, []).append(ent)
         if skipped:
             print(f"  [{sheet_name}] skipped {skipped} placeholder/empty row(s)")
 

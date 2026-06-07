@@ -61,6 +61,8 @@ PLATFORMS = [
     "climate",
     "cover",
     "media_player",
+    "number",
+    "select",
 ]
 
 async def async_setup(hass, config):

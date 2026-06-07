@@ -14,6 +14,7 @@ from .const import (
     CONF_ON_JOIN,
     CONF_OFF_JOIN,
     CONF_STATE_JOIN,
+    CONF_MODE_JOINS,
 )
 from .schema import digital_join
 
@@ -53,6 +54,7 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_ON_JOIN): digital_join,
             vol.Optional(CONF_OFF_JOIN): digital_join,
             vol.Optional(CONF_STATE_JOIN): digital_join,
+            vol.Optional(CONF_MODE_JOINS): {cv.string: digital_join},
         },
         extra=vol.ALLOW_EXTRA,
     ),
@@ -75,6 +77,9 @@ class CrestronSwitch(SwitchEntity):
         self._on_join = config.get(CONF_ON_JOIN)
         self._off_join = config.get(CONF_OFF_JOIN)
         self._state_join = config.get(CONF_STATE_JOIN)
+        # {label: digital_join}: on if any join is asserted; active label is
+        # surfaced as a read-only "mode" attribute (e.g. AC running mode).
+        self._mode_joins = config.get(CONF_MODE_JOINS) or {}
         self._attr_device_class = config.get(CONF_DEVICE_CLASS)
         self._optimistic_state = False
         self._pulse_lock = asyncio.Lock()
@@ -83,7 +88,9 @@ class CrestronSwitch(SwitchEntity):
 
     async def async_added_to_hass(self):
         joins = []
-        if self._state_join is not None:
+        if self._mode_joins:
+            joins += [f"d{j}" for j in self._mode_joins.values()]
+        elif self._state_join is not None:
             joins.append(f"d{self._state_join}")
         elif self._switch_join is not None:
             joins.append(f"d{self._switch_join}")
@@ -101,15 +108,32 @@ class CrestronSwitch(SwitchEntity):
 
     @property
     def _has_feedback_join(self):
-        return self._state_join is not None or self._switch_join is not None
+        return (
+            bool(self._mode_joins)
+            or self._state_join is not None
+            or self._switch_join is not None
+        )
 
     @property
     def is_on(self):
+        if self._mode_joins:
+            return any(
+                self._hub.get_digital(j) for j in self._mode_joins.values()
+            )
         if self._state_join is not None:
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
             return self._hub.get_digital(self._switch_join)
         return self._optimistic_state
+
+    @property
+    def extra_state_attributes(self):
+        if not self._mode_joins:
+            return None
+        for label, join in self._mode_joins.items():
+            if self._hub.get_digital(join):
+                return {"mode": label}
+        return {"mode": "关闭"}
 
     async def _pulse(self, join):
         async with self._pulse_lock:

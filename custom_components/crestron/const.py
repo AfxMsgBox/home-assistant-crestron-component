@@ -36,3 +36,12 @@ CONF_SWITCH_JOIN = "switch_join"
 CONF_ON_JOIN = "on_join"
 CONF_OFF_JOIN = "off_join"
 CONF_STATE_JOIN = "state_join"
+# Multi-state feedback: {label: digital_join}. Used by switch (on if any
+# active, exposes active label as a "mode" attribute) and sensor (text value).
+CONF_MODE_JOINS = "mode_joins"
+# select platform: {option_label: digital_join}
+CONF_OPTIONS = "options"
+# number platform bounds
+CONF_MIN = "min"
+CONF_MAX = "max"
+CONF_STEP = "step"

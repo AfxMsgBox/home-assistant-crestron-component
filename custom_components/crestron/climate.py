@@ -25,7 +25,7 @@ from homeassistant.components.climate.const import (
     FAN_HIGH,
     FAN_AUTO,
 )
-from homeassistant.const import CONF_NAME, ATTR_TEMPERATURE
+from homeassistant.const import CONF_NAME, ATTR_TEMPERATURE, UnitOfTemperature
 
 from .const import (
     HUB,
@@ -75,9 +75,7 @@ PLATFORM_SCHEMA = vol.Schema(
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities(
-        [CrestronAC(hub, config, hass.config.units.temperature_unit)]
-    )
+    async_add_entities([CrestronAC(hub, config)])
 
 
 class CrestronAC(ClimateEntity):
@@ -86,12 +84,14 @@ class CrestronAC(ClimateEntity):
     _attr_target_temperature_step = 1
     _attr_min_temp = 16
     _attr_max_temp = 30
+    # AC reports raw integer Celsius; never tie this to the HA system unit or a
+    # 25 gets reinterpreted as 25°F -> -3.9°C.
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
     # We implement async_turn_on/off ourselves; opt out of the legacy shim.
     _enable_turn_on_off_backwards_compatibility = False
 
-    def __init__(self, hub, config, unit):
+    def __init__(self, hub, config):
         self._hub = hub
-        self._attr_temperature_unit = unit
         self._attr_name = config[CONF_NAME]
         self._on_join = config[CONF_ON_JOIN]
         self._off_join = config[CONF_OFF_JOIN]

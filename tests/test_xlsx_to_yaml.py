@@ -84,31 +84,50 @@ class CoverTests(unittest.TestCase):
         ))
 
 
-class ClimateTests(unittest.TestCase):
+class AcTests(unittest.TestCase):
     def _full(self):
         return {"楼层": "B2", "房间": "洗衣房", "开": "505", "关": "506",
                 "制冷": "507", "制热": "508", "通风": "510", "除湿": "511",
                 "低速": "512", "中速": "513", "高速": "514", "自动": "515",
                 "温度": "414", "室温": "415"}
 
-    def test_full_row(self):
-        plat, ent = g.build_climate(self._full())
-        self.assertEqual(plat, "climate")
-        self.assertEqual(ent["name"], "B2.洗衣房 空调")
-        self.assertEqual(ent["on_join"], 505)
-        self.assertEqual(ent["mode_dry_join"], 511)
-        self.assertEqual(ent["fan_auto_join"], 515)
-        self.assertEqual(ent["set_temp_join"], 414)
-        self.assertEqual(ent["reg_temp_join"], 415)
+    def test_full_row_produces_five_entities(self):
+        result = g.build_ac(self._full())
+        by_plat = {}
+        for plat, ent in result:
+            by_plat.setdefault(plat, []).append(ent)
+        # switch + number + select + 2 sensors
+        self.assertEqual(len(result), 5)
+        self.assertEqual(len(by_plat["sensor"]), 2)
 
-    def test_missing_column_omitted(self):
+        sw = by_plat["switch"][0]
+        self.assertEqual(sw["name"], "B2.洗衣房 空调")
+        self.assertEqual((sw["on_join"], sw["off_join"]), (505, 506))
+        self.assertEqual(sw["mode_joins"],
+                         {"制冷": 507, "制热": 508, "通风": 510, "除湿": 511})
+
+        num = by_plat["number"][0]
+        self.assertEqual(num["name"], "B2.洗衣房 空调 温度")
+        self.assertEqual(num["value_join"], 414)
+        self.assertEqual(num["unit_of_measurement"], "°C")
+
+        sel = by_plat["select"][0]
+        self.assertEqual(sel["options"],
+                         {"低速": 512, "中速": 513, "高速": 514, "自动": 515})
+
+        names = {e["name"] for e in by_plat["sensor"]}
+        self.assertEqual(names, {"B2.洗衣房 空调 室温", "B2.洗衣房 空调 模式"})
+        mode_sensor = next(e for e in by_plat["sensor"] if "mode_joins" in e)
+        self.assertEqual(mode_sensor["mode_joins"]["除湿"], 511)
+
+    def test_missing_dry_mode_omitted(self):
         row = self._full()
         row["除湿"] = ""
-        _, ent = g.build_climate(row)
-        self.assertNotIn("mode_dry_join", ent)
+        sw = next(e for p, e in g.build_ac(row) if p == "switch")
+        self.assertNotIn("除湿", sw["mode_joins"])
 
     def test_empty_row_skipped(self):
-        self.assertIsNone(g.build_climate({"楼层": "B2", "房间": "x"}))
+        self.assertIsNone(g.build_ac({"楼层": "B2", "房间": "x"}))
 
 
 class DedupTests(unittest.TestCase):
