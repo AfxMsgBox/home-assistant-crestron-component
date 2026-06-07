@@ -99,27 +99,21 @@ class CrestronSwitch(SwitchEntity):
         elif self._switch_join is not None:
             joins.append(f"d{self._switch_join}")
         self._hub.register_callback(self.process_callback, joins=joins)
+        # Prime from current feedback so we don't show a stale state before the
+        # first join update arrives after (re)connect.
+        fb = self._feedback_is_on()
+        if fb is not None:
+            self._optimistic_state = fb
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
 
-    async def process_callback(self, cbtype, value):
-        self.async_write_ha_state()
+    def _feedback_is_on(self):
+        """On-state from feedback joins, or None if this switch has no feedback.
 
-    @property
-    def available(self):
-        return self._hub.is_available()
-
-    @property
-    def _has_feedback_join(self):
-        return (
-            bool(self._mode_joins)
-            or self._state_join is not None
-            or self._switch_join is not None
-        )
-
-    @property
-    def is_on(self):
+        For the AC power switch the "feedback" is the set of running-mode joins
+        (制冷/制热/…): the unit is on iff one of them is asserted.
+        """
         if self._mode_joins:
             return any(
                 self._hub.get_digital(j) for j in self._mode_joins.values()
@@ -128,6 +122,27 @@ class CrestronSwitch(SwitchEntity):
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
             return self._hub.get_digital(self._switch_join)
+        return None
+
+    async def process_callback(self, cbtype, value):
+        # Reconcile with real feedback. Only genuine feedback joins are
+        # registered (never the momentary on/off command joins), so this fires
+        # on real state transitions — including changes made outside HA — and
+        # never spuriously bounces the toggle right after a command.
+        fb = self._feedback_is_on()
+        if fb is not None:
+            self._optimistic_state = fb
+        self.async_write_ha_state()
+
+    @property
+    def available(self):
+        return self._hub.is_available()
+
+    @property
+    def is_on(self):
+        # Optimistic-first: reflect the user's last command immediately so the
+        # toggle doesn't bounce while the control system's feedback join catches
+        # up; process_callback keeps this in sync with the real feedback.
         return self._optimistic_state
 
     @property
@@ -146,19 +161,17 @@ class CrestronSwitch(SwitchEntity):
             self._hub.set_digital(join, False)
 
     async def async_turn_on(self, **kwargs):
+        self._optimistic_state = True
+        self.async_write_ha_state()
         if self._on_join is not None:
             await self._pulse(self._on_join)
-            if not self._has_feedback_join:
-                self._optimistic_state = True
-                self.async_write_ha_state()
         else:
             self._hub.set_digital(self._switch_join, True)
 
     async def async_turn_off(self, **kwargs):
+        self._optimistic_state = False
+        self.async_write_ha_state()
         if self._off_join is not None:
             await self._pulse(self._off_join)
-            if not self._has_feedback_join:
-                self._optimistic_state = False
-                self.async_write_ha_state()
         else:
             self._hub.set_digital(self._switch_join, False)
