@@ -222,8 +222,9 @@ def build_ac(row):
     One climate entity per AC = one device, one thermostat card, and it shows
     up in HA's "空调"(climate) category. Power is a real on/off button (pulsed
     on/off joins); temperature setpoint and fan speed are settable; the running
-    mode (制冷/制热/通风/除湿) is read-only (centrally controlled, shown via
-    hvac_action). Needs power joins; without them the AC can't be a climate.
+    mode (制冷/制热/通风/除湿) is a real selectable mode that tracks the control
+    system's feedback joins. Needs power joins; without them the AC can't be a
+    climate.
     """
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
@@ -380,7 +381,27 @@ def generate(xlsx_path, out_dir):
         f.write(emit_domain(by_platform, source))
     counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
     print(f"  wrote {path}  ({counts})")
+    _print_usage(path)
     return by_platform
+
+
+def _print_usage(path):
+    """Tell the user exactly what to do with the file we just wrote."""
+    print(
+        "\n"
+        "下一步（如何使用这个配置文件）：\n"
+        f"  1. 把生成的 {os.path.basename(path)} 复制到 Home Assistant 配置目录\n"
+        "     （与 configuration.yaml 同一个文件夹）。\n"
+        "  2. 在 configuration.yaml 里加一行（include 这个文件）：\n"
+        "         crestron: !include crestron.yaml\n"
+        "     注意：整个 configuration.yaml 只能有一个 `crestron:` 键。端口写在\n"
+        "     crestron.yaml 顶部的 `port:`，不要在 configuration.yaml 里再写一个\n"
+        "     `crestron:`（会冲突）。\n"
+        f"  3. 打开 {os.path.basename(path)}，把顶部的 `port:` 改成你的快思聪 XSIG 端口。\n"
+        "  4. 重启 Home Assistant。\n"
+        "  5. 若实体类型变过（如旧的开关灯变成灯、空调合并成一个 climate），重启后到\n"
+        "     设置 → 设备与服务 → 实体，筛选「不可用」，把旧实体批量删除即可。\n"
+    )
 
 
 def main(argv):

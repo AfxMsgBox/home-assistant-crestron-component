@@ -58,9 +58,12 @@ class CrestronNumber(NumberEntity, RestoreEntity):
         self._hub.register_callback(self.process_callback, joins=[f"a{self._join}"])
         # If connected, trust live feedback; otherwise restore the pre-restart
         # value instead of showing 0/unknown until the control system next
-        # pushes the analog join (it sends only on change).
+        # pushes the analog join (it sends only on change). Treat 0 as "not yet
+        # known" so the setpoint never briefly shows below its min (e.g. 16).
         if self._hub.is_available():
-            self._value = self._hub.get_analog(self._join)
+            v = self._hub.get_analog(self._join)
+            if v:
+                self._value = v
         else:
             last = await self.async_get_last_state()
             if last is not None:
@@ -73,7 +76,9 @@ class CrestronNumber(NumberEntity, RestoreEntity):
         self._hub.remove_callback(self.process_callback)
 
     async def process_callback(self, cbtype, value):
-        self._value = self._hub.get_analog(self._join)
+        v = self._hub.get_analog(self._join)
+        if v:
+            self._value = v
         self.async_write_ha_state()
 
     @property

@@ -21,6 +21,7 @@ from .const import (
     CONF_SOURCES,
 )
 from .schema import analog_join, digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class CrestronRoom(MediaPlayerEntity):
         self._source_number_join = config.get(CONF_SOURCE_NUM_JOIN)
         self._sources = config.get(CONF_SOURCES)
         self._attr_unique_id = f"crestron_media_{self._source_number_join}"
+        self._attr_device_info = device_info(config)
         self._last_source_num = next(iter(self._sources), None)
 
     async def async_added_to_hass(self):

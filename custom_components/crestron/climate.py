@@ -1,15 +1,19 @@
 """Platform for Crestron Air Conditioner (climate) integration.
 
-The AC is part of a larger centrally-controlled system: the running mode
-(cool/heat/dry/fan) is **not** user-settable from HA — it is shown read-only via
-``hvac_action`` (derived from the mode feedback joins). What HA controls is:
-power on/off (momentary on/off joins), the temperature setpoint and the fan
-speed.
+One climate entity per AC = one device, one thermostat card, shown in HA's
+"空调"(climate) category. HA controls:
+  - the running mode — a real, settable selector mapped to digital joins:
+    cool/heat/dry/fan (制冷/制热/通风/除湿). Selecting a mode powers the unit on
+    (pulse on_join if it was off) and asserts that mode's join, clearing the
+    others (set-one-clear, like fan speed). HVACMode.OFF powers off.
+  - power on/off — also available as the card's power button (TURN_ON/TURN_OFF).
+  - temperature setpoint and fan speed.
 
-Power state, setpoint and fan speed are kept optimistically and restored across
-restarts: the control system pushes feedback only on change (no full dump on
-connect), so reading the joins directly would show a wrong state until the next
-change. process_callback reconciles to real feedback whenever it arrives.
+Every join now reports state back from the control system, so power/mode/fan/
+setpoint are reconciled from live feedback in process_callback. An optimistic
+override is kept only for the brief window between issuing a command and its
+feedback echo (so the UI doesn't bounce), and state is restored across restarts
+via RestoreEntity.
 """
 
 import asyncio
@@ -86,11 +90,23 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(CrestronAC(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
+# Running-mode digital joins -> HVACMode, in a stable display order.
+_MODE_ORDER = (
+    (CONF_MODE_COOL_JOIN, HVACMode.COOL),
+    (CONF_MODE_HEAT_JOIN, HVACMode.HEAT),
+    (CONF_MODE_DRY_JOIN, HVACMode.DRY),
+    (CONF_MODE_FAN_JOIN, HVACMode.FAN_ONLY),
+)
+_MODE_TO_ACTION = {
+    HVACMode.COOL: HVACAction.COOLING,
+    HVACMode.HEAT: HVACAction.HEATING,
+    HVACMode.DRY: HVACAction.DRYING,
+    HVACMode.FAN_ONLY: HVACAction.FAN,
+}
+
+
 class CrestronAC(ClimateEntity, RestoreEntity):
     _attr_should_poll = False
-    # Mode is not user-settable, so we only expose off/on; the real running
-    # mode is surfaced read-only through hvac_action.
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
     _attr_target_temperature_step = 1
     _attr_min_temp = 16
     _attr_max_temp = 30
@@ -107,10 +123,12 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         self._off_join = config[CONF_OFF_JOIN]
         self._set_temp_join = config.get(CONF_SET_TEMP_JOIN)
         self._reg_temp_join = config.get(CONF_REG_TEMP_JOIN)
-        self._mode_cool_join = config.get(CONF_MODE_COOL_JOIN)
-        self._mode_heat_join = config.get(CONF_MODE_HEAT_JOIN)
-        self._mode_fan_join = config.get(CONF_MODE_FAN_JOIN)
-        self._mode_dry_join = config.get(CONF_MODE_DRY_JOIN)
+        # HVACMode -> digital join (only for the modes that carry a join).
+        self._mode_joins = {}
+        for conf_key, mode in _MODE_ORDER:
+            join = config.get(conf_key)
+            if join is not None:
+                self._mode_joins[mode] = join
         # fan mode string -> digital join
         self._fan_joins = {}
         if config.get(CONF_FAN_LOW_JOIN) is not None:
@@ -125,8 +143,18 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         uid = self._reg_temp_join or self._set_temp_join or self._on_join
         self._attr_unique_id = f"crestron_climate_{uid}"
 
+        # Selectable modes: OFF + the real running modes. Fall back to a plain
+        # on/off ([OFF, AUTO]) when no per-mode joins are configured.
+        if self._mode_joins:
+            self._attr_hvac_modes = [HVACMode.OFF] + list(self._mode_joins.keys())
+        else:
+            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
+        # Callback keys for the mode joins (used to detect external power-off).
+        self._mode_cbtypes = {f"d{j}" for j in self._mode_joins.values()}
+
         # Optimistic/cached state (reconciled with feedback in process_callback).
         self._optimistic_on = False
+        self._optimistic_mode = next(iter(self._mode_joins), HVACMode.AUTO)
         self._target_temp = None
         self._fan_mode = None
 
@@ -138,18 +166,12 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             self._attr_fan_modes = list(self._fan_joins.keys())
         self._attr_supported_features = features
 
-    @property
-    def _mode_joins(self):
-        return [
-            j
-            for j in (
-                self._mode_cool_join,
-                self._mode_heat_join,
-                self._mode_fan_join,
-                self._mode_dry_join,
-            )
-            if j is not None
-        ]
+    def _feedback_mode(self):
+        """The HVACMode whose join is asserted, or None when all are low (off)."""
+        for mode, join in self._mode_joins.items():
+            if self._hub.get_digital(join):
+                return mode
+        return None
 
     def _feedback_fan(self):
         for mode, join in self._fan_joins.items():
@@ -161,30 +183,41 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         analog_joins = [
             j for j in (self._set_temp_join, self._reg_temp_join) if j is not None
         ]
-        digital_joins = self._mode_joins + list(self._fan_joins.values())
+        digital_joins = list(self._mode_joins.values()) + list(self._fan_joins.values())
         joins = [f"a{j}" for j in analog_joins]
         joins += [f"d{j}" for j in digital_joins]
         self._hub.register_callback(self.process_callback, joins=joins)
 
-        # Initial state: trust live feedback if connected, else restore the
-        # pre-restart values (the control system pushes feedback only on change).
+        # Restore the pre-restart state first (covers the cold-start window
+        # before the control system reconnects).
         last = await self.async_get_last_state()
         if last is not None:
-            if last.state in (HVACMode.OFF, HVACMode.AUTO):
-                self._optimistic_on = last.state == HVACMode.AUTO
+            if last.state == HVACMode.OFF:
+                self._optimistic_on = False
+            elif last.state in self._mode_joins:
+                self._optimistic_on = True
+                self._optimistic_mode = HVACMode(last.state)
+            elif last.state == HVACMode.AUTO and not self._mode_joins:
+                self._optimistic_on = True
             t = last.attributes.get(ATTR_TEMPERATURE)
             if t is not None:
                 self._target_temp = t
             f = last.attributes.get("fan_mode")
             if f in self._fan_joins:
                 self._fan_mode = f
+        # If already connected, upgrade to live feedback. Only *raise* to a known
+        # mode here — don't force "off" from not-yet-pushed joins on cold start.
         if self._hub.is_available():
-            self._reconcile_from_feedback()
+            fb = self._feedback_mode()
+            if fb is not None:
+                self._optimistic_on = True
+                self._optimistic_mode = fb
+            self._reconcile_temp_fan()
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
 
-    def _reconcile_from_feedback(self):
+    def _reconcile_temp_fan(self):
         """Update cached setpoint/fan from live joins (ignore 0/None = unknown)."""
         if self._set_temp_join is not None:
             v = self._hub.get_analog(self._set_temp_join)
@@ -195,7 +228,18 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             self._fan_mode = fb_fan
 
     async def process_callback(self, cbtype, value):
-        self._reconcile_from_feedback()
+        # Reconcile power/mode from feedback. A mode join going high means on +
+        # that mode; a mode-join event with all modes low means the unit was
+        # switched off (incl. outside HA). A non-mode event (temp/fan/available)
+        # never flips power, so the optimistic on-state set by a command isn't
+        # clobbered before its feedback echoes.
+        fb = self._feedback_mode()
+        if fb is not None:
+            self._optimistic_on = True
+            self._optimistic_mode = fb
+        elif cbtype in self._mode_cbtypes:
+            self._optimistic_on = False
+        self._reconcile_temp_fan()
         self.async_write_ha_state()
 
     @property
@@ -204,22 +248,18 @@ class CrestronAC(ClimateEntity, RestoreEntity):
 
     @property
     def hvac_mode(self):
-        return HVACMode.AUTO if self._optimistic_on else HVACMode.OFF
+        if not self._optimistic_on:
+            return HVACMode.OFF
+        if self._optimistic_mode in self._mode_joins:
+            return self._optimistic_mode
+        # Mode-less fallback (or mode not yet known): report the first non-off.
+        return self._attr_hvac_modes[1]
 
     @property
     def hvac_action(self):
-        # Read-only running mode from the central system's feedback joins.
         if not self._optimistic_on:
             return HVACAction.OFF
-        if self._mode_cool_join and self._hub.get_digital(self._mode_cool_join):
-            return HVACAction.COOLING
-        if self._mode_heat_join and self._hub.get_digital(self._mode_heat_join):
-            return HVACAction.HEATING
-        if self._mode_dry_join and self._hub.get_digital(self._mode_dry_join):
-            return HVACAction.DRYING
-        if self._mode_fan_join and self._hub.get_digital(self._mode_fan_join):
-            return HVACAction.FAN
-        return HVACAction.IDLE
+        return _MODE_TO_ACTION.get(self._optimistic_mode, HVACAction.IDLE)
 
     @property
     def current_temperature(self):
@@ -254,8 +294,23 @@ class CrestronAC(ClimateEntity, RestoreEntity):
     async def async_set_hvac_mode(self, hvac_mode):
         if hvac_mode == HVACMode.OFF:
             await self.async_turn_off()
-        else:
+            return
+        join = self._mode_joins.get(hvac_mode)
+        if join is None:
+            # Mode-less fallback (e.g. AUTO): just power on.
             await self.async_turn_on()
+            return
+        was_on = self._optimistic_on
+        self._optimistic_on = True
+        self._optimistic_mode = hvac_mode
+        self.async_write_ha_state()
+        # Power on first if it was off, then select the mode (set-one-clear).
+        if not was_on:
+            await self._pulse(self._on_join)
+        for j in self._mode_joins.values():
+            if j != join:
+                self._hub.set_digital(j, False)
+        self._hub.set_digital(join, True)
 
     async def async_set_fan_mode(self, fan_mode):
         target = self._fan_joins.get(fan_mode)
