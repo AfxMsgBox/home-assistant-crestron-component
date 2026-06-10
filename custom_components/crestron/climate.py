@@ -59,6 +59,9 @@ from .schema import analog_join, digital_join
 _LOGGER = logging.getLogger(__name__)
 
 PULSE_SECONDS = 0.2
+# Room-temp feedback below this delta is dropped (not written to HA state),
+# so a chatty control system can't flood the recorder database.
+TEMP_REPORT_THRESHOLD = 0.5
 
 PLATFORM_SCHEMA = vol.Schema(
     {
@@ -157,6 +160,12 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         self._optimistic_mode = next(iter(self._mode_joins), HVACMode.AUTO)
         self._target_temp = None
         self._fan_mode = None
+        # Last room temp written to HA state; updates within
+        # TEMP_REPORT_THRESHOLD of it are dropped.
+        self._reported_temp = None
+        self._reg_temp_cbtype = (
+            f"a{self._reg_temp_join}" if self._reg_temp_join is not None else None
+        )
 
         features = ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
         if self._set_temp_join is not None:
@@ -205,6 +214,9 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             f = last.attributes.get("fan_mode")
             if f in self._fan_joins:
                 self._fan_mode = f
+            c = last.attributes.get("current_temperature")
+            if c is not None:
+                self._reported_temp = c
         # If already connected, upgrade to live feedback. Only *raise* to a known
         # mode here — don't force "off" from not-yet-pushed joins on cold start.
         if self._hub.is_available():
@@ -223,11 +235,29 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             v = self._hub.get_analog(self._set_temp_join)
             if v:
                 self._target_temp = v
+        if self._reg_temp_join is not None:
+            v = self._hub.get_analog(self._reg_temp_join)
+            if v:
+                self._reported_temp = v
         fb_fan = self._feedback_fan()
         if fb_fan is not None:
             self._fan_mode = fb_fan
 
     async def process_callback(self, cbtype, value):
+        # Room-temp events: drop sub-threshold changes entirely so frequent
+        # small fluctuations don't churn HA state / the recorder database.
+        if cbtype == self._reg_temp_cbtype:
+            v = self._hub.get_analog(self._reg_temp_join)
+            if not v:  # 0/None = unknown, nothing to report
+                return
+            if (
+                self._reported_temp is not None
+                and abs(v - self._reported_temp) < TEMP_REPORT_THRESHOLD
+            ):
+                return
+            self._reported_temp = v
+            self.async_write_ha_state()
+            return
         # Reconcile power/mode from feedback. A mode join going high means on +
         # that mode; a mode-join event with all modes low means the unit was
         # switched off (incl. outside HA). A non-mode event (temp/fan/available)
@@ -263,9 +293,7 @@ class CrestronAC(ClimateEntity, RestoreEntity):
 
     @property
     def current_temperature(self):
-        if self._reg_temp_join is None:
-            return None
-        return self._hub.get_analog(self._reg_temp_join)
+        return self._reported_temp
 
     @property
     def target_temperature(self):

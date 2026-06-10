@@ -1,0 +1,168 @@
+"""Tests for the climate room-temp report threshold (TEMP_REPORT_THRESHOLD).
+
+climate.py imports homeassistant, which isn't installed in the bare test
+environment, so minimal stand-ins are installed into sys.modules before
+loading the module via the synthetic-package loader. voluptuous is real.
+"""
+
+import asyncio
+import enum
+import sys
+import types
+import unittest
+
+from loader import load
+
+
+# --------------------------------------------------------------------------- #
+# stub just enough of homeassistant/voluptuous for climate.py to import
+# --------------------------------------------------------------------------- #
+def _module(name, **attrs):
+    mod = sys.modules.get(name) or types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    sys.modules[name] = mod
+    return mod
+
+
+class HVACMode(str, enum.Enum):
+    OFF = "off"
+    HEAT = "heat"
+    COOL = "cool"
+    AUTO = "auto"
+    DRY = "dry"
+    FAN_ONLY = "fan_only"
+
+
+class HVACAction(str, enum.Enum):
+    OFF = "off"
+    HEATING = "heating"
+    COOLING = "cooling"
+    DRYING = "drying"
+    FAN = "fan"
+    IDLE = "idle"
+
+
+class ClimateEntityFeature(enum.IntFlag):
+    TARGET_TEMPERATURE = 1
+    FAN_MODE = 8
+    TURN_OFF = 256
+    TURN_ON = 512
+
+
+class ClimateEntity:
+    # CrestronAC never calls super().__init__(), so default via class attr.
+    write_count = 0
+
+    def async_write_ha_state(self):
+        self.write_count += 1
+
+
+class RestoreEntity:
+    async def async_get_last_state(self):
+        return None
+
+
+class UnitOfTemperature:
+    CELSIUS = "°C"
+
+
+def _install_stubs():
+    ha = _module("homeassistant")
+    helpers = _module("homeassistant.helpers")
+    _module("homeassistant.helpers.config_validation", string=str)
+    _module("homeassistant.helpers.restore_state", RestoreEntity=RestoreEntity)
+    components = _module("homeassistant.components")
+    climate = _module(
+        "homeassistant.components.climate",
+        ClimateEntity=ClimateEntity, ClimateEntityFeature=ClimateEntityFeature,
+        HVACMode=HVACMode, HVACAction=HVACAction,
+    )
+    _module("homeassistant.components.climate.const",
+            FAN_LOW="low", FAN_MEDIUM="medium", FAN_HIGH="high", FAN_AUTO="auto")
+    _module("homeassistant.const", CONF_NAME="name", ATTR_TEMPERATURE="temperature",
+            UnitOfTemperature=UnitOfTemperature)
+    ha.helpers = helpers
+    ha.components = components
+    components.climate = climate
+
+
+_install_stubs()
+climate_mod = load("climate")
+
+
+class FakeHub:
+    def __init__(self):
+        self.analog = {}
+        self.digital = {}
+
+    def get_analog(self, join):
+        return self.analog.get(join, 0)
+
+    def get_digital(self, join):
+        return self.digital.get(join, False)
+
+    def is_available(self):
+        return True
+
+    def register_callback(self, cb, joins=None):
+        pass
+
+    def remove_callback(self, cb):
+        pass
+
+
+def make_ac(hub):
+    return climate_mod.CrestronAC(hub, {
+        "name": "AC", "on_join": 505, "off_join": 506,
+        "set_temp_join": 414, "reg_temp_join": 415,
+        "mode_cool_join": 507, "fan_low_join": 512,
+    })
+
+
+class TempFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = FakeHub()
+        self.ac = make_ac(self.hub)
+
+    def _temp_event(self, value):
+        self.hub.analog[415] = value
+        asyncio.run(self.ac.process_callback("a415", str(value)))
+
+    def test_first_value_reported(self):
+        self._temp_event(24)
+        self.assertEqual(self.ac.current_temperature, 24)
+        self.assertEqual(self.ac.write_count, 1)
+
+    def test_sub_threshold_change_dropped(self):
+        self._temp_event(24)
+        self._temp_event(24)      # duplicate push
+        self._temp_event(24.4)    # < 0.5 delta
+        self.assertEqual(self.ac.current_temperature, 24)
+        self.assertEqual(self.ac.write_count, 1)
+
+    def test_threshold_change_reported(self):
+        self._temp_event(24)
+        self._temp_event(24.5)
+        self.assertEqual(self.ac.current_temperature, 24.5)
+        self.assertEqual(self.ac.write_count, 2)
+
+    def test_unknown_zero_dropped(self):
+        self._temp_event(0)
+        self.assertIsNone(self.ac.current_temperature)
+        self.assertEqual(self.ac.write_count, 0)
+
+    def test_other_events_still_write_and_refresh_temp(self):
+        self._temp_event(24)
+        # temp drifts below threshold, then a mode join fires: the mode event
+        # writes state anyway and opportunistically refreshes the cached temp.
+        self.hub.analog[415] = 24.3
+        self.hub.digital[507] = True
+        asyncio.run(self.ac.process_callback("d507", "1"))
+        self.assertEqual(self.ac.write_count, 2)
+        self.assertEqual(self.ac.current_temperature, 24.3)
+        self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.COOL)
+
+
+if __name__ == "__main__":
+    unittest.main()
