@@ -58,14 +58,6 @@ class LightTests(unittest.TestCase):
         self.assertNotIn("brightness_join", ent)
         self.assertEqual(ent["device_id"], "light_onoff_1")
 
-    def test_legacy_名字_header_still_works(self):
-        # 兼容旧表头「名字」（新表头是「名称」）。
-        row = light_row(功能="单色温", 亮度="4")
-        del row["名称"]
-        row["名字"] = "吊灯"
-        _, ent = g.build_light(row)
-        self.assertEqual(ent["name"], "B2.车库 吊灯")
-
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
 

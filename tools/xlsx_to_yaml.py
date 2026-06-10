@@ -106,9 +106,6 @@ def _name(row, name_col):
     floor = row.get("楼层", "").strip()
     room = row.get("房间", "").strip()
     label = row.get(name_col, "").strip() if name_col else ""
-    # 新版表头用「名称」，旧版用「名字」；都试一下保持兼容。
-    if not label and name_col == "名称":
-        label = row.get("名字", "").strip()
     prefix = ".".join(p for p in (floor, room) if p)
     return f"{prefix} {label}".strip() if label else prefix
 
