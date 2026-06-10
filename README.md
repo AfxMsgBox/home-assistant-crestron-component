@@ -153,7 +153,7 @@ crestron:
 
 两种灯都用 `light` 平台，按"哪一列有 join"自动区分：
 
-**调光灯**：带亮度,可选色温（1500–5000 K，直接以 K 值写入模拟 join，需控制系统侧解析）。
+**调光灯**：带亮度,可选色温（2700–6500 K，直接以 K 值写入模拟 join，需控制系统侧解析）。
 
 ```yaml
 light:
@@ -164,7 +164,7 @@ light:
 ```
 
 - `brightness_join`：模拟 join，0–65535 ↔ HA 0–255。
-- `color_temp_join`：可选模拟 join，K 值直接读写。
+- `color_temp_join`：可选模拟 join，K 值直接读写（2700–6500）。
 
 **只开关的灯**（继电器/单一功能灯）：没有亮度，用点动 `on_join`/`off_join`。它在 HA 里**仍是一盏灯**（`ColorMode.ONOFF`，灯图标、语音"开灯"、归灯光类别），不是开关。无反馈 join 时用乐观状态并跨重启恢复。
 
@@ -196,11 +196,11 @@ climate:
     mode_heat_join: 508
     mode_fan_join: 510
     mode_dry_join: 511
-    # 风速（选一置位、清其余）
-    fan_low_join: 512
-    fan_med_join: 513
-    fan_high_join: 514
-    fan_auto_join: 515
+    # 风速（四档数字量 join，选一置位、清其余）
+    fan_low_join: 512        # 低速
+    fan_med_join: 513        # 中速
+    fan_high_join: 514       # 高速
+    fan_auto_join: 515       # 自动风速
     device_id: ac_505
     device_name: "B2.洗衣房 空调"
 ```
@@ -243,6 +243,7 @@ cover:
 - `stop_join`：必填，停止脉冲。
 - `is_opening/closing/closed_join`：可选反馈。
 - 若同时配置 `open/close_join` 且无 `pos_join`，`set_position` 按 50% 阈值映射为开/关。
+- **无 `pos_join`（瞬动开/关型）时为「假定状态」**（`assumed_state`）：卡片显示常驻可按的开/关/停按钮，开/关命令始终无条件下发，不会因反馈状态而禁用按钮。
 
 ### Switch（开关）
 
@@ -387,13 +388,13 @@ python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 
 | sheet | 列 | 产出平台键 |
 |-------|----|-----------|
-| `灯光` | 楼层 房间 名字 功能 亮度 色温 开 关 | `light:`（调光灯 + 只开关灯） |
-| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动 温度 室温 | `climate:` |
+| `灯光` | 楼层 房间 名称 功能 亮度 色温 开 关 | `light:`（调光灯 + 只开关灯） |
+| `空调` | 楼层 房间 开 关 制冷 制热 通风 除湿 低速 中速 高速 自动风速 温度 室温 | `climate:` |
 | `窗帘` | 楼层 房间 名称 开 关 停止 | `cover:` |
 
 - **灯光按"列是否有值"判断能力**：有 `亮度` → 调光 light（有 `色温` 再加色温）；只有 `开/关` → 只开关的 light（`ColorMode.ONOFF`）；空行/占位（如 `//`）自动跳过。
 - **每台空调一个 `climate` 实体**：电源开/关按钮、温度、风速可控，运行模式只读；进 HA「空调」类别,一台一张恒温器卡。
-- 实体名 = `楼层.房间 名字`，同名自动追加 ` 2`/` 3`。
+- 实体名 = `楼层.房间 名称`，同名自动追加 ` 2`/` 3`（兼容旧表头 `名字`）。
 
 把生成的 `crestron.yaml` 放到 HA 配置目录，在 `configuration.yaml` 里用一行引入；生成器输出顶部已带 `port: 10200` 占位，改成你的端口、有 `to_joins/from_joins` 也并进这个文件：
 

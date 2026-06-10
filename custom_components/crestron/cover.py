@@ -98,6 +98,10 @@ class CrestronShade(CoverEntity):
         )
         if self._pos_join is not None:
             self._attr_supported_features |= CoverEntityFeature.SET_POSITION
+        # 无位置反馈时按「假定状态」处理：卡片显示常驻可按的开/关/停按钮，
+        # 不根据状态禁用按钮——满足「开/关控制不能因反馈状态被影响」。
+        if self._pos_join is None:
+            self._attr_assumed_state = True
 
     async def async_added_to_hass(self):
         joins = []

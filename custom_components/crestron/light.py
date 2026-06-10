@@ -65,8 +65,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 class CrestronLight(LightEntity):
     _attr_should_poll = False
-    _attr_min_color_temp_kelvin = 1500
-    _attr_max_color_temp_kelvin = 5000
+    # 双色温灯色温范围（开发者 xlsx「说明」：色温值 2700–6500），按原值 K 直写模拟 join。
+    _attr_min_color_temp_kelvin = 2700
+    _attr_max_color_temp_kelvin = 6500
 
     def __init__(self, hub, config):
         self._hub = hub

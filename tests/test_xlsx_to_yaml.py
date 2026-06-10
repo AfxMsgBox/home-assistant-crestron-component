@@ -13,16 +13,16 @@ import xlsx_to_yaml as g  # noqa: E402
 
 
 def light_row(**kw):
-    base = {"楼层": "B2", "房间": "车库", "名字": "", "功能": "",
+    base = {"楼层": "B2", "房间": "车库", "名称": "", "功能": "",
             "亮度": "", "色温": "", "开": "", "关": ""}
     base.update(kw)
     return base
 
 
-class LightSwitchTests(unittest.TestCase):
+class LightTests(unittest.TestCase):
     def test_dual_color_temp_light(self):
-        plat, ent = g.build_light_or_switch(
-            light_row(名字="天花灯带", 功能="双色温", 亮度="1", 色温="201")
+        plat, ent = g.build_light(
+            light_row(名称="天花灯带", 功能="双色温", 亮度="1", 色温="201")
         )
         self.assertEqual(plat, "light")
         self.assertEqual(ent["name"], "B2.车库 天花灯带")
@@ -31,8 +31,8 @@ class LightSwitchTests(unittest.TestCase):
         self.assertEqual(ent["color_temp_join"], 201)
 
     def test_brightness_only_light(self):
-        plat, ent = g.build_light_or_switch(
-            light_row(名字="吊灯", 功能="单色温", 亮度="4")
+        plat, ent = g.build_light(
+            light_row(名称="吊灯", 功能="单色温", 亮度="4")
         )
         self.assertEqual(plat, "light")
         self.assertNotIn("color_temp_join", ent)
@@ -40,16 +40,16 @@ class LightSwitchTests(unittest.TestCase):
     def test_single_label_but_has_color_temp(self):
         # Capability is column-driven: 单色温 row that still carries a 色温
         # join must become a color-temp light.
-        plat, ent = g.build_light_or_switch(
-            light_row(名字="壁灯", 功能="单色温", 亮度="24", 色温="224")
+        plat, ent = g.build_light(
+            light_row(名称="壁灯", 功能="单色温", 亮度="24", 色温="224")
         )
         self.assertEqual(plat, "light")
         self.assertEqual(ent["color_temp_join"], 224)
 
     def test_relay_is_onoff_light(self):
-        # An on/off-only light stays a light (no brightness), not a switch.
-        plat, ent = g.build_light_or_switch(
-            light_row(名字="柜灯", 功能="Relay", 开="1", 关="2")
+        # An on/off-only light stays a light (no brightness), never a switch.
+        plat, ent = g.build_light(
+            light_row(名称="柜灯", 功能="Relay", 开="1", 关="2")
         )
         self.assertEqual(plat, "light")
         self.assertEqual(ent["on_join"], 1)
@@ -58,8 +58,16 @@ class LightSwitchTests(unittest.TestCase):
         self.assertNotIn("brightness_join", ent)
         self.assertEqual(ent["device_id"], "light_onoff_1")
 
+    def test_legacy_名字_header_still_works(self):
+        # 兼容旧表头「名字」（新表头是「名称」）。
+        row = light_row(功能="单色温", 亮度="4")
+        del row["名称"]
+        row["名字"] = "吊灯"
+        _, ent = g.build_light(row)
+        self.assertEqual(ent["name"], "B2.车库 吊灯")
+
     def test_placeholder_skipped(self):
-        self.assertIsNone(g.build_light_or_switch(light_row(名字="x", 功能="//")))
+        self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
 
 
 class CoverTests(unittest.TestCase):
@@ -91,7 +99,7 @@ class AcTests(unittest.TestCase):
     def _full(self):
         return {"楼层": "B2", "房间": "洗衣房", "开": "505", "关": "506",
                 "制冷": "507", "制热": "508", "通风": "510", "除湿": "511",
-                "低速": "512", "中速": "513", "高速": "514", "自动": "515",
+                "低速": "512", "中速": "513", "高速": "514", "自动风速": "515",
                 "温度": "414", "室温": "415"}
 
     def test_full_row_produces_one_climate(self):

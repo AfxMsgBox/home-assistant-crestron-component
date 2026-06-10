@@ -106,6 +106,9 @@ def _name(row, name_col):
     floor = row.get("楼层", "").strip()
     room = row.get("房间", "").strip()
     label = row.get(name_col, "").strip() if name_col else ""
+    # 新版表头用「名称」，旧版用「名字」；都试一下保持兼容。
+    if not label and name_col == "名称":
+        label = row.get("名字", "").strip()
     prefix = ".".join(p for p in (floor, room) if p)
     return f"{prefix} {label}".strip() if label else prefix
 
@@ -119,21 +122,20 @@ def _group(row):
 # --------------------------------------------------------------------------- #
 # row -> (platform, entity) builders  (pure, unit-tested)
 # --------------------------------------------------------------------------- #
-def build_light_or_switch(row):
+def build_light(row):
     """灯光 sheet row -> ('light', entity) or None.
 
-    Capability is read from which columns carry a join, not from the 功能
-    label: a brightness join -> dimmable light (color_temp optional); an
-    on/off pair -> on/off-only light (relay-style, no brightness); neither ->
-    skip (e.g. the '//' placeholder). A single-function ceiling light is still
-    a *light*, not a switch.
+    灯光 sheet 永远只产出 light（绝不产出 switch）。能力由「哪一列带 join」决定，
+    而非「功能」标签：有亮度 join -> 调光灯（色温可选）；只有开/关 -> 只开关的灯
+    （relay 式、无亮度，ColorMode.ONOFF——只开关的灯仍是灯）；都没有 -> 跳过
+    （如 '//' 占位）。
     """
     bri = _to_int(row.get("亮度"))
     cct = _to_int(row.get("色温"))
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
     if bri is not None:
-        name = _name(row, "名字")
+        name = _name(row, "名称")
         ent = {
             "platform": "crestron",
             "name": name,
@@ -147,7 +149,7 @@ def build_light_or_switch(row):
         ent["_group"] = _group(row)
         return "light", ent
     if on is not None and off is not None:
-        name = _name(row, "名字")
+        name = _name(row, "名称")
         ent = {
             "platform": "crestron",
             "name": name,
@@ -185,7 +187,7 @@ def build_cover(row):
 
 
 _AC_MODE_COLS = ("制冷", "制热", "通风", "除湿")
-_AC_FAN_COLS = ("低速", "中速", "高速", "自动")
+_AC_FAN_COLS = ("低速", "中速", "高速", "自动风速")
 
 
 def _join_map(row, cols):
@@ -203,7 +205,7 @@ _AC_FAN_JOIN_KEYS = {
     "低速": "fan_low_join",
     "中速": "fan_med_join",
     "高速": "fan_high_join",
-    "自动": "fan_auto_join",
+    "自动风速": "fan_auto_join",
 }
 # 空调模式列 -> climate mode_*_join 字段名(只读，仅用于显示运行模式)
 _AC_MODE_JOIN_KEYS = {
@@ -249,7 +251,7 @@ def build_ac(row):
 
 
 SHEET_BUILDERS = {
-    "灯光": build_light_or_switch,
+    "灯光": build_light,
     "窗帘": build_cover,
     "空调": build_ac,
 }
