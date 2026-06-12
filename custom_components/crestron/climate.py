@@ -9,11 +9,12 @@ One climate entity per AC = one device, one thermostat card, shown in HA's
   - power on/off — also available as the card's power button (TURN_ON/TURN_OFF).
   - temperature setpoint and fan speed.
 
-Every join now reports state back from the control system, so power/mode/fan/
-setpoint are reconciled from live feedback in process_callback. An optimistic
-override is kept only for the brief window between issuing a command and its
-feedback echo (so the UI doesn't bounce), and state is restored across restarts
-via RestoreEntity.
+Every join reports state back from the control system. Power state is read from
+on_join's feedback level (on=1/off=0); the mode joins only say *which* mode is
+running. fan/setpoint/temp are likewise reconciled from live feedback in
+process_callback. An optimistic override is kept only for the brief window
+between issuing a command and its feedback echo (so the UI doesn't bounce), and
+state is restored across restarts via RestoreEntity.
 """
 
 import asyncio
@@ -64,8 +65,8 @@ PULSE_SECONDS = 0.2
 # so a chatty control system can't flood the recorder database.
 TEMP_REPORT_THRESHOLD = 0.5
 # After issuing a power command, trust the optimistic power state for this long
-# and ignore (not-yet-settled) mode feedback, so a still-echoing mode join
-# doesn't bounce a just-turned-off unit back to "on".
+# and ignore the on_join feedback, which hasn't echoed the new level yet (so a
+# stale on_join reading doesn't briefly bounce the just-commanded state).
 POWER_SETTLE_SECONDS = 2.0
 
 PLATFORM_SCHEMA = vol.Schema(
@@ -157,13 +158,11 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             self._attr_hvac_modes = [HVACMode.OFF] + list(self._mode_joins.keys())
         else:
             self._attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
-        # Callback keys for the mode joins (used to detect external power-off).
-        self._mode_cbtypes = {f"d{j}" for j in self._mode_joins.values()}
 
         # Optimistic/cached state (reconciled with feedback in process_callback).
         self._optimistic_on = False
-        # Monotonic deadline until which mode feedback is ignored (see
-        # POWER_SETTLE_SECONDS); 0 = no command in flight.
+        # Monotonic deadline until which on_join feedback is ignored in favour of
+        # the optimistic state (see POWER_SETTLE_SECONDS); 0 = no command in flight.
         self._power_settle_until = 0.0
         self._optimistic_mode = next(iter(self._mode_joins), HVACMode.AUTO)
         self._target_temp = None
@@ -200,7 +199,13 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         analog_joins = [
             j for j in (self._set_temp_join, self._reg_temp_join) if j is not None
         ]
-        digital_joins = list(self._mode_joins.values()) + list(self._fan_joins.values())
+        # on_join carries the actual power state back from the control system, so
+        # subscribe to it (alongside the mode/fan joins) and treat it as truth.
+        digital_joins = (
+            [self._on_join]
+            + list(self._mode_joins.values())
+            + list(self._fan_joins.values())
+        )
         joins = [f"a{j}" for j in analog_joins]
         joins += [f"d{j}" for j in digital_joins]
         self._hub.register_callback(self.process_callback, joins=joins)
@@ -225,12 +230,14 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             c = last.attributes.get("current_temperature")
             if c is not None:
                 self._reported_temp = c
-        # If already connected, upgrade to live feedback. Only *raise* to a known
-        # mode here — don't force "off" from not-yet-pushed joins on cold start.
+        # If already connected, upgrade to live feedback. Only *raise* to on here
+        # — don't force "off" from a not-yet-pushed on_join on cold start; a real
+        # on_join feedback event will reconcile us down if the unit is actually off.
         if self._hub.is_available():
+            if self._hub.get_digital(self._on_join):
+                self._optimistic_on = True
             fb = self._feedback_mode()
             if fb is not None:
-                self._optimistic_on = True
                 self._optimistic_mode = fb
             self._reconcile_temp_fan()
 
@@ -266,20 +273,17 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             self._reported_temp = v
             self.async_write_ha_state()
             return
-        # Reconcile power/mode from feedback. A mode join going high means on +
-        # that mode; a mode-join event with all modes low means the unit was
-        # switched off (incl. outside HA). A non-mode event (temp/fan/available)
-        # never flips power, so the optimistic on-state set by a command isn't
-        # clobbered before its feedback echoes. During the settle window after a
-        # power command, ignore mode feedback entirely (a just-cleared mode join
-        # may still be echoing high and would otherwise bounce us back to on).
+        # Power state is read straight from the on_join feedback level — the
+        # control system drives it to reflect actual power (on=1/off=0), so it's
+        # the single source of truth (a latched mode join can't bounce us back
+        # on). During the settle window right after a command, trust the
+        # optimistic state instead, since the feedback hasn't echoed yet.
         if time.monotonic() >= self._power_settle_until:
-            fb = self._feedback_mode()
-            if fb is not None:
-                self._optimistic_on = True
-                self._optimistic_mode = fb
-            elif cbtype in self._mode_cbtypes:
-                self._optimistic_on = False
+            self._optimistic_on = self._hub.get_digital(self._on_join)
+        # Running-mode display follows whichever mode join is asserted.
+        fb = self._feedback_mode()
+        if fb is not None:
+            self._optimistic_mode = fb
         self._reconcile_temp_fan()
         self.async_write_ha_state()
 
@@ -330,11 +334,8 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         self._optimistic_on = False
         self._power_settle_until = time.monotonic() + POWER_SETTLE_SECONDS
         self.async_write_ha_state()
-        # Deassert any latched running-mode join first: a still-asserted mode
-        # join keeps the unit "on" (and reads back as on), so pulsing off_join
-        # alone wouldn't take. Clearing them makes feedback converge to off.
-        for j in self._mode_joins.values():
-            self._hub.set_digital(j, False)
+        # Just pulse off_join; power state is read back from on_join. Leave the
+        # mode joins as-is so the unit remembers its mode for the next power-on.
         await self._pulse(self._off_join)
 
     async def async_set_hvac_mode(self, hvac_mode):
