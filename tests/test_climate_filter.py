@@ -95,12 +95,19 @@ class FakeHub:
     def __init__(self):
         self.analog = {}
         self.digital = {}
+        self.sent_digital = []  # (join, value) commands sent to the wire
 
     def get_analog(self, join):
         return self.analog.get(join, 0)
 
     def get_digital(self, join):
         return self.digital.get(join, False)
+
+    def set_digital(self, join, value):
+        self.sent_digital.append((join, bool(value)))
+
+    def set_analog(self, join, value):
+        pass
 
     def is_available(self):
         return True
@@ -161,6 +168,39 @@ class TempFilterTests(unittest.TestCase):
         asyncio.run(self.ac.process_callback("d507", "1"))
         self.assertEqual(self.ac.write_count, 2)
         self.assertEqual(self.ac.current_temperature, 24.3)
+        self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.COOL)
+
+
+class PowerOffTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = FakeHub()
+        self.ac = make_ac(self.hub)
+
+    def test_turn_off_clears_mode_join(self):
+        # Enter cool, then turn off: the cool mode join must be deasserted so the
+        # unit doesn't stay latched "on".
+        asyncio.run(self.ac.async_set_hvac_mode(climate_mod.HVACMode.COOL))
+        self.assertIn((507, True), self.hub.sent_digital)
+        self.hub.sent_digital.clear()
+        asyncio.run(self.ac.async_turn_off())
+        self.assertIn((507, False), self.hub.sent_digital)
+        self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.OFF)
+
+    def test_stale_mode_feedback_does_not_bounce_back_on(self):
+        # Turn off, but the control system is still echoing the mode join high.
+        # Within the settle window that feedback must be ignored (stay OFF).
+        asyncio.run(self.ac.async_turn_off())
+        self.hub.digital[507] = True  # stale "cool still high" feedback
+        asyncio.run(self.ac.process_callback("d507", "1"))
+        self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.OFF)
+
+    def test_external_power_on_recognized_after_settle(self):
+        # After the settle window, a genuine mode join going high (e.g. someone
+        # turned the unit on at the wall) is reflected as on.
+        asyncio.run(self.ac.async_turn_off())
+        self.ac._power_settle_until = 0.0  # settle window elapsed
+        self.hub.digital[507] = True
+        asyncio.run(self.ac.process_callback("d507", "1"))
         self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.COOL)
 
 
