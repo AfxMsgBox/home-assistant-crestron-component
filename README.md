@@ -166,7 +166,7 @@ light:
 - `brightness_join`：模拟 join，0–65535 ↔ HA 0–255。
 - `color_temp_join`：可选模拟 join，K 值直接读写（2700–6500）。
 
-**只开关的灯**（继电器/单一功能灯）：没有亮度，用点动 `on_join`/`off_join`。它在 HA 里**仍是一盏灯**（`ColorMode.ONOFF`，灯图标、语音"开灯"、归灯光类别），不是开关。无反馈 join 时用乐观状态并跨重启恢复。
+**只开关的灯**（继电器/单一功能灯）：没有亮度，用点动 `on_join`/`off_join`。它在 HA 里**仍是一盏灯**（`ColorMode.ONOFF`，灯图标、语音"开灯"、归灯光类别），不是开关。状态从 `on_join`/`off_join` 两根命令 join 的回传电平读取（`on_join` 高=开、`off_join` 高=关），所以面板/外部开关后 HA 会跟着更新；两根都低（尚未回传）或都高（切换瞬间）时维持当前状态。下命令后先乐观显示并跨重启恢复（RestoreEntity）。
 
 ```yaml
 light:
@@ -175,8 +175,8 @@ light:
     off_join: 2
 ```
 
-- `on_join`/`off_join`：点动开/关命令（各 0.2 秒脉冲）。
-- 可选 `state_join` 或 `switch_join`：有的话用作真实开关反馈。
+- `on_join`/`off_join`：点动开/关命令（各 0.2 秒脉冲），同时控制系统在这两根 join 上回传当前开/关状态。
+- 可选 `state_join` 或 `switch_join`：配了就**优先**用作开关反馈（取代 on/off 回传）。
 
 ### 空调（climate）
 

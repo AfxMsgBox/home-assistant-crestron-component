@@ -6,6 +6,9 @@ Two kinds of light share this platform:
     light with ColorMode.ONOFF — i.e. a *light* with no brightness — rather
     than a switch, so a single-function ceiling light still behaves like a
     light (icon, "turn on the lights", the lights category) instead of a plug.
+    The control system reports state back on the command joins themselves
+    (on_join high = on, off_join high = off), so panel/external changes are
+    reflected; an optional dedicated state_join/switch_join takes precedence.
 """
 import asyncio
 import voluptuous as vol
@@ -185,17 +188,25 @@ class CrestronOnOffLight(LightEntity, RestoreEntity):
             joins.append(f"d{self._state_join}")
         elif self._switch_join is not None:
             joins.append(f"d{self._switch_join}")
+        else:
+            # Pulse-only light: the control system reports state back on the
+            # command joins themselves (on_join high = on, off_join high = off),
+            # so subscribe to those to pick up panel/external changes.
+            if self._on_join is not None:
+                joins.append(f"d{self._on_join}")
+            if self._off_join is not None:
+                joins.append(f"d{self._off_join}")
         self._hub.register_callback(self.process_callback, joins=joins)
-        # On a warm start trust live feedback; on a cold start restore the
-        # pre-restart state (pulse-only lights have no feedback join at all).
+        # Restore the pre-restart state first (covers the cold-start window
+        # before the control system reports the joins back).
+        last = await self.async_get_last_state()
+        if last is not None and last.state in ("on", "off"):
+            self._optimistic_state = last.state == "on"
+        # If already connected, upgrade to live feedback when it's definitive.
         if self._hub.is_available():
             fb = self._feedback_is_on()
             if fb is not None:
                 self._optimistic_state = fb
-        else:
-            last = await self.async_get_last_state()
-            if last is not None and last.state in ("on", "off"):
-                self._optimistic_state = last.state == "on"
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
@@ -205,6 +216,13 @@ class CrestronOnOffLight(LightEntity, RestoreEntity):
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
             return self._hub.get_digital(self._switch_join)
+        # Pulse-only light: state comes back on the command joins themselves.
+        # Exactly one asserted is definitive; both low (not reported yet) or
+        # both high (a momentary transition) is indeterminate — keep current.
+        on = self._on_join is not None and self._hub.get_digital(self._on_join)
+        off = self._off_join is not None and self._hub.get_digital(self._off_join)
+        if on != off:
+            return on
         return None
 
     async def process_callback(self, cbtype, value):
