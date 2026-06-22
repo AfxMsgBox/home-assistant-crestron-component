@@ -36,6 +36,11 @@ _LOGGER = logging.getLogger(__name__)
 
 PULSE_SECONDS = 0.2
 
+# Hold the re-asserted level this long before sending 0 on turn_off, so the
+# control system sees a distinct high->0 edge across program scans (a
+# zero-delay re-assert+0 lands in one scan and the 0 gets missed).
+OFF_REASSERT_SECONDS = 0.2
+
 PLATFORM_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): cv.string,
@@ -148,13 +153,15 @@ class CrestronLight(LightEntity):
             self._hub.set_analog(self._color_temp_join, color_temp)
 
     async def async_turn_off(self, **kwargs):
-        # 快思聪调光模块通常只在 HA 下发的电平“发生变化”时才动作。
-        # 物理开关开灯后，HA 从未主动下发过电平，直接写 0 在控制系统看来
-        # 像“没变化”而被忽略，灯泡关不掉。所以先把当前电平原样重发一次，
-        # 让紧接着的 0 成为一次明确的“高→0”跳变——等价于手动“先调亮度再关”。
+        # 快思聪调光模块通常只在 HA 下发的电平“发生变化”时才动作。物理开关开灯后，
+        # HA 从未主动下发过电平，直接写 0 在控制系统看来像“没变化”而被忽略，灯泡
+        # 关不掉。所以先把当前电平原样重发、保持一个程序扫描周期，再写 0，凑出一次
+        # 明确的“高→0”跳变。两步之间必须有延时：零延时会让两个模拟量落进控制系统
+        # 同一扫描周期、0 被重发值覆盖，导致第一次按关无效（要按两次）。
         current = self._hub.get_analog(self._brightness_join)
         if current > 0:
             self._hub.set_analog(self._brightness_join, current)
+            await asyncio.sleep(OFF_REASSERT_SECONDS)
         self._hub.set_analog(self._brightness_join, 0)
 
 
