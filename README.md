@@ -379,11 +379,37 @@ crestron:
 
 ## 批量生成配置（xlsx → YAML）
 
-`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成**一个 `crestron.yaml`**（`crestron:` 域配置：port + 各平台实体），省去手写上百条实体。纯标准库，无需 openpyxl/PyYAML。
+`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成**一个 `crestron.yaml`**（`crestron:` 域配置：port + 各平台实体），省去手写上百条实体。**纯标准库、单个自包含文件，需 Python 3.6+**，无需 openpyxl/PyYAML。它是**离线一次性工具，不在 HA 内运行**——在任意有 Python 3 的机器上跑即可，跟你的 HA 用哪个 Python 无关。
 
 ```bash
+# 在任意装了 Python 3 的电脑上执行；只需要这一个 .py 文件，不必克隆整个仓库
 python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 ```
+
+> 说明：HA 全系只用 Python 3（当前要求 3.12+），所以"不依赖 Python 3"在 HA 环境里是个伪命题——脚本本就用 Python 3，而各安装方式自带的 Python 都满足 3.6+。
+
+#### 在 Home Assistant 主机上运行（以 HAOS 为例）
+
+HAOS 自带的 `homeassistant` 容器跑的就是 Python 3.13，所以无需额外安装，按推荐度从高到低有三条路：
+
+1. **最省事（推荐）：在自己电脑上跑，再把 yaml 拷进 `/config`。**
+   在任意 Windows/Mac/Linux 上 `python3 xlsx_to_yaml.py 你的表.xlsx 输出目录`，把生成的 `crestron.yaml` 通过 Samba / 「File editor」/ 「Studio Code Server」放进 HA 配置目录（与 `configuration.yaml` 同级）。完全绕开"主机上有没有 Python"的问题。
+
+2. **在 HAOS 上跑、复用 HA 自带的 Python（无需安装任何东西）：**
+   - 装并打开「Advanced SSH & Web Terminal」加载项，把它的 **Protection mode 关掉**（这样终端里才有 `docker` 命令）。
+   - 把 `xlsx_to_yaml.py` 和你的 `.xlsx` 上传到 `/config`。
+   - 执行（复用 `homeassistant` 容器里的 Python 3，`/config` 在该容器内同路径可见）：
+     ```bash
+     docker exec -i homeassistant python3 /config/xlsx_to_yaml.py /config/你的表.xlsx /config
+     ```
+   - 生成的 `/config/crestron.yaml` 正好落在 HA 配置目录。
+
+3. **或在 SSH 加载项里装一个 `python3`：**
+   该加载项是精简 Alpine，默认没有 `python3`。在加载项「Configuration」的 `packages` 里加上 `python3`（持久），或终端里一次性 `apk add python3`（重启加载项后失效，够用一次转换）。然后：
+   ```bash
+   python3 /config/xlsx_to_yaml.py /config/你的表.xlsx /config
+   ```
+
 
 工作簿约定每个 sheet 一类设备，全部并入同一个 `crestron.yaml` 的对应平台键：
 
