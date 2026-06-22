@@ -1,11 +1,20 @@
 import asyncio
 import struct
 import logging
+import time
 
 _LOGGER = logging.getLogger(__name__)
 
 
 AVAILABLE_KEY = "available"
+
+# Initial full-sync timing probe master switch. Set to True to re-enable the
+# one-shot "join sync settled" summary log (no background task, no stat-keeping,
+# no summary log when False — near-zero overhead).
+SYNC_TIMING_ENABLED = False
+# Silence gap that marks the initial full-sync burst as "done": once no join
+# frame has arrived for this long, log the one-shot summary.
+SYNC_SETTLE_SECONDS = 1.0
 
 # XSIG protocol join number limits.
 DIGITAL_JOIN_MAX = 4096
@@ -101,6 +110,23 @@ class CrestronXsig:
             if cb not in seen:
                 await self._safe_call(cb, cbtype, value)
 
+    async def _timed_dispatch(self, cbtype, value, stats):
+        """Dispatch a join event, optionally accumulating timing stats.
+
+        ``stats`` is None when the timing probe is disabled, in which case this
+        is just a thin pass-through to _dispatch (no extra bookkeeping).
+        """
+        if stats is None:
+            await self._dispatch(cbtype, value)
+            return
+        now = time.monotonic()
+        if stats["first"] is None:
+            stats["first"] = now
+        stats["frames"] += 1
+        await self._dispatch(cbtype, value)
+        stats["last"] = time.monotonic()
+        stats["dispatch"] += stats["last"] - now
+
     async def _close_writer(self):
         writer = self._writer
         self._writer = None
@@ -126,10 +152,40 @@ class CrestronXsig:
             _LOGGER.warning("Existing XSIG connection still open; replacing it")
             await self._close_writer()
         self._writer = writer
+        settle_task = None
         try:
             writer.write(b"\xfd")
             await writer.drain()
             await self._notify_available(True)
+
+            # Timing probe: measure how long the initial full-join-sync burst
+            # takes (and how much of it is HA-side dispatch) to locate startup
+            # slowness. Gated by SYNC_TIMING_ENABLED; stats=None disables it.
+            t_request = time.monotonic()
+            stats = (
+                {"frames": 0, "first": None, "last": None, "dispatch": 0.0}
+                if SYNC_TIMING_ENABLED
+                else None
+            )
+
+            async def _log_sync_when_settled():
+                while True:
+                    await asyncio.sleep(SYNC_SETTLE_SECONDS)
+                    if stats["first"] is not None and (
+                        time.monotonic() - stats["last"] >= SYNC_SETTLE_SECONDS
+                    ):
+                        _LOGGER.info(
+                            "Initial join sync settled: %d joins, span %.2fs "
+                            "(HA dispatch %.2fs of that; first frame %.2fs after 0xFD)",
+                            stats["frames"],
+                            stats["last"] - stats["first"],
+                            stats["dispatch"],
+                            stats["first"] - t_request,
+                        )
+                        return
+
+            if stats is not None:
+                settle_task = asyncio.create_task(_log_sync_when_settled())
 
             while True:
                 try:
@@ -158,8 +214,11 @@ class CrestronXsig:
                     join = ((data[0] & 0b00011111) << 7 | data[1]) + 1
                     value = ~data[0] >> 5 & 0b1
                     self._digital[join] = bool(value)
-                    _LOGGER.debug(f"Got Digital: {join} = {value}")
-                    await self._dispatch(f"d{join}", str(value))
+                    # Lazy %-formatting: on a 1000+ join cold-start sync this
+                    # parser runs thousands of times in a burst; an f-string
+                    # would build the message even when debug is disabled.
+                    _LOGGER.debug("Got Digital: %s = %s", join, value)
+                    await self._timed_dispatch(f"d{join}", str(value), stats)
 
                 # Analog Join: 11vv 0jjj  0jjj jjjj  0vvv vvvv  0vvv vvvv
                 elif (
@@ -176,8 +235,8 @@ class CrestronXsig:
                         (data[0] & 0b00110000) << 10 | data[2] << 7 | data[3]
                     )
                     self._analog[join] = value
-                    _LOGGER.debug(f"Got Analog: {join} = {value}")
-                    await self._dispatch(f"a{join}", str(value))
+                    _LOGGER.debug("Got Analog: %s = %s", join, value)
+                    await self._timed_dispatch(f"a{join}", str(value), stats)
 
                 # Serial Join: 1100 1jjj  0jjj jjjj  <UTF-8>  0xFF
                 elif (
@@ -195,15 +254,18 @@ class CrestronXsig:
                         _LOGGER.warning(f"Invalid UTF-8 on serial join {join}")
                         continue
                     self._serial[join] = string
-                    _LOGGER.debug(f"Got String: {join} = {string}")
-                    await self._dispatch(f"s{join}", string)
+                    _LOGGER.debug("Got String: %s = %s", join, string)
+                    await self._timed_dispatch(f"s{join}", string, stats)
 
                 else:
-                    _LOGGER.debug(f"Unknown Packet: {data.hex()}")
+                    if _LOGGER.isEnabledFor(logging.DEBUG):
+                        _LOGGER.debug("Unknown Packet: %s", data.hex())
 
         except Exception as exc:
             _LOGGER.warning(f"XSIG connection error: {exc}")
         finally:
+            if settle_task is not None and not settle_task.done():
+                settle_task.cancel()
             _LOGGER.info(f"Control system disconnected: {peer}")
             # Only the currently active connection may clear writer state and
             # broadcast unavailability. If a newer connection has already taken
@@ -257,7 +319,7 @@ class CrestronXsig:
             value & 0b01111111,
         )
         self._write(data)
-        _LOGGER.debug(f"Sending Analog: {join}, {value}")
+        _LOGGER.debug("Sending Analog: %s, %s", join, value)
 
     def set_digital(self, join, value):
         """Send Digital Join to Crestron XSIG symbol."""
@@ -273,7 +335,7 @@ class CrestronXsig:
             (join - 1) & 0b01111111,
         )
         self._write(data)
-        _LOGGER.debug(f"Sending Digital: {join}, {bool(value)}")
+        _LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
 
     def set_serial(self, join, string):
         """Send String Join to Crestron XSIG symbol."""
@@ -295,4 +357,4 @@ class CrestronXsig:
         data += encoded
         data += b"\xff"
         self._write(data)
-        _LOGGER.debug(f"Sending Serial: {join}, {string}")
+        _LOGGER.debug("Sending Serial: %s, %s", join, string)

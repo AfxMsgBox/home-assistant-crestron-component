@@ -13,6 +13,7 @@ from homeassistant.const import CONF_NAME, CONF_TYPE
 from .const import (
     HUB,
     DOMAIN,
+    YAML_CONF,
     CONF_IS_OPENING_JOIN,
     CONF_IS_CLOSING_JOIN,
     CONF_IS_CLOSED_JOIN,
@@ -22,6 +23,7 @@ from .const import (
     CONF_POS_JOIN,
 )
 from .schema import analog_join, digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,9 +63,10 @@ PLATFORM_SCHEMA = vol.All(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    async_add_entities([CrestronShade(hub, config)])
+    items = hass.data[DOMAIN][YAML_CONF].get("cover", [])
+    async_add_entities(CrestronShade(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronShade(CoverEntity):
@@ -83,6 +86,7 @@ class CrestronShade(CoverEntity):
         self._attr_unique_id = (
             f"crestron_cover_{self._pos_join or self._open_join or self._close_join}"
         )
+        self._attr_device_info = device_info(config)
         if config.get(CONF_TYPE) == "curtain":
             self._attr_device_class = CoverDeviceClass.CURTAIN
         else:
@@ -94,6 +98,10 @@ class CrestronShade(CoverEntity):
         )
         if self._pos_join is not None:
             self._attr_supported_features |= CoverEntityFeature.SET_POSITION
+        # 无位置反馈时按「假定状态」处理：卡片显示常驻可按的开/关/停按钮，
+        # 不根据状态禁用按钮——满足「开/关控制不能因反馈状态被影响」。
+        if self._pos_join is None:
+            self._attr_assumed_state = True
 
     async def async_added_to_hass(self):
         joins = []

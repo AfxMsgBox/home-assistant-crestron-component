@@ -14,12 +14,14 @@ from homeassistant.const import CONF_NAME
 from .const import (
     HUB,
     DOMAIN,
+    YAML_CONF,
     CONF_MUTE_JOIN,
     CONF_VOLUME_JOIN,
     CONF_SOURCE_NUM_JOIN,
     CONF_SOURCES,
 )
 from .schema import analog_join, digital_join
+from .device import device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,10 +43,10 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(hass, entry, async_add_entities):
     hub = hass.data[DOMAIN][HUB]
-    entity = [CrestronRoom(hub, config)]
-    async_add_entities(entity)
+    items = hass.data[DOMAIN][YAML_CONF].get("media_player", [])
+    async_add_entities(CrestronRoom(hub, PLATFORM_SCHEMA(item)) for item in items)
 
 
 class CrestronRoom(MediaPlayerEntity):
@@ -66,6 +68,7 @@ class CrestronRoom(MediaPlayerEntity):
         self._source_number_join = config.get(CONF_SOURCE_NUM_JOIN)
         self._sources = config.get(CONF_SOURCES)
         self._attr_unique_id = f"crestron_media_{self._source_number_join}"
+        self._attr_device_info = device_info(config)
         self._last_source_num = next(iter(self._sources), None)
 
     async def async_added_to_hass(self):

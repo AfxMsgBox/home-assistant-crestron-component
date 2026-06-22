@@ -5,7 +5,7 @@ import logging
 import voluptuous as vol
 
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.discovery import async_load_platform
+from homeassistant.config_entries import SOURCE_IMPORT
 from homeassistant.helpers.event import TrackTemplate, async_track_template_result
 from homeassistant.helpers.template import Template
 from homeassistant.helpers.script import Script
@@ -18,7 +18,10 @@ from homeassistant.const import (
 )
 
 from .crestron import CrestronXsig
-from .const import CONF_PORT, HUB, DOMAIN, CONF_JOIN, CONF_SCRIPT, CONF_TO_HUB, CONF_FROM_HUB
+from .const import (
+    CONF_PORT, HUB, DOMAIN, CONF_JOIN, CONF_SCRIPT, CONF_TO_HUB, CONF_FROM_HUB,
+    YAML_CONF, HUB_WRAPPER,
+)
 from .schema import join_key
 from .value_coercion import to_analog, to_digital, to_serial
 
@@ -47,7 +50,10 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Required(CONF_PORT): cv.port,
                 vol.Optional(CONF_TO_HUB): vol.All(cv.ensure_list, [TO_JOINS_SCHEMA]),
                 vol.Optional(CONF_FROM_HUB): vol.All(cv.ensure_list, [FROM_JOINS_SCHEMA]),
-            }
+                # Entity definitions live under their platform key (light:, switch:,
+                # number:, ...) and are validated per-entity by each platform.
+            },
+            extra=vol.ALLOW_EXTRA,
         )
     },
     extra=vol.ALLOW_EXTRA,
@@ -61,28 +67,63 @@ PLATFORMS = [
     "climate",
     "cover",
     "media_player",
+    "number",
+    "select",
 ]
 
 async def async_setup(hass, config):
-    """Set up the crestron component."""
+    """Stash the YAML config and create the config entry that platforms attach to.
+
+    Entity definitions stay in YAML (under `crestron:`), but they are set up via
+    a config entry so Home Assistant groups them into devices (device_info is
+    only honoured for config-entry platforms, not legacy YAML platforms).
+    """
     if config.get(DOMAIN) is None:
         return True
 
-    hass.data[DOMAIN] = {}
-    hub = CrestronHub(hass, config[DOMAIN])
+    hass.data.setdefault(DOMAIN, {})[YAML_CONF] = config[DOMAIN]
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_IMPORT}, data={}
+        )
+    )
+    return True
+
+
+async def async_setup_entry(hass, entry):
+    """Start the hub and forward entity platforms (entities come from YAML)."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    yaml_conf = domain_data.get(YAML_CONF)
+    if yaml_conf is None:
+        _LOGGER.error(
+            "Crestron config entry loaded but no `crestron:` block found in "
+            "configuration.yaml — add it (see README) and restart."
+        )
+        return False
+
+    hub = CrestronHub(hass, yaml_conf)
     await hub.start()
+    domain_data[HUB_WRAPPER] = hub
 
     async def _stop(event):
         await hub.stop()
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop)
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop)
+    )
 
-    for platform in PLATFORMS:
-        hass.async_create_task(
-            async_load_platform(hass, platform, DOMAIN, {}, config)
-        )
-
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def async_unload_entry(hass, entry):
+    """Unload platforms and stop the hub."""
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        hub = hass.data[DOMAIN].pop(HUB_WRAPPER, None)
+        if hub is not None:
+            await hub.stop()
+    return unloaded
 
 
 class CrestronHub:
