@@ -8,9 +8,10 @@ _LOGGER = logging.getLogger(__name__)
 
 AVAILABLE_KEY = "available"
 
-# Initial full-sync timing probe master switch. Set to False to disable entirely
-# (no background task, no stat-keeping, no summary log — near-zero overhead).
-SYNC_TIMING_ENABLED = True
+# Initial full-sync timing probe master switch. Set to True to re-enable the
+# one-shot "join sync settled" summary log (no background task, no stat-keeping,
+# no summary log when False — near-zero overhead).
+SYNC_TIMING_ENABLED = False
 # Silence gap that marks the initial full-sync burst as "done": once no join
 # frame has arrived for this long, log the one-shot summary.
 SYNC_SETTLE_SECONDS = 1.0
