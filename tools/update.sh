@@ -4,7 +4,8 @@
 set -euo pipefail
 
 OWNER_REPO="AfxMsgBox/home-assistant-crestron-component"
-BRANCH="claude/eloquent-hawking-xaiue"
+# 分支由第一个参数决定，缺省 master。（用 ${1:-...} 兼容 set -u）
+BRANCH="${1:-master}"
 
 # 下载器自适应：优先 curl，回退 wget，都没有则报错。
 if command -v curl >/dev/null 2>&1; then
@@ -19,6 +20,7 @@ fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+echo "分支: $BRANCH （用法: ./update.sh [分支名]，缺省 master）"
 URL="https://codeload.github.com/${OWNER_REPO}/tar.gz/refs/heads/${BRANCH}"
 echo "下载: $URL"
 download "$URL" "$TMP_DIR/src.tar.gz"
