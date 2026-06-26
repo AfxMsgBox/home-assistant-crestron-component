@@ -17,7 +17,7 @@ if [ -z "$GIT_URL" ] || [ -z "$BRANCH" ] || [ -z "$REMOTE_DIR" ]; then
 fi
 
 if ! command -v git >/dev/null 2>&1; then
-    echo "错误: 没有安装 git"
+    echo "错误: 未安装 git"
     exit 1
 fi
 
