@@ -63,35 +63,53 @@ class LightTests(unittest.TestCase):
 
 
 class CoverTests(unittest.TestCase):
-    def test_curtain(self):
+    def test_curtain_with_position(self):
         plat, ent = g.build_cover(
             {"楼层": "B2", "房间": "会客厅", "名称": "纱帘1",
-             "开": "700", "关": "701", "停止": "702"}
+             "开": "700", "关": "701", "停止": "702", "位置": "480"}
         )
         self.assertEqual(plat, "cover")
         self.assertEqual(ent["type"], "curtain")
         self.assertEqual(ent["name"], "B2.会客厅 纱帘1")
         self.assertEqual((ent["open_join"], ent["close_join"], ent["stop_join"]),
                          (700, 701, 702))
+        self.assertEqual(ent["pos_join"], 480)
+
+    def test_position_optional(self):
+        # No 位置 column (or blank) -> no pos_join, still a valid cover.
+        _, ent = g.build_cover(
+            {"楼层": "B2", "房间": "会客厅", "名称": "纱帘1",
+             "开": "700", "关": "701", "停止": "702"}
+        )
+        self.assertNotIn("pos_join", ent)
+        _, ent2 = g.build_cover(
+            {"楼层": "B2", "房间": "会客厅", "名称": "纱帘1",
+             "开": "700", "关": "701", "停止": "702", "位置": ""}
+        )
+        self.assertNotIn("pos_join", ent2)
 
     def test_roller_is_shade(self):
         _, ent = g.build_cover(
             {"楼层": "1F", "房间": "书房", "名称": "卷1",
-             "开": "800", "关": "801", "停止": "802"}
+             "开": "800", "关": "801", "停止": "802", "位置": "490"}
         )
         self.assertEqual(ent["type"], "shade")
+        self.assertEqual(ent["pos_join"], 490)
 
     def test_missing_join_skipped(self):
+        # Position present but a required drive join missing -> still skipped.
         self.assertIsNone(g.build_cover(
-            {"楼层": "B2", "房间": "x", "名称": "纱帘", "开": "1", "关": "2", "停止": ""}
+            {"楼层": "B2", "房间": "x", "名称": "纱帘",
+             "开": "1", "关": "2", "停止": "", "位置": "480"}
         ))
 
 
 class AcTests(unittest.TestCase):
     def _full(self):
+        # Column is named 自动 (not 自动风速) in the current 空调 sheet.
         return {"楼层": "B2", "房间": "洗衣房", "开": "505", "关": "506",
                 "制冷": "507", "制热": "508", "通风": "510", "除湿": "511",
-                "低速": "512", "中速": "513", "高速": "514", "自动风速": "515",
+                "低速": "512", "中速": "513", "高速": "514", "自动": "515",
                 "温度": "414", "室温": "415"}
 
     def test_full_row_produces_one_climate(self):
@@ -113,6 +131,21 @@ class AcTests(unittest.TestCase):
         )
         self.assertEqual(ent["device_id"], "ac_505")
         self.assertEqual(ent["device_name"], "B2.洗衣房 空调")
+
+    def test_auto_fan_column_mapped(self):
+        # Regression: the column is 自动 (was mistakenly read as 自动风速),
+        # so its join must land in fan_auto_join.
+        _, ent = g.build_ac(self._full())
+        self.assertEqual(ent["fan_auto_join"], 515)
+
+    def test_fan_value_column_ignored(self):
+        # 风速值 (analog fan speed) is intentionally not consumed — digital
+        # fan joins already express fan speed; no fan_value_join is emitted.
+        row = self._full()
+        row["风速值"] = "457"
+        _, ent = g.build_ac(row)
+        self.assertNotIn("fan_value_join", ent)
+        self.assertNotIn("风速值", ent.values())
 
     def test_missing_dry_mode_omitted(self):
         row = self._full()

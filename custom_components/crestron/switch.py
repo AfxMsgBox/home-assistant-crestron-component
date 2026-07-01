@@ -9,9 +9,6 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
 from homeassistant.helpers.restore_state import RestoreEntity
 from .const import (
-    HUB,
-    DOMAIN,
-    YAML_CONF,
     CONF_SWITCH_JOIN,
     CONF_ON_JOIN,
     CONF_OFF_JOIN,
@@ -20,10 +17,10 @@ from .const import (
 )
 from .schema import digital_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
+from .join_commands import pulse_digital
 
 _LOGGER = logging.getLogger(__name__)
-
-PULSE_SECONDS = 0.2
 
 
 def _require_writable_join(config):
@@ -66,14 +63,12 @@ PLATFORM_SCHEMA = vol.All(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("switch", [])
-    async_add_entities(CrestronSwitch(hub, PLATFORM_SCHEMA(item)) for item in items)
+    async_add_entities(
+        setup_platform_entities(hass, "switch", PLATFORM_SCHEMA, CrestronSwitch)
+    )
 
 
-class CrestronSwitch(SwitchEntity, RestoreEntity):
-    _attr_should_poll = False
-
+class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
     def __init__(self, hub, config):
         self._hub = hub
         self._attr_name = config.get(CONF_NAME)
@@ -91,15 +86,17 @@ class CrestronSwitch(SwitchEntity, RestoreEntity):
         self._attr_unique_id = f"crestron_switch_{uid}_{self._attr_name}"
         self._attr_device_info = device_info(config)
 
-    async def async_added_to_hass(self):
-        joins = []
+    def _callback_joins(self):
         if self._mode_joins:
-            joins += [f"d{j}" for j in self._mode_joins.values()]
-        elif self._state_join is not None:
-            joins.append(f"d{self._state_join}")
-        elif self._switch_join is not None:
-            joins.append(f"d{self._switch_join}")
-        self._hub.register_callback(self.process_callback, joins=joins)
+            return [f"d{j}" for j in self._mode_joins.values()]
+        if self._state_join is not None:
+            return [f"d{self._state_join}"]
+        if self._switch_join is not None:
+            return [f"d{self._switch_join}"]
+        return []
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
         # Initial state. If the hub is already connected, trust its live
         # feedback. Otherwise (cold start: Crestron hasn't reconnected yet)
         # restore the last-known state from before the restart so we don't
@@ -113,9 +110,6 @@ class CrestronSwitch(SwitchEntity, RestoreEntity):
             last = await self.async_get_last_state()
             if last is not None and last.state in ("on", "off"):
                 self._optimistic_state = last.state == "on"
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
 
     def _feedback_is_on(self):
         """On-state from feedback joins, or None if this switch has no feedback.
@@ -144,10 +138,6 @@ class CrestronSwitch(SwitchEntity, RestoreEntity):
         self.async_write_ha_state()
 
     @property
-    def available(self):
-        return self._hub.is_available()
-
-    @property
     def is_on(self):
         # Optimistic-first: reflect the user's last command immediately so the
         # toggle doesn't bounce while the control system's feedback join catches
@@ -164,10 +154,7 @@ class CrestronSwitch(SwitchEntity, RestoreEntity):
         return {"mode": "关闭"}
 
     async def _pulse(self, join):
-        async with self._pulse_lock:
-            self._hub.set_digital(join, True)
-            await asyncio.sleep(PULSE_SECONDS)
-            self._hub.set_digital(join, False)
+        await pulse_digital(self._hub, self._pulse_lock, join)
 
     async def async_turn_on(self, **kwargs):
         self._optimistic_state = True

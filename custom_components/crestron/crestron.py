@@ -1,7 +1,19 @@
 import asyncio
-import struct
 import logging
 import time
+
+from .xsig_protocol import (
+    FrameDecoder,
+    ProtocolError,
+    encode_analog,
+    encode_digital,
+    encode_serial,
+    # Re-exported so schema.py and existing importers keep working unchanged.
+    DIGITAL_JOIN_MAX,
+    ANALOG_JOIN_MAX,
+    SERIAL_JOIN_MAX,
+    SERIAL_MAX_BYTES,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,11 +28,8 @@ SYNC_TIMING_ENABLED = False
 # frame has arrived for this long, log the one-shot summary.
 SYNC_SETTLE_SECONDS = 1.0
 
-# XSIG protocol join number limits.
-DIGITAL_JOIN_MAX = 4096
-ANALOG_JOIN_MAX = 1024
-SERIAL_JOIN_MAX = 1024
-SERIAL_MAX_BYTES = 252
+# Chunk size for inbound socket reads; frames are reassembled by FrameDecoder.
+_READ_CHUNK = 4096
 
 
 class CrestronXsig:
@@ -34,9 +43,12 @@ class CrestronXsig:
         self._server = None
         self._available = False
         self._sync_all_joins_callback = None
+        self._port = None
+        self._peer = None  # str repr of the most-recent connection's peername
 
     async def listen(self, port):
         """Start TCP XSIG server (non-blocking; returns after server is listening)."""
+        self._port = port
         self._server = await asyncio.start_server(
             self.handle_connection, "0.0.0.0", port
         )
@@ -127,6 +139,34 @@ class CrestronXsig:
         stats["last"] = time.monotonic()
         stats["dispatch"] += stats["last"] - now
 
+    async def _handle_frame(self, frame, stats):
+        """Apply one decoded inbound frame: update cache + dispatch / log."""
+        kind = frame.kind
+        if kind == "digital":
+            self._digital[frame.join] = bool(frame.value)
+            # Lazy %-formatting: on a 1000+ join cold-start sync this runs
+            # thousands of times in a burst; an f-string would build the
+            # message even when debug is disabled.
+            _LOGGER.debug("Got Digital: %s = %s", frame.join, frame.value)
+            await self._timed_dispatch(f"d{frame.join}", str(frame.value), stats)
+        elif kind == "analog":
+            self._analog[frame.join] = frame.value
+            _LOGGER.debug("Got Analog: %s = %s", frame.join, frame.value)
+            await self._timed_dispatch(f"a{frame.join}", str(frame.value), stats)
+        elif kind == "serial":
+            self._serial[frame.join] = frame.value
+            _LOGGER.debug("Got String: %s = %s", frame.join, frame.value)
+            await self._timed_dispatch(f"s{frame.join}", frame.value, stats)
+        elif kind == "sync_all":
+            _LOGGER.debug("Got update-all-joins request")
+            if self._sync_all_joins_callback is not None:
+                await self._sync_all_joins_callback()
+        elif kind == "bad_utf8":
+            _LOGGER.warning(f"Invalid UTF-8 on serial join {frame.join}")
+        elif kind == "unknown":
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug("Unknown Packet: %s", frame.value)
+
     async def _close_writer(self):
         writer = self._writer
         self._writer = None
@@ -147,6 +187,7 @@ class CrestronXsig:
     async def handle_connection(self, reader, writer):
         """Parse packets from Crestron XSIG symbol."""
         peer = writer.get_extra_info("peername")
+        self._peer = str(peer)
         _LOGGER.info(f"Control system connection from {peer}")
         if self._writer is not None:
             _LOGGER.warning("Existing XSIG connection still open; replacing it")
@@ -187,80 +228,19 @@ class CrestronXsig:
             if stats is not None:
                 settle_task = asyncio.create_task(_log_sync_when_settled())
 
+            decoder = FrameDecoder()
             while True:
                 try:
-                    head = await reader.readexactly(1)
+                    chunk = await reader.read(_READ_CHUNK)
                 except asyncio.IncompleteReadError:
                     break
-
-                # Sync all joins request
-                if head[0] == 0xFB:
-                    _LOGGER.debug("Got update-all-joins request")
-                    if self._sync_all_joins_callback is not None:
-                        await self._sync_all_joins_callback()
-                    continue
-
-                try:
-                    second = await reader.readexactly(1)
-                except asyncio.IncompleteReadError:
+                if not chunk:  # EOF: peer closed
                     break
-                data = head + second
+                for frame in decoder.feed(chunk):
+                    await self._handle_frame(frame, stats)
 
-                # Digital Join: 10v jjjjj  0jjj jjjj  (v = inverted level)
-                if (
-                    data[0] & 0b11000000 == 0b10000000
-                    and data[1] & 0b10000000 == 0b00000000
-                ):
-                    join = ((data[0] & 0b00011111) << 7 | data[1]) + 1
-                    value = ~data[0] >> 5 & 0b1
-                    self._digital[join] = bool(value)
-                    # Lazy %-formatting: on a 1000+ join cold-start sync this
-                    # parser runs thousands of times in a burst; an f-string
-                    # would build the message even when debug is disabled.
-                    _LOGGER.debug("Got Digital: %s = %s", join, value)
-                    await self._timed_dispatch(f"d{join}", str(value), stats)
-
-                # Analog Join: 11vv 0jjj  0jjj jjjj  0vvv vvvv  0vvv vvvv
-                elif (
-                    data[0] & 0b11001000 == 0b11000000
-                    and data[1] & 0b10000000 == 0b00000000
-                ):
-                    try:
-                        tail = await reader.readexactly(2)
-                    except asyncio.IncompleteReadError:
-                        break
-                    data += tail
-                    join = ((data[0] & 0b00000111) << 7 | data[1]) + 1
-                    value = (
-                        (data[0] & 0b00110000) << 10 | data[2] << 7 | data[3]
-                    )
-                    self._analog[join] = value
-                    _LOGGER.debug("Got Analog: %s = %s", join, value)
-                    await self._timed_dispatch(f"a{join}", str(value), stats)
-
-                # Serial Join: 1100 1jjj  0jjj jjjj  <UTF-8>  0xFF
-                elif (
-                    data[0] & 0b11111000 == 0b11001000
-                    and data[1] & 0b10000000 == 0b00000000
-                ):
-                    try:
-                        body = await reader.readuntil(b"\xff")
-                    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
-                        break
-                    join = ((data[0] & 0b00000111) << 7 | data[1]) + 1
-                    try:
-                        string = body[:-1].decode("utf-8")
-                    except UnicodeDecodeError:
-                        _LOGGER.warning(f"Invalid UTF-8 on serial join {join}")
-                        continue
-                    self._serial[join] = string
-                    _LOGGER.debug("Got String: %s = %s", join, string)
-                    await self._timed_dispatch(f"s{join}", string, stats)
-
-                else:
-                    if _LOGGER.isEnabledFor(logging.DEBUG):
-                        _LOGGER.debug("Unknown Packet: %s", data.hex())
-
+        except ProtocolError as exc:
+            _LOGGER.warning(f"XSIG protocol error: {exc}")
         except Exception as exc:
             _LOGGER.warning(f"XSIG connection error: {exc}")
         finally:
@@ -285,14 +265,52 @@ class CrestronXsig:
     def is_available(self):
         return self._available
 
-    def get_analog(self, join):
-        return self._analog.get(join, 0)
+    def diagnostics(self):
+        """Snapshot of connection + cache state for the diagnostics download.
 
-    def get_digital(self, join):
-        return self._digital.get(join, False)
+        Read-only; safe to call any time. The join caches can be large (1000+
+        entries on a full sync), so this returns their sizes plus the full
+        contents keyed by join — the diagnostics platform decides how to render.
+        """
+        return {
+            "available": self._available,
+            "listening_port": self._port,
+            "connected": self._writer is not None,
+            "peer": self._peer,
+            "cache_counts": {
+                "digital": len(self._digital),
+                "analog": len(self._analog),
+                "serial": len(self._serial),
+            },
+            "digital": dict(self._digital),
+            "analog": dict(self._analog),
+            "serial": dict(self._serial),
+        }
 
-    def get_serial(self, join):
-        return self._serial.get(join, "")
+    # State getters. The control system pushes state on change only; until a
+    # join has been reported it is *unknown*, which the bare getters can't
+    # distinguish from a real 0/False/"". The ``has_*`` predicates and the
+    # ``default`` parameter let callers handle "not yet known" explicitly.
+    # The getter defaults preserve the historical 0/False/"" behaviour so
+    # existing callers are unaffected; pass ``default=None`` to opt in.
+
+    def has_analog(self, join):
+        return join in self._analog
+
+    def get_analog(self, join, default=0):
+        return self._analog.get(join, default)
+
+    def has_digital(self, join):
+        return join in self._digital
+
+    def get_digital(self, join, default=False):
+        return self._digital.get(join, default)
+
+    def has_serial(self, join):
+        return join in self._serial
+
+    def get_serial(self, join, default=""):
+        return self._serial.get(join, default)
 
     def _write(self, data):
         if self._writer is None:
@@ -310,15 +328,7 @@ class CrestronXsig:
                 f"Analog join {join} out of range (1..{ANALOG_JOIN_MAX})"
             )
             return
-        value = max(0, min(65535, int(value)))
-        data = struct.pack(
-            ">BBBB",
-            0b11000000 | (value >> 10 & 0b00110000) | (join - 1) >> 7,
-            (join - 1) & 0b01111111,
-            value >> 7 & 0b01111111,
-            value & 0b01111111,
-        )
-        self._write(data)
+        self._write(encode_analog(join, value))
         _LOGGER.debug("Sending Analog: %s, %s", join, value)
 
     def set_digital(self, join, value):
@@ -328,13 +338,7 @@ class CrestronXsig:
                 f"Digital join {join} out of range (1..{DIGITAL_JOIN_MAX})"
             )
             return
-        flag = 0b00100000 if not value else 0
-        data = struct.pack(
-            ">BB",
-            0b10000000 | flag | ((join - 1) >> 7),
-            (join - 1) & 0b01111111,
-        )
-        self._write(data)
+        self._write(encode_digital(join, value))
         _LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
 
     def set_serial(self, join, string):
@@ -351,10 +355,5 @@ class CrestronXsig:
                 f"{SERIAL_MAX_BYTES})"
             )
             return
-        data = struct.pack(
-            ">BB", 0b11001000 | ((join - 1) >> 7), (join - 1) & 0b01111111
-        )
-        data += encoded
-        data += b"\xff"
-        self._write(data)
+        self._write(encode_serial(join, encoded))
         _LOGGER.debug("Sending Serial: %s, %s", join, string)

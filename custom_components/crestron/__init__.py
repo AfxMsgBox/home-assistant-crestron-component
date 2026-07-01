@@ -6,10 +6,6 @@ import voluptuous as vol
 
 import homeassistant.helpers.config_validation as cv
 from homeassistant.config_entries import SOURCE_IMPORT
-from homeassistant.helpers.event import TrackTemplate, async_track_template_result
-from homeassistant.helpers.template import Template
-from homeassistant.helpers.script import Script
-from homeassistant.core import callback, Context
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
     CONF_VALUE_TEMPLATE,
@@ -23,7 +19,7 @@ from .const import (
     YAML_CONF, HUB_WRAPPER,
 )
 from .schema import join_key
-from .value_coercion import to_analog, to_digital, to_serial
+from .bridge import ToJoinBridge, FromJoinBridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,130 +123,62 @@ async def async_unload_entry(hass, entry):
 
 
 class CrestronHub:
-    """Wrapper for the CrestronXsig library."""
+    """Owns the XSIG instance + server lifecycle; composes the two bridges.
+
+    Data-flow wiring lives in ``bridge.py`` (ToJoinBridge / FromJoinBridge);
+    this class is just the Home Assistant lifecycle glue.
+    """
 
     def __init__(self, hass, config):
         self.hass = hass
+        self.config = config
         self.hub = hass.data[DOMAIN][HUB] = CrestronXsig()
         self.port = config.get(CONF_PORT)
-        self.context = Context()
-        self.to_hub = {}
-        self._template_to_join = {}  # id(template) -> join key
-        self.from_hub = config.get(CONF_FROM_HUB, [])
-        self._from_scripts = {}
-        self.tracker = None
 
-        self.hub.register_sync_all_joins_callback(self.sync_joins_to_hub)
+        self.to_bridge = ToJoinBridge(hass, self.hub, config.get(CONF_TO_HUB))
+        self.from_bridge = FromJoinBridge(hass, self.hub, config.get(CONF_FROM_HUB))
 
-        if CONF_TO_HUB in config:
-            track_templates = []
-            for entity in config[CONF_TO_HUB]:
-                template = None
-                if CONF_VALUE_TEMPLATE in entity:
-                    template = entity[CONF_VALUE_TEMPLATE]
-                elif CONF_ATTRIBUTE in entity and CONF_ENTITY_ID in entity:
-                    template = Template(
-                        "{{state_attr('"
-                        + entity[CONF_ENTITY_ID]
-                        + "','"
-                        + entity[CONF_ATTRIBUTE]
-                        + "')}}",
-                        self.hass,
-                    )
-                elif CONF_ENTITY_ID in entity:
-                    template = Template(
-                        "{{states('" + entity[CONF_ENTITY_ID] + "')}}",
-                        self.hass,
-                    )
-                if template is not None:
-                    join = entity[CONF_JOIN]
-                    self.to_hub[join] = template
-                    self._template_to_join[id(template)] = join
-                    track_templates.append(TrackTemplate(template, None))
-            if track_templates:
-                self.tracker = async_track_template_result(
-                    self.hass, track_templates, self.template_change_callback
-                )
+        # The control system's sync-all request re-renders every to_join.
+        self.hub.register_sync_all_joins_callback(self._sync_all)
 
-        if self.from_hub:
-            for entry in self.from_hub:
-                self._from_scripts[entry[CONF_JOIN]] = Script(
-                    self.hass,
-                    entry[CONF_SCRIPT],
-                    f"Crestron {entry[CONF_JOIN]}",
-                    DOMAIN,
-                )
-            self.hub.register_callback(
-                self.join_change_callback, joins=list(self._from_scripts.keys())
-            )
+    async def _sync_all(self):
+        self.to_bridge.sync_all()
+
+    def resync_to_joins(self):
+        """Manually re-render and resend every to_join to the control system.
+
+        Exposed for the options flow so an operator can force HA's known state
+        back onto the control system without waiting for a reconnect / 0xFB.
+        """
+        self.to_bridge.sync_all()
+
+    def diagnostics(self):
+        """Connection + cache snapshot, plus configured-entity counts.
+
+        Combines the protocol layer's live view (connection, join caches) with
+        the static YAML config (how many entities/to-joins/from-joins were
+        configured) so a support download shows both what was set up and what
+        the control system has actually reported.
+        """
+        configured = {
+            platform: len(self.config.get(platform, []))
+            for platform in PLATFORMS
+            if self.config.get(platform)
+        }
+        return {
+            "configured_entities": configured,
+            "to_joins": len(self.config.get(CONF_TO_HUB, [])),
+            "from_joins": len(self.config.get(CONF_FROM_HUB, [])),
+            "xsig": self.hub.diagnostics(),
+        }
 
     async def start(self):
+        self.to_bridge.start()
+        self.from_bridge.start()
         await self.hub.listen(self.port)
 
     async def stop(self):
-        """Tear down: tracker, callbacks, server."""
-        if self.from_hub:
-            self.hub.remove_callback(self.join_change_callback)
-        if self.tracker is not None:
-            self.tracker.async_remove()
-            self.tracker = None
+        """Tear down: bridges first (remove callbacks/tracker), then server."""
+        self.from_bridge.stop()
+        self.to_bridge.stop()
         await self.hub.stop()
-
-    async def join_change_callback(self, cbtype, value):
-        """Run cached script for a configured from_joins entry."""
-        script = self._from_scripts.get(cbtype)
-        if script is None:
-            return
-        # For digital joins, only fire on rising edge (1) to avoid
-        # double-trigger from momentary buttons.
-        if cbtype[:1] == "d" and value == "0":
-            return
-        _LOGGER.debug(f"Running script for {cbtype} = {value}")
-        # Run in background so a slow script can't block XSIG dispatch / TCP read.
-        self.hass.async_create_task(self._run_script(script, cbtype, value))
-
-    async def _run_script(self, script, cbtype, value):
-        try:
-            await script.async_run({"value": value}, self.context)
-        except Exception:
-            _LOGGER.exception("from_joins script for %s failed", cbtype)
-
-    def _set_join(self, key, result):
-        """Coerce template result and send to control system."""
-        kind = key[:1]
-        try:
-            number = int(key[1:])
-        except ValueError:
-            _LOGGER.warning(f"Invalid join key: {key}")
-            return
-        if kind == "d":
-            digital = to_digital(result)
-            if digital is not None:
-                self.hub.set_digital(number, digital)
-        elif kind == "a":
-            analog = to_analog(result)
-            if analog is not None:
-                self.hub.set_analog(number, analog)
-        elif kind == "s":
-            serial = to_serial(result)
-            if serial is not None:
-                self.hub.set_serial(number, serial)
-
-    @callback
-    def template_change_callback(self, event, updates):
-        """Push template result to control system."""
-        for track_template_result in updates:
-            join = self._template_to_join.get(id(track_template_result.template))
-            if join is not None:
-                self._set_join(join, track_template_result.result)
-
-    async def sync_joins_to_hub(self):
-        _LOGGER.debug("Syncing joins to control system")
-        for join, template in self.to_hub.items():
-            # Isolate per-join failures: a single bad template (e.g. referencing
-            # an unknown entity attribute) must not abort the rest of the sync
-            # or bubble up and tear down the XSIG connection.
-            try:
-                self._set_join(join, template.async_render())
-            except Exception:
-                _LOGGER.exception("Failed to sync join %s to control system", join)

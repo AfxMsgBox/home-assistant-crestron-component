@@ -249,5 +249,81 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.hub.is_available())
 
 
+class StateGetterTests(unittest.TestCase):
+    """has_*/get_* semantics: unknown (never reported) vs real 0/False/''."""
+
+    def setUp(self):
+        self.hub = CrestronXsig()
+
+    def test_unknown_before_report(self):
+        self.assertFalse(self.hub.has_analog(5))
+        self.assertFalse(self.hub.has_digital(5))
+        self.assertFalse(self.hub.has_serial(5))
+
+    def test_getter_defaults_preserve_legacy_behaviour(self):
+        # Bare getters still return 0/False/'' for unknown joins (back-compat).
+        self.assertEqual(self.hub.get_analog(5), 0)
+        self.assertIs(self.hub.get_digital(5), False)
+        self.assertEqual(self.hub.get_serial(5), "")
+
+    def test_explicit_default_for_unknown(self):
+        self.assertIsNone(self.hub.get_analog(5, None))
+        self.assertIsNone(self.hub.get_digital(5, None))
+        self.assertIsNone(self.hub.get_serial(5, None))
+
+    def test_real_zero_is_known(self):
+        # A genuinely reported 0/False/'' is distinguishable from unknown.
+        self.hub._analog[5] = 0
+        self.hub._digital[6] = False
+        self.hub._serial[7] = ""
+        self.assertTrue(self.hub.has_analog(5))
+        self.assertTrue(self.hub.has_digital(6))
+        self.assertTrue(self.hub.has_serial(7))
+        # ...and the explicit-default getters return the real value, not default.
+        self.assertEqual(self.hub.get_analog(5, None), 0)
+        self.assertIs(self.hub.get_digital(6, None), False)
+        self.assertEqual(self.hub.get_serial(7, None), "")
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = CrestronXsig()
+
+    def test_fresh_hub(self):
+        d = self.hub.diagnostics()
+        self.assertFalse(d["available"])
+        self.assertFalse(d["connected"])
+        self.assertIsNone(d["peer"])
+        self.assertIsNone(d["listening_port"])
+        self.assertEqual(
+            d["cache_counts"], {"digital": 0, "analog": 0, "serial": 0}
+        )
+
+    def test_reflects_cache_and_connection(self):
+        self.hub._digital[5] = True
+        self.hub._analog[3] = 1000
+        self.hub._serial[7] = "hi"
+        self.hub._peer = "('10.0.0.9', 5001)"
+        self.hub._port = 32000
+        self.hub._writer = object()  # simulate an active connection
+        d = self.hub.diagnostics()
+        self.assertTrue(d["connected"])
+        self.assertEqual(d["peer"], "('10.0.0.9', 5001)")
+        self.assertEqual(d["listening_port"], 32000)
+        self.assertEqual(
+            d["cache_counts"], {"digital": 1, "analog": 1, "serial": 1}
+        )
+        self.assertEqual(d["digital"], {5: True})
+        self.assertEqual(d["analog"], {3: 1000})
+        self.assertEqual(d["serial"], {7: "hi"})
+
+    def test_cache_dicts_are_copies(self):
+        # Mutating the returned snapshot must not corrupt the live cache.
+        self.hub._analog[3] = 1
+        d = self.hub.diagnostics()
+        d["analog"][3] = 999
+        self.assertEqual(self.hub.get_analog(3), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
