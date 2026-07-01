@@ -93,23 +93,24 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
             return [f"d{self._state_join}"]
         if self._switch_join is not None:
             return [f"d{self._switch_join}"]
-        return []
+        joins = []
+        if self._on_join is not None:
+            joins.append(f"d{self._on_join}")
+        if self._off_join is not None:
+            joins.append(f"d{self._off_join}")
+        return joins
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        # Initial state. If the hub is already connected, trust its live
-        # feedback. Otherwise (cold start: Crestron hasn't reconnected yet)
-        # restore the last-known state from before the restart so we don't
-        # wrongly default to "off" until the control system next pushes the
-        # join — process_callback reconciles to real feedback once it arrives.
+        # Restore first for the cold-start window, then upgrade to definitive
+        # live feedback when Crestron has already reported it.
+        last = await self.async_get_last_state()
+        if last is not None and last.state in ("on", "off"):
+            self._optimistic_state = last.state == "on"
         if self._hub.is_available():
             fb = self._feedback_is_on()
             if fb is not None:
                 self._optimistic_state = fb
-        else:
-            last = await self.async_get_last_state()
-            if last is not None and last.state in ("on", "off"):
-                self._optimistic_state = last.state == "on"
 
     def _feedback_is_on(self):
         """On-state from feedback joins, or None if this switch has no feedback.
@@ -125,6 +126,13 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
             return self._hub.get_digital(self._switch_join)
+        # Pulse mode can still carry feedback on the command joins themselves.
+        # Exactly one asserted is definitive; both low/high is transitional or
+        # not-yet-reported, so keep the current optimistic state.
+        on = self._on_join is not None and self._hub.get_digital(self._on_join)
+        off = self._off_join is not None and self._hub.get_digital(self._off_join)
+        if on != off:
+            return on
         return None
 
     async def process_callback(self, cbtype, value):

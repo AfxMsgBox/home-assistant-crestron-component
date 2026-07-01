@@ -160,6 +160,31 @@ def build_light(row):
     return None
 
 
+def build_outlet(row):
+    """插座 sheet row -> ('switch', entity) or None.
+
+    插座用两根数字量 join：开/关。快思聪侧会把状态也回传到这两根
+    join 上（开=1/关=0 表示通电，开=0/关=1 表示断电），switch 平台负责
+    订阅并判定状态。
+    """
+    on = _to_int(row.get("开"))
+    off = _to_int(row.get("关"))
+    if on is None or off is None:
+        return None
+    name = _name(row, "名称")
+    ent = {
+        "platform": "crestron",
+        "name": name,
+        "on_join": on,
+        "off_join": off,
+        "device_class": "outlet",
+        "device_id": f"outlet_{on}",
+        "device_name": name,
+        "_group": _group(row),
+    }
+    return "switch", ent
+
+
 def build_cover(row):
     """窗帘 sheet row -> ('cover', entity) or None.
 
@@ -264,6 +289,7 @@ def build_ac(row):
 
 SHEET_BUILDERS = {
     "灯光": build_light,
+    "插座": build_outlet,
     "窗帘": build_cover,
     "空调": build_ac,
 }
