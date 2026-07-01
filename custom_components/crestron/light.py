@@ -19,9 +19,6 @@ from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.const import CONF_NAME, CONF_TYPE
 from homeassistant.helpers.restore_state import RestoreEntity
 from .const import (
-    HUB,
-    DOMAIN,
-    YAML_CONF,
     CONF_BRIGHTNESS_JOIN,
     CONF_COLOR_TEMP_JOIN,
     CONF_ON_JOIN,
@@ -31,10 +28,10 @@ from .const import (
 )
 from .schema import analog_join, digital_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
+from .join_commands import pulse_digital
 
 _LOGGER = logging.getLogger(__name__)
-
-PULSE_SECONDS = 0.2
 
 # Hold the re-asserted level this long before sending 0 on turn_off, so the
 # control system sees a distinct high->0 edge across program scans (a
@@ -58,21 +55,20 @@ PLATFORM_SCHEMA = vol.Schema(
 )
 
 
+def _make_light(hub, cfg):
+    # Dimmable (analog brightness join) vs on/off-only (relay-style).
+    if cfg.get(CONF_BRIGHTNESS_JOIN) is not None:
+        return CrestronLight(hub, cfg)
+    return CrestronOnOffLight(hub, cfg)
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("light", [])
-    entities = []
-    for item in items:
-        cfg = PLATFORM_SCHEMA(item)
-        if cfg.get(CONF_BRIGHTNESS_JOIN) is not None:
-            entities.append(CrestronLight(hub, cfg))
-        else:
-            entities.append(CrestronOnOffLight(hub, cfg))
-    async_add_entities(entities)
+    async_add_entities(
+        setup_platform_entities(hass, "light", PLATFORM_SCHEMA, _make_light)
+    )
 
 
-class CrestronLight(LightEntity):
-    _attr_should_poll = False
+class CrestronLight(CrestronEntity, LightEntity):
     # 双色温灯色温范围（开发者 xlsx「说明」：色温值 2700–6500），按原值 K 直写模拟 join。
     _attr_min_color_temp_kelvin = 2700
     _attr_max_color_temp_kelvin = 6500
@@ -91,21 +87,11 @@ class CrestronLight(LightEntity):
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
             self._attr_color_mode = ColorMode.BRIGHTNESS
 
-    async def async_added_to_hass(self):
+    def _callback_joins(self):
         joins = [f"a{self._brightness_join}"]
         if self._color_temp_join is not None:
             joins.append(f"a{self._color_temp_join}")
-        self._hub.register_callback(self.process_callback, joins=joins)
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
-
-    async def process_callback(self, cbtype, value):
-        self.async_write_ha_state()
-
-    @property
-    def available(self):
-        return self._hub.is_available()
+        return joins
 
     @property
     def brightness(self):
@@ -165,14 +151,13 @@ class CrestronLight(LightEntity):
         self._hub.set_analog(self._brightness_join, 0)
 
 
-class CrestronOnOffLight(LightEntity, RestoreEntity):
+class CrestronOnOffLight(CrestronEntity, LightEntity, RestoreEntity):
     """A light that only does on/off (relay-style), driven by digital joins.
 
     Mirrors the pulse + optimistic-state + restore behaviour of the switch
     platform, but presents as a light (ColorMode.ONOFF).
     """
 
-    _attr_should_poll = False
     _attr_supported_color_modes = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF
 
@@ -189,21 +174,23 @@ class CrestronOnOffLight(LightEntity, RestoreEntity):
         uid = self._switch_join or self._state_join or self._on_join
         self._attr_unique_id = f"crestron_light_onoff_{uid}_{self._attr_name}"
 
-    async def async_added_to_hass(self):
-        joins = []
+    def _callback_joins(self):
         if self._state_join is not None:
-            joins.append(f"d{self._state_join}")
-        elif self._switch_join is not None:
-            joins.append(f"d{self._switch_join}")
-        else:
-            # Pulse-only light: the control system reports state back on the
-            # command joins themselves (on_join high = on, off_join high = off),
-            # so subscribe to those to pick up panel/external changes.
-            if self._on_join is not None:
-                joins.append(f"d{self._on_join}")
-            if self._off_join is not None:
-                joins.append(f"d{self._off_join}")
-        self._hub.register_callback(self.process_callback, joins=joins)
+            return [f"d{self._state_join}"]
+        if self._switch_join is not None:
+            return [f"d{self._switch_join}"]
+        # Pulse-only light: the control system reports state back on the command
+        # joins themselves (on_join high = on, off_join high = off), so
+        # subscribe to those to pick up panel/external changes.
+        joins = []
+        if self._on_join is not None:
+            joins.append(f"d{self._on_join}")
+        if self._off_join is not None:
+            joins.append(f"d{self._off_join}")
+        return joins
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
         # Restore the pre-restart state first (covers the cold-start window
         # before the control system reports the joins back).
         last = await self.async_get_last_state()
@@ -214,9 +201,6 @@ class CrestronOnOffLight(LightEntity, RestoreEntity):
             fb = self._feedback_is_on()
             if fb is not None:
                 self._optimistic_state = fb
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
 
     def _feedback_is_on(self):
         if self._state_join is not None:
@@ -239,18 +223,11 @@ class CrestronOnOffLight(LightEntity, RestoreEntity):
         self.async_write_ha_state()
 
     @property
-    def available(self):
-        return self._hub.is_available()
-
-    @property
     def is_on(self):
         return self._optimistic_state
 
     async def _pulse(self, join):
-        async with self._pulse_lock:
-            self._hub.set_digital(join, True)
-            await asyncio.sleep(PULSE_SECONDS)
-            self._hub.set_digital(join, False)
+        await pulse_digital(self._hub, self._pulse_lock, join)
 
     async def async_turn_on(self, **kwargs):
         self._optimistic_state = True

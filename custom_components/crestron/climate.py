@@ -40,9 +40,6 @@ from homeassistant.const import CONF_NAME, ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
-    HUB,
-    DOMAIN,
-    YAML_CONF,
     CONF_ON_JOIN,
     CONF_OFF_JOIN,
     CONF_SET_TEMP_JOIN,
@@ -57,10 +54,11 @@ from .const import (
     CONF_FAN_AUTO_JOIN,
 )
 from .schema import analog_join, digital_join
+from .entity import CrestronEntity, setup_platform_entities
+from .join_commands import pulse_digital, set_one_clear_others
 
 _LOGGER = logging.getLogger(__name__)
 
-PULSE_SECONDS = 0.2
 # Room-temp feedback below this delta is dropped (not written to HA state),
 # so a chatty control system can't flood the recorder database.
 TEMP_REPORT_THRESHOLD = 0.5
@@ -94,9 +92,9 @@ PLATFORM_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("climate", [])
-    async_add_entities(CrestronAC(hub, PLATFORM_SCHEMA(item)) for item in items)
+    async_add_entities(
+        setup_platform_entities(hass, "climate", PLATFORM_SCHEMA, CrestronAC)
+    )
 
 
 # Running-mode digital joins -> HVACMode, in a stable display order.
@@ -114,8 +112,7 @@ _MODE_TO_ACTION = {
 }
 
 
-class CrestronAC(ClimateEntity, RestoreEntity):
-    _attr_should_poll = False
+class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
     _attr_target_temperature_step = 1
     _attr_min_temp = 16
     _attr_max_temp = 30
@@ -195,7 +192,7 @@ class CrestronAC(ClimateEntity, RestoreEntity):
                 return mode
         return None
 
-    async def async_added_to_hass(self):
+    def _callback_joins(self):
         analog_joins = [
             j for j in (self._set_temp_join, self._reg_temp_join) if j is not None
         ]
@@ -208,7 +205,10 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         )
         joins = [f"a{j}" for j in analog_joins]
         joins += [f"d{j}" for j in digital_joins]
-        self._hub.register_callback(self.process_callback, joins=joins)
+        return joins
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
 
         # Restore the pre-restart state first (covers the cold-start window
         # before the control system reconnects).
@@ -240,9 +240,6 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             if fb is not None:
                 self._optimistic_mode = fb
             self._reconcile_temp_fan()
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
 
     def _reconcile_temp_fan(self):
         """Update cached setpoint/fan from live joins (ignore 0/None = unknown)."""
@@ -288,10 +285,6 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         self.async_write_ha_state()
 
     @property
-    def available(self):
-        return self._hub.is_available()
-
-    @property
     def hvac_mode(self):
         if not self._optimistic_on:
             return HVACMode.OFF
@@ -319,10 +312,7 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         return self._fan_mode
 
     async def _pulse(self, join):
-        async with self._pulse_lock:
-            self._hub.set_digital(join, True)
-            await asyncio.sleep(PULSE_SECONDS)
-            self._hub.set_digital(join, False)
+        await pulse_digital(self._hub, self._pulse_lock, join)
 
     async def async_turn_on(self):
         self._optimistic_on = True
@@ -355,10 +345,7 @@ class CrestronAC(ClimateEntity, RestoreEntity):
         # Power on first if it was off, then select the mode (set-one-clear).
         if not was_on:
             await self._pulse(self._on_join)
-        for j in self._mode_joins.values():
-            if j != join:
-                self._hub.set_digital(j, False)
-        self._hub.set_digital(join, True)
+        set_one_clear_others(self._hub, self._mode_joins.values(), join)
 
     async def async_set_fan_mode(self, fan_mode):
         target = self._fan_joins.get(fan_mode)
@@ -366,10 +353,7 @@ class CrestronAC(ClimateEntity, RestoreEntity):
             return
         self._fan_mode = fan_mode
         self.async_write_ha_state()
-        for join in self._fan_joins.values():
-            if join != target:
-                self._hub.set_digital(join, False)
-        self._hub.set_digital(target, True)
+        set_one_clear_others(self._hub, self._fan_joins.values(), target)
 
     async def async_set_temperature(self, **kwargs):
         temp = kwargs.get(ATTR_TEMPERATURE)

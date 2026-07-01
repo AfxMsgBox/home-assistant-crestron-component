@@ -12,9 +12,6 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.const import CONF_NAME
 from .const import (
-    HUB,
-    DOMAIN,
-    YAML_CONF,
     CONF_MUTE_JOIN,
     CONF_VOLUME_JOIN,
     CONF_SOURCE_NUM_JOIN,
@@ -22,6 +19,7 @@ from .const import (
 )
 from .schema import analog_join, digital_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,13 +42,12 @@ PLATFORM_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("media_player", [])
-    async_add_entities(CrestronRoom(hub, PLATFORM_SCHEMA(item)) for item in items)
+    async_add_entities(
+        setup_platform_entities(hass, "media_player", PLATFORM_SCHEMA, CrestronRoom)
+    )
 
 
-class CrestronRoom(MediaPlayerEntity):
-    _attr_should_poll = False
+class CrestronRoom(CrestronEntity, MediaPlayerEntity):
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
     _attr_supported_features = (
         MediaPlayerEntityFeature.SELECT_SOURCE
@@ -71,16 +68,12 @@ class CrestronRoom(MediaPlayerEntity):
         self._attr_device_info = device_info(config)
         self._last_source_num = next(iter(self._sources), None)
 
-    async def async_added_to_hass(self):
-        joins = [
+    def _callback_joins(self):
+        return [
             f"d{self._mute_join}",
             f"a{self._volume_join}",
             f"a{self._source_number_join}",
         ]
-        self._hub.register_callback(self.process_callback, joins=joins)
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
 
     async def process_callback(self, cbtype, value):
         if cbtype == f"a{self._source_number_join}":
@@ -88,10 +81,6 @@ class CrestronRoom(MediaPlayerEntity):
             if current and current in self._sources:
                 self._last_source_num = current
         self.async_write_ha_state()
-
-    @property
-    def available(self):
-        return self._hub.is_available()
 
     @property
     def source_list(self):

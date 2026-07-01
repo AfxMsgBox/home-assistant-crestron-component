@@ -161,30 +161,40 @@ def build_light(row):
 
 
 def build_cover(row):
-    """窗帘 sheet row -> ('cover', entity) or None."""
+    """窗帘 sheet row -> ('cover', entity) or None.
+
+    开/关/停止为必填的数字量控制 join。「位置」是可选的模拟量 join（0-100，
+    0=全关/100=全开）：有则作为 pos_join 输出，让 HA 显示真实百分比；无则
+    cover.py 退回假定状态（开/关/停按钮常驻可按，不受反馈影响——符合说明页
+    「开和关的控制不能因为反馈状态影响」）。
+    """
     op = _to_int(row.get("开"))
     cl = _to_int(row.get("关"))
     stop = _to_int(row.get("停止"))
     if op is None or cl is None or stop is None:
         return None
+    pos = _to_int(row.get("位置"))
     label = row.get("名称", "").strip()
     cover_type = "shade" if label.startswith("卷") else "curtain"
     name = _name(row, "名称")
-    return "cover", {
+    ent = {
         "platform": "crestron",
         "name": name,
         "type": cover_type,
         "open_join": op,
         "close_join": cl,
         "stop_join": stop,
-        "device_id": f"cover_{op}",
-        "device_name": name,
-        "_group": _group(row),
     }
+    if pos is not None:
+        ent["pos_join"] = pos
+    ent["device_id"] = f"cover_{op}"
+    ent["device_name"] = name
+    ent["_group"] = _group(row)
+    return "cover", ent
 
 
 _AC_MODE_COLS = ("制冷", "制热", "通风", "除湿")
-_AC_FAN_COLS = ("低速", "中速", "高速", "自动风速")
+_AC_FAN_COLS = ("低速", "中速", "高速", "自动")
 
 
 def _join_map(row, cols):
@@ -202,7 +212,7 @@ _AC_FAN_JOIN_KEYS = {
     "低速": "fan_low_join",
     "中速": "fan_med_join",
     "高速": "fan_high_join",
-    "自动风速": "fan_auto_join",
+    "自动": "fan_auto_join",
 }
 # 空调模式列 -> climate mode_*_join 字段名(只读，仅用于显示运行模式)
 _AC_MODE_JOIN_KEYS = {
@@ -222,6 +232,10 @@ def build_ac(row):
     mode (制冷/制热/通风/除湿) is a real selectable mode that tracks the control
     system's feedback joins. Needs power joins; without them the AC can't be a
     climate.
+
+    「风速值」列（模拟量风速 -1/10/50/100）暂不使用：数字量风速（低/中/高/自动）
+    已能完整表达风速，两路并存会让状态互相打架。故此处只读数字量风速列，
+    模拟量「风速值」有意忽略。
     """
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))

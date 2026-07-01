@@ -49,7 +49,7 @@ python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 3. **平台实体（`light.py`/`switch.py`/`climate.py`/`cover.py`/...）**
    - 统一模式：`async_added_to_hass` 里 `hub.register_callback(self.process_callback, joins=[...])`，回调体就是 `async_write_ha_state()`；`async_will_remove_from_hass` 里 `remove_callback`。
    - 全部 `_attr_should_poll = False`、`available` 跟随 `hub.is_available()`。
-   - 模拟 join 的 0–65535 在各平台内部映射到业务单位（亮度 0–255、位置 0–100、音量 0–1、温度原值等）。
+   - 模拟 join 的 0–65535 在各平台内部映射到业务单位（亮度 0–255、音量 0–1、温度原值等）。**窗帘位置例外**：主控直接用 0–100 模拟量表示百分比，`cover.py` 直读直写不做 /65535 缩放。
 
 辅助模块：`schema.py`（join 编号/`join_key` 校验器，配置加载期就拒绝越界与格式错误）、`value_coercion.py`（模板结果 → XSIG 值的纯函数）、`device.py`（`device_id`/`device_name` → `DeviceInfo`，相同 `device_id` 的实体归一台设备）、`const.py`（所有 `CONF_*` 键名）。
 
@@ -58,6 +58,7 @@ python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录>
 - **没有"查询单根 join"的指令**。状态同步完全是推送式：唯一一次主动要状态是连接时发 `0xFD`（全量）。若主控程序没给某 join 配"状态回传"，HA 永远无法得知其真实状态——这是配置问题，代码侧无法弥补。
 - **command-only join 用回传电平判定状态**：例如只开关灯读 `on_join`/`off_join` 的回传电平（一高一低才确定，都低/都高维持当前）；空调电源读 `on_join` 回传电平。
 - **乐观状态 + 跨重启恢复**：点动类实体（如 `CrestronOnOffLight`）下命令后先乐观显示并用 `RestoreEntity` 跨重启恢复，回传到达后再以回传校正。纯瞬动（无 `state_join`）重启后会丢真实状态。
+- **窗帘位置的优雅降级**（`cover.py`）：配了 `pos_join` 但主控没回传位置时（快思聪侧常见缺口），位置降级为命令推断（开→100/关→0/停→保持），`supported_features`/`assumed_state` 做成动态属性——无真实反馈时不暴露 `SET_POSITION`（不给滑块）。真实位置一到，`current_cover_position` 立即改用它、滑块自动恢复，`process_callback` 里清掉乐观值。同样用 `RestoreEntity` 跨重启恢复。
 - **调光灯关灯的两步时序**（`light.py` `async_turn_off`）：先把当前电平原样重发、`sleep(OFF_REASSERT_SECONDS)`、再写 0，凑出一次"高→0"跳变。两步之间的延时是必须的——零延时会让两个模拟量落进同一控制系统扫描周期、0 被覆盖，导致要按两次才关。点动脉冲固定 `PULSE_SECONDS = 0.2`。
 - **串行长度按 UTF-8 字节算**（≤252 字节，约 84 个汉字），超长丢弃。Join 编号越界写入运行期丢弃，schema 也会在加载期拒绝。
 
