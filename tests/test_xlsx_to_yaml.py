@@ -19,6 +19,13 @@ def light_row(**kw):
     return base
 
 
+def outlet_row(**kw):
+    base = {"楼层": "B2", "房间": "会客厅", "名称": "",
+            "开": "", "关": ""}
+    base.update(kw)
+    return base
+
+
 class LightTests(unittest.TestCase):
     def test_dual_color_temp_light(self):
         plat, ent = g.build_light(
@@ -60,6 +67,26 @@ class LightTests(unittest.TestCase):
 
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
+
+
+class OutletTests(unittest.TestCase):
+    def test_outlet_is_switch_with_outlet_class(self):
+        plat, ent = g.build_outlet(
+            outlet_row(名称="落地灯", 开="147", 关="148")
+        )
+        self.assertEqual(plat, "switch")
+        self.assertEqual(ent["name"], "B2.会客厅 落地灯")
+        self.assertEqual(ent["on_join"], 147)
+        self.assertEqual(ent["off_join"], 148)
+        self.assertEqual(ent["device_class"], "outlet")
+        self.assertEqual(ent["device_id"], "outlet_147")
+        self.assertEqual(ent["device_name"], "B2.会客厅 落地灯")
+
+    def test_missing_outlet_join_skipped(self):
+        self.assertIsNone(g.build_outlet(outlet_row(名称="落地灯", 开="147")))
+
+    def test_outlet_sheet_registered(self):
+        self.assertIs(g.SHEET_BUILDERS["插座"], g.build_outlet)
 
 
 class CoverTests(unittest.TestCase):
