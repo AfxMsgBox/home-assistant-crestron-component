@@ -80,6 +80,7 @@ class CrestronLight(CrestronEntity, LightEntity):
         self._color_temp_join = config.get(CONF_COLOR_TEMP_JOIN)
         self._attr_unique_id = f"crestron_light_{self._brightness_join}"
         self._attr_device_info = device_info(config)
+        self._command_seq = 0
         if self._color_temp_join is not None:
             self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
             self._attr_color_mode = ColorMode.COLOR_TEMP
@@ -119,6 +120,7 @@ class CrestronLight(CrestronEntity, LightEntity):
         return self._hub.get_analog(self._brightness_join) > 0
 
     async def async_turn_on(self, **kwargs):
+        self._command_seq += 1
         if "brightness" in kwargs:
             self._hub.set_analog(
                 self._brightness_join, round(kwargs["brightness"] / 255 * 65535)
@@ -139,6 +141,8 @@ class CrestronLight(CrestronEntity, LightEntity):
             self._hub.set_analog(self._color_temp_join, color_temp)
 
     async def async_turn_off(self, **kwargs):
+        self._command_seq += 1
+        seq = self._command_seq
         # 快思聪调光模块通常只在 HA 下发的电平“发生变化”时才动作。物理开关开灯后，
         # HA 从未主动下发过电平，直接写 0 在控制系统看来像“没变化”而被忽略，灯泡
         # 关不掉。所以先把当前电平原样重发、保持一个程序扫描周期，再写 0，凑出一次
@@ -148,6 +152,8 @@ class CrestronLight(CrestronEntity, LightEntity):
         if current > 0:
             self._hub.set_analog(self._brightness_join, current)
             await asyncio.sleep(OFF_REASSERT_SECONDS)
+            if seq != self._command_seq:
+                return
         self._hub.set_analog(self._brightness_join, 0)
 
 

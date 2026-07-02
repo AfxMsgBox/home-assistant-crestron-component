@@ -16,6 +16,7 @@ from .xsig_protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_FRAME_LOGGER = logging.getLogger(__name__ + ".frames")
 
 
 AVAILABLE_KEY = "available"
@@ -30,6 +31,7 @@ SYNC_SETTLE_SECONDS = 1.0
 
 # Chunk size for inbound socket reads; frames are reassembled by FrameDecoder.
 _READ_CHUNK = 4096
+_WRITER_CLOSE_TIMEOUT = 2.0
 
 
 class CrestronXsig:
@@ -147,15 +149,15 @@ class CrestronXsig:
             # Lazy %-formatting: on a 1000+ join cold-start sync this runs
             # thousands of times in a burst; an f-string would build the
             # message even when debug is disabled.
-            _LOGGER.debug("Got Digital: %s = %s", frame.join, frame.value)
+            _FRAME_LOGGER.debug("Got Digital: %s = %s", frame.join, frame.value)
             await self._timed_dispatch(f"d{frame.join}", str(frame.value), stats)
         elif kind == "analog":
             self._analog[frame.join] = frame.value
-            _LOGGER.debug("Got Analog: %s = %s", frame.join, frame.value)
+            _FRAME_LOGGER.debug("Got Analog: %s = %s", frame.join, frame.value)
             await self._timed_dispatch(f"a{frame.join}", str(frame.value), stats)
         elif kind == "serial":
             self._serial[frame.join] = frame.value
-            _LOGGER.debug("Got String: %s = %s", frame.join, frame.value)
+            _FRAME_LOGGER.debug("Got String: %s = %s", frame.join, frame.value)
             await self._timed_dispatch(f"s{frame.join}", frame.value, stats)
         elif kind == "sync_all":
             _LOGGER.debug("Got update-all-joins request")
@@ -164,8 +166,18 @@ class CrestronXsig:
         elif kind == "bad_utf8":
             _LOGGER.warning(f"Invalid UTF-8 on serial join {frame.join}")
         elif kind == "unknown":
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug("Unknown Packet: %s", frame.value)
+            if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+                _FRAME_LOGGER.debug("Unknown Packet: %s", frame.value)
+
+    async def _wait_writer_closed(self, writer):
+        try:
+            await asyncio.wait_for(
+                writer.wait_closed(), timeout=_WRITER_CLOSE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timed out waiting for XSIG writer to close")
+        except Exception:
+            pass
 
     async def _close_writer(self):
         writer = self._writer
@@ -174,9 +186,9 @@ class CrestronXsig:
             return
         try:
             writer.close()
-            await writer.wait_closed()
         except Exception:
             pass
+        await self._wait_writer_closed(writer)
 
     async def _notify_available(self, available):
         if self._available == available:
@@ -256,9 +268,9 @@ class CrestronXsig:
                 self._writer = None
             try:
                 writer.close()
-                await writer.wait_closed()
             except Exception:
                 pass
+            await self._wait_writer_closed(writer)
             if was_active:
                 await self._notify_available(False)
 
@@ -329,7 +341,7 @@ class CrestronXsig:
             )
             return
         self._write(encode_analog(join, value))
-        _LOGGER.debug("Sending Analog: %s, %s", join, value)
+        _FRAME_LOGGER.debug("Sending Analog: %s, %s", join, value)
 
     def set_digital(self, join, value):
         """Send Digital Join to Crestron XSIG symbol."""
@@ -339,7 +351,7 @@ class CrestronXsig:
             )
             return
         self._write(encode_digital(join, value))
-        _LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
+        _FRAME_LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
 
     def set_serial(self, join, string):
         """Send String Join to Crestron XSIG symbol."""
@@ -356,4 +368,4 @@ class CrestronXsig:
             )
             return
         self._write(encode_serial(join, encoded))
-        _LOGGER.debug("Sending Serial: %s, %s", join, string)
+        _FRAME_LOGGER.debug("Sending Serial: %s, %s", join, string)
