@@ -8,6 +8,7 @@ runtime is required.
 
 import asyncio
 import logging
+import types
 import unittest
 
 from loader import load
@@ -118,6 +119,12 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
         await self.writer.drain()
         await _wait_for(lambda: self.hub.get_serial(4) == "你好 hi")
         self.assertEqual(self.hub.get_serial(4), "你好 hi")
+
+    async def test_frame_logs_use_dedicated_logger(self):
+        frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
+        with self.assertLogs(xsig._FRAME_LOGGER.name, level="DEBUG") as logs:
+            await self.hub._handle_frame(frame, None)
+        self.assertIn("Got Analog: 3 = 1000", "\n".join(logs.output))
 
     async def test_inbound_frame_split_across_reads(self):
         # Deliver an analog frame one byte at a time; the reader must reassemble.
@@ -247,6 +254,31 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
             pass
         await _wait_for(lambda: not self.hub.is_available())
         self.assertFalse(self.hub.is_available())
+
+
+class WriterCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_writer_timeout_does_not_hang(self):
+        class HangingWriter:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                await asyncio.Event().wait()
+
+        hub = CrestronXsig()
+        writer = HangingWriter()
+        hub._writer = writer
+        old_timeout = xsig._WRITER_CLOSE_TIMEOUT
+        xsig._WRITER_CLOSE_TIMEOUT = 0.01
+        try:
+            await asyncio.wait_for(hub._close_writer(), timeout=0.5)
+        finally:
+            xsig._WRITER_CLOSE_TIMEOUT = old_timeout
+        self.assertTrue(writer.closed)
+        self.assertIsNone(hub._writer)
 
 
 class StateGetterTests(unittest.TestCase):

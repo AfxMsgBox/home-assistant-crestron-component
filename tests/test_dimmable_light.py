@@ -113,6 +113,24 @@ class TurnOffSequenceTests(unittest.TestCase):
         asyncio.run(self.light.async_turn_off())
         self.assertEqual(self.hub.sent_analog, [(20, 0)])
 
+    def test_turn_on_cancels_pending_delayed_zero(self):
+        old_delay = light_mod.OFF_REASSERT_SECONDS
+        light_mod.OFF_REASSERT_SECONDS = 0.05
+
+        async def run():
+            self.hub.analog[20] = 65535
+            off_task = asyncio.create_task(self.light.async_turn_off())
+            await asyncio.sleep(0.01)
+            await self.light.async_turn_on()
+            await off_task
+
+        try:
+            asyncio.run(run())
+        finally:
+            light_mod.OFF_REASSERT_SECONDS = old_delay
+
+        self.assertEqual(self.hub.sent_analog, [(20, 65535)])
+
 
 if __name__ == "__main__":
     unittest.main()
