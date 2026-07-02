@@ -80,15 +80,7 @@ write command。
 **问题**：核心循环 `await self._timed_dispatch(f"d{frame.join}", str(frame.value), stats)` 每次都在产生新字符串，在瞬时海量包（如冷启动全量 Sync）时增加垃圾回收压力。
 **优化方案**：快思聪 Join 数是固定的（Digital 4096，Analog 1024），可在模块初始化时预分配 Join 字符串字典或数组，如 `_DIGITAL_JOIN_STRS = [f"d{i}" for i in range(4097)]`，直接按索引取用。
 
-### 3. Socket 关闭时的挂起风险
-**问题**：网络异常时 `await writer.wait_closed()` 有极低概率无限挂起（TCP 半开连接/静默丢包），导致 `finally` 块永远无法广播 `available = False` 状态。
-**优化方案**：在 `writer.wait_closed()` 外部包裹 `asyncio.wait_for(..., timeout=2.0)` 进行超时保护。
-
-### 4. `light.py` 并发开关跳变冲突
-**问题**：`async_turn_off` 硬编码了 `0.2` 秒延时（为了凑出电平跳变）。如果在此期间触发了 `async_turn_on`，`turn_on` 执行完后，`turn_off` 睡眠结束并设为 `0`，导致灯开后秒关。
-**优化方案**：增加 Task 取消机制。用实例变量 `self._off_task` 记录关闭任务，并在 `async_turn_on` 调用时 `cancel()` 掉它。
-
-### 5. God Object 拆分解耦与事件总线
+### 3. God Object 拆分解耦与事件总线
 **问题**：`CrestronXsig` 职责过多（TCP 连接管理、XSIG 缓存、分发器），且内部 `_join_callbacks` 强耦合。
 **优化方案**：考虑使用 Home Assistant 原生的 `async_dispatcher_send` 代替手写的 Callback Set；分离 TCP Connection Manager 和 Protocol Handler。
 
