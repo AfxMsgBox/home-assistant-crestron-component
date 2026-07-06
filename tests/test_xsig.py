@@ -126,6 +126,28 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
             await self.hub._handle_frame(frame, None)
         self.assertIn("Got Analog: 3 = 1000", "\n".join(logs.output))
 
+    async def test_main_info_does_not_emit_frame_debug_logs(self):
+        frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Handler()
+        old_main_level = xsig._LOGGER.level
+        old_frame_level = xsig._FRAME_LOGGER.level
+        xsig._LOGGER.setLevel(logging.INFO)
+        xsig._FRAME_LOGGER.setLevel(logging.NOTSET)
+        xsig._FRAME_LOGGER.addHandler(handler)
+        try:
+            await self.hub._handle_frame(frame, None)
+        finally:
+            xsig._FRAME_LOGGER.removeHandler(handler)
+            xsig._LOGGER.setLevel(old_main_level)
+            xsig._FRAME_LOGGER.setLevel(old_frame_level)
+        self.assertFalse(any("Got Analog" in r.getMessage() for r in records))
+
     async def test_inbound_frame_split_across_reads(self):
         # Deliver an analog frame one byte at a time; the reader must reassemble.
         for b in enc_analog(7, 12345):
@@ -279,6 +301,18 @@ class WriterCloseTests(unittest.IsolatedAsyncioTestCase):
             xsig._WRITER_CLOSE_TIMEOUT = old_timeout
         self.assertTrue(writer.closed)
         self.assertIsNone(hub._writer)
+
+
+class TimingStatsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timing_gate_follows_main_logger_info_level(self):
+        old_level = xsig._LOGGER.level
+        try:
+            xsig._LOGGER.setLevel(logging.INFO)
+            self.assertTrue(xsig._sync_timing_enabled())
+            xsig._LOGGER.setLevel(logging.WARNING)
+            self.assertFalse(xsig._sync_timing_enabled())
+        finally:
+            xsig._LOGGER.setLevel(old_level)
 
 
 class StateGetterTests(unittest.TestCase):

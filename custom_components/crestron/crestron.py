@@ -21,10 +21,6 @@ _FRAME_LOGGER = logging.getLogger(__name__ + ".frames")
 
 AVAILABLE_KEY = "available"
 
-# Initial full-sync timing probe master switch. Set to True to re-enable the
-# one-shot "join sync settled" summary log (no background task, no stat-keeping,
-# no summary log when False — near-zero overhead).
-SYNC_TIMING_ENABLED = False
 # Silence gap that marks the initial full-sync burst as "done": once no join
 # frame has arrived for this long, log the one-shot summary.
 SYNC_SETTLE_SECONDS = 1.0
@@ -32,6 +28,10 @@ SYNC_SETTLE_SECONDS = 1.0
 # Chunk size for inbound socket reads; frames are reassembled by FrameDecoder.
 _READ_CHUNK = 4096
 _WRITER_CLOSE_TIMEOUT = 2.0
+
+
+def _sync_timing_enabled():
+    return _LOGGER.isEnabledFor(logging.INFO)
 
 
 class CrestronXsig:
@@ -211,13 +211,13 @@ class CrestronXsig:
             await writer.drain()
             await self._notify_available(True)
 
-            # Timing probe: measure how long the initial full-join-sync burst
-            # takes (and how much of it is HA-side dispatch) to locate startup
-            # slowness. Gated by SYNC_TIMING_ENABLED; stats=None disables it.
+            # Timing probe for the initial full-join-sync burst. It follows the
+            # normal integration logger: enabled at info/debug, disabled at
+            # warning+.
             t_request = time.monotonic()
             stats = (
                 {"frames": 0, "first": None, "last": None, "dispatch": 0.0}
-                if SYNC_TIMING_ENABLED
+                if _sync_timing_enabled()
                 else None
             )
 
