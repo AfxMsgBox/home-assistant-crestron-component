@@ -6,12 +6,16 @@ temperature number, fan select and room-temp/mode sensors) appear together as
 one device in Home Assistant.
 """
 
+from __future__ import annotations
+
+from typing import Any, Optional
+
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN, CONF_DEVICE_ID, CONF_DEVICE_NAME
 
 
-def device_info(config):
+def device_info(config: dict[str, Any]) -> Optional[DeviceInfo]:
     """Build DeviceInfo from config, or None when no device_id is set."""
     device_id = config.get(CONF_DEVICE_ID)
     if not device_id:

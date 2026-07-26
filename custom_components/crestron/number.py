@@ -12,9 +12,10 @@ from homeassistant.const import (
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import HUB, DOMAIN, YAML_CONF, CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
+from .const import CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
 from .schema import analog_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,14 +34,12 @@ PLATFORM_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("number", [])
-    async_add_entities(CrestronNumber(hub, PLATFORM_SCHEMA(item)) for item in items)
+    async_add_entities(
+        setup_platform_entities(hass, "number", PLATFORM_SCHEMA, CrestronNumber)
+    )
 
 
-class CrestronNumber(NumberEntity, RestoreEntity):
-    _attr_should_poll = False
-
+class CrestronNumber(CrestronEntity, NumberEntity, RestoreEntity):
     def __init__(self, hub, config):
         self._hub = hub
         self._attr_name = config.get(CONF_NAME)
@@ -54,8 +53,11 @@ class CrestronNumber(NumberEntity, RestoreEntity):
         self._attr_device_info = device_info(config)
         self._value = None  # optimistic/cached setpoint
 
+    def _callback_joins(self):
+        return [f"a{self._join}"]
+
     async def async_added_to_hass(self):
-        self._hub.register_callback(self.process_callback, joins=[f"a{self._join}"])
+        await super().async_added_to_hass()
         # If connected, trust live feedback; otherwise restore the pre-restart
         # value instead of showing 0/unknown until the control system next
         # pushes the analog join (it sends only on change). Treat 0 as "not yet
@@ -72,18 +74,11 @@ class CrestronNumber(NumberEntity, RestoreEntity):
                 except (TypeError, ValueError):
                     pass
 
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
-
     async def process_callback(self, cbtype, value):
         v = self._hub.get_analog(self._join)
         if v:
             self._value = v
         self.async_write_ha_state()
-
-    @property
-    def available(self):
-        return self._hub.is_available()
 
     @property
     def native_value(self):
