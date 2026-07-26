@@ -20,7 +20,7 @@ _JOIN_LIMITS = {
 _JOIN_KEY_RE = re.compile(r"^([das])([1-9][0-9]*)$")
 
 
-def join_key(value):
+def join_key(value: object) -> str:
     """Validate a `to_joins`/`from_joins` key like 'd12', 'a35', 's4'.
 
     Catches typos and out-of-range joins at config-load time rather than

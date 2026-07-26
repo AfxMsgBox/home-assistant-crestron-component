@@ -60,5 +60,34 @@ class ToSerialTests(unittest.TestCase):
             self.assertIsNone(vc.to_serial(s), s)
 
 
+class ResolveJoinWriteTests(unittest.TestCase):
+    """The to_joins write path (parse key + coerce value) used by ToJoinBridge."""
+
+    def test_digital(self):
+        self.assertEqual(vc.resolve_join_write("d12", "on"), ("d", 12, True))
+        self.assertEqual(vc.resolve_join_write("d12", "off"), ("d", 12, False))
+
+    def test_analog_clamped(self):
+        self.assertEqual(vc.resolve_join_write("a3", "70000"), ("a", 3, 65535))
+        self.assertEqual(vc.resolve_join_write("a3", "24"), ("a", 3, 24))
+
+    def test_serial(self):
+        self.assertEqual(vc.resolve_join_write("s4", "你好"), ("s", 4, "你好"))
+
+    def test_unknown_value_returns_none(self):
+        # Unknown/garbage values must not be written.
+        self.assertIsNone(vc.resolve_join_write("a3", "unavailable"))
+        self.assertIsNone(vc.resolve_join_write("d3", "garbage"))
+        self.assertIsNone(vc.resolve_join_write("s3", "unknown"))
+
+    def test_unknown_kind_returns_none(self):
+        self.assertIsNone(vc.resolve_join_write("x9", "1"))
+
+    def test_malformed_number_raises(self):
+        # Caller logs this distinctly (a misconfigured join key).
+        with self.assertRaises(ValueError):
+            vc.resolve_join_write("dabc", "1")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -113,6 +113,51 @@ class TurnOffSequenceTests(unittest.TestCase):
         asyncio.run(self.light.async_turn_off())
         self.assertEqual(self.hub.sent_analog, [(20, 0)])
 
+    def test_turn_on_cancels_pending_delayed_zero(self):
+        old_delay = light_mod.OFF_REASSERT_SECONDS
+        light_mod.OFF_REASSERT_SECONDS = 0.05
+
+        async def run():
+            self.hub.analog[20] = 65535
+            off_task = asyncio.create_task(self.light.async_turn_off())
+            await asyncio.sleep(0.01)
+            await self.light.async_turn_on()
+            await off_task
+
+        try:
+            asyncio.run(run())
+        finally:
+            light_mod.OFF_REASSERT_SECONDS = old_delay
+
+        self.assertEqual(self.hub.sent_analog, [(20, 65535)])
+
+    def test_turn_on_to_brightness_wins_over_pending_zero(self):
+        # Real-world "灯开后秒关": while turn_off holds before sending 0, the
+        # user turns the light back on to a specific brightness. The pending 0
+        # must be abandoned so the light ends at the new level, not off.
+        old_delay = light_mod.OFF_REASSERT_SECONDS
+        light_mod.OFF_REASSERT_SECONDS = 0.05
+
+        async def run():
+            self.hub.analog[20] = 65535
+            off_task = asyncio.create_task(self.light.async_turn_off())
+            await asyncio.sleep(0.01)
+            await self.light.async_turn_on(brightness=128)
+            await off_task
+
+        try:
+            asyncio.run(run())
+        finally:
+            light_mod.OFF_REASSERT_SECONDS = old_delay
+
+        # Re-assert from turn_off, then the new level from turn_on; crucially
+        # the delayed (20, 0) is never sent.
+        self.assertEqual(
+            self.hub.sent_analog,
+            [(20, 65535), (20, round(128 / 255 * 65535))],
+        )
+        self.assertNotIn((20, 0), self.hub.sent_analog)
+
 
 if __name__ == "__main__":
     unittest.main()

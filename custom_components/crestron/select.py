@@ -13,9 +13,11 @@ from homeassistant.const import CONF_NAME
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import HUB, DOMAIN, YAML_CONF, CONF_OPTIONS
+from .const import CONF_OPTIONS
 from .schema import digital_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
+from .join_commands import set_one_clear_others
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,14 +31,12 @@ PLATFORM_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("select", [])
-    async_add_entities(CrestronSelect(hub, PLATFORM_SCHEMA(item)) for item in items)
+    async_add_entities(
+        setup_platform_entities(hass, "select", PLATFORM_SCHEMA, CrestronSelect)
+    )
 
 
-class CrestronSelect(SelectEntity, RestoreEntity):
-    _attr_should_poll = False
-
+class CrestronSelect(CrestronEntity, SelectEntity, RestoreEntity):
     def __init__(self, hub, config):
         self._hub = hub
         self._attr_name = config.get(CONF_NAME)
@@ -47,9 +47,11 @@ class CrestronSelect(SelectEntity, RestoreEntity):
         self._attr_device_info = device_info(config)
         self._current = None  # optimistic/cached option
 
+    def _callback_joins(self):
+        return [f"d{j}" for j in self._joins.values()]
+
     async def async_added_to_hass(self):
-        joins = [f"d{j}" for j in self._joins.values()]
-        self._hub.register_callback(self.process_callback, joins=joins)
+        await super().async_added_to_hass()
         # If connected, trust live feedback; otherwise restore the pre-restart
         # option instead of showing nothing until the control system next
         # pushes a join (it sends only on change).
@@ -61,9 +63,6 @@ class CrestronSelect(SelectEntity, RestoreEntity):
             last = await self.async_get_last_state()
             if last is not None and last.state in self._attr_options:
                 self._current = last.state
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
 
     def _feedback_option(self):
         for label, join in self._joins.items():
@@ -80,10 +79,6 @@ class CrestronSelect(SelectEntity, RestoreEntity):
         self.async_write_ha_state()
 
     @property
-    def available(self):
-        return self._hub.is_available()
-
-    @property
     def current_option(self):
         return self._current
 
@@ -93,7 +88,4 @@ class CrestronSelect(SelectEntity, RestoreEntity):
             return
         self._current = option
         self.async_write_ha_state()
-        for join in self._joins.values():
-            if join != target:
-                self._hub.set_digital(join, False)
-        self._hub.set_digital(target, True)
+        set_one_clear_others(self._hub, self._joins.values(), target)

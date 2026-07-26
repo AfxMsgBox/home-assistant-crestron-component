@@ -7,9 +7,10 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
 import homeassistant.helpers.config_validation as cv
 
-from .const import HUB, DOMAIN, YAML_CONF, CONF_IS_ON_JOIN
+from .const import CONF_IS_ON_JOIN
 from .schema import digital_join
 from .device import device_info
+from .entity import CrestronEntity, setup_platform_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,16 +25,14 @@ PLATFORM_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    hub = hass.data[DOMAIN][HUB]
-    items = hass.data[DOMAIN][YAML_CONF].get("binary_sensor", [])
     async_add_entities(
-        CrestronBinarySensor(hub, PLATFORM_SCHEMA(item)) for item in items
+        setup_platform_entities(
+            hass, "binary_sensor", PLATFORM_SCHEMA, CrestronBinarySensor
+        )
     )
 
 
-class CrestronBinarySensor(BinarySensorEntity):
-    _attr_should_poll = False
-
+class CrestronBinarySensor(CrestronEntity, BinarySensorEntity):
     def __init__(self, hub, config):
         self._hub = hub
         self._attr_name = config.get(CONF_NAME)
@@ -42,20 +41,8 @@ class CrestronBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"crestron_binary_sensor_{self._join}"
         self._attr_device_info = device_info(config)
 
-    async def async_added_to_hass(self):
-        self._hub.register_callback(
-            self.process_callback, joins=[f"d{self._join}"]
-        )
-
-    async def async_will_remove_from_hass(self):
-        self._hub.remove_callback(self.process_callback)
-
-    async def process_callback(self, cbtype, value):
-        self.async_write_ha_state()
-
-    @property
-    def available(self):
-        return self._hub.is_available()
+    def _callback_joins(self):
+        return [f"d{self._join}"]
 
     @property
     def is_on(self):

@@ -8,6 +8,7 @@ runtime is required.
 
 import asyncio
 import logging
+import types
 import unittest
 
 from loader import load
@@ -118,6 +119,34 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
         await self.writer.drain()
         await _wait_for(lambda: self.hub.get_serial(4) == "你好 hi")
         self.assertEqual(self.hub.get_serial(4), "你好 hi")
+
+    async def test_frame_logs_use_dedicated_logger(self):
+        frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
+        with self.assertLogs(xsig._FRAME_LOGGER.name, level="DEBUG") as logs:
+            await self.hub._handle_frame(frame, None)
+        self.assertIn("Got Analog: 3 = 1000", "\n".join(logs.output))
+
+    async def test_main_info_does_not_emit_frame_debug_logs(self):
+        frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Handler()
+        old_main_level = xsig._LOGGER.level
+        old_frame_level = xsig._FRAME_LOGGER.level
+        xsig._LOGGER.setLevel(logging.INFO)
+        xsig._FRAME_LOGGER.setLevel(logging.NOTSET)
+        xsig._FRAME_LOGGER.addHandler(handler)
+        try:
+            await self.hub._handle_frame(frame, None)
+        finally:
+            xsig._FRAME_LOGGER.removeHandler(handler)
+            xsig._LOGGER.setLevel(old_main_level)
+            xsig._FRAME_LOGGER.setLevel(old_frame_level)
+        self.assertFalse(any("Got Analog" in r.getMessage() for r in records))
 
     async def test_inbound_frame_split_across_reads(self):
         # Deliver an analog frame one byte at a time; the reader must reassemble.
@@ -247,6 +276,119 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
             pass
         await _wait_for(lambda: not self.hub.is_available())
         self.assertFalse(self.hub.is_available())
+
+
+class WriterCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_writer_timeout_does_not_hang(self):
+        class HangingWriter:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                await asyncio.Event().wait()
+
+        hub = CrestronXsig()
+        writer = HangingWriter()
+        hub._writer = writer
+        old_timeout = xsig._WRITER_CLOSE_TIMEOUT
+        xsig._WRITER_CLOSE_TIMEOUT = 0.01
+        try:
+            await asyncio.wait_for(hub._close_writer(), timeout=0.5)
+        finally:
+            xsig._WRITER_CLOSE_TIMEOUT = old_timeout
+        self.assertTrue(writer.closed)
+        self.assertIsNone(hub._writer)
+
+
+class TimingStatsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timing_gate_follows_main_logger_info_level(self):
+        old_level = xsig._LOGGER.level
+        try:
+            xsig._LOGGER.setLevel(logging.INFO)
+            self.assertTrue(xsig._sync_timing_enabled())
+            xsig._LOGGER.setLevel(logging.WARNING)
+            self.assertFalse(xsig._sync_timing_enabled())
+        finally:
+            xsig._LOGGER.setLevel(old_level)
+
+
+class StateGetterTests(unittest.TestCase):
+    """has_*/get_* semantics: unknown (never reported) vs real 0/False/''."""
+
+    def setUp(self):
+        self.hub = CrestronXsig()
+
+    def test_unknown_before_report(self):
+        self.assertFalse(self.hub.has_analog(5))
+        self.assertFalse(self.hub.has_digital(5))
+        self.assertFalse(self.hub.has_serial(5))
+
+    def test_getter_defaults_preserve_legacy_behaviour(self):
+        # Bare getters still return 0/False/'' for unknown joins (back-compat).
+        self.assertEqual(self.hub.get_analog(5), 0)
+        self.assertIs(self.hub.get_digital(5), False)
+        self.assertEqual(self.hub.get_serial(5), "")
+
+    def test_explicit_default_for_unknown(self):
+        self.assertIsNone(self.hub.get_analog(5, None))
+        self.assertIsNone(self.hub.get_digital(5, None))
+        self.assertIsNone(self.hub.get_serial(5, None))
+
+    def test_real_zero_is_known(self):
+        # A genuinely reported 0/False/'' is distinguishable from unknown.
+        self.hub._analog[5] = 0
+        self.hub._digital[6] = False
+        self.hub._serial[7] = ""
+        self.assertTrue(self.hub.has_analog(5))
+        self.assertTrue(self.hub.has_digital(6))
+        self.assertTrue(self.hub.has_serial(7))
+        # ...and the explicit-default getters return the real value, not default.
+        self.assertEqual(self.hub.get_analog(5, None), 0)
+        self.assertIs(self.hub.get_digital(6, None), False)
+        self.assertEqual(self.hub.get_serial(7, None), "")
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = CrestronXsig()
+
+    def test_fresh_hub(self):
+        d = self.hub.diagnostics()
+        self.assertFalse(d["available"])
+        self.assertFalse(d["connected"])
+        self.assertIsNone(d["peer"])
+        self.assertIsNone(d["listening_port"])
+        self.assertEqual(
+            d["cache_counts"], {"digital": 0, "analog": 0, "serial": 0}
+        )
+
+    def test_reflects_cache_and_connection(self):
+        self.hub._digital[5] = True
+        self.hub._analog[3] = 1000
+        self.hub._serial[7] = "hi"
+        self.hub._peer = "('10.0.0.9', 5001)"
+        self.hub._port = 32000
+        self.hub._writer = object()  # simulate an active connection
+        d = self.hub.diagnostics()
+        self.assertTrue(d["connected"])
+        self.assertEqual(d["peer"], "('10.0.0.9', 5001)")
+        self.assertEqual(d["listening_port"], 32000)
+        self.assertEqual(
+            d["cache_counts"], {"digital": 1, "analog": 1, "serial": 1}
+        )
+        self.assertEqual(d["digital"], {5: True})
+        self.assertEqual(d["analog"], {3: 1000})
+        self.assertEqual(d["serial"], {7: "hi"})
+
+    def test_cache_dicts_are_copies(self):
+        # Mutating the returned snapshot must not corrupt the live cache.
+        self.hub._analog[3] = 1
+        d = self.hub.diagnostics()
+        d["analog"][3] = 999
+        self.assertEqual(self.hub.get_analog(3), 1)
 
 
 if __name__ == "__main__":

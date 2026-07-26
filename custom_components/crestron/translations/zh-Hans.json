@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Crestron XSIG 的连接与实体配置全部来自 configuration.yaml 的 `crestron:` 段。此处只创建集成条目。"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Crestron XSIG 选项",
+        "description": "配置仍来自 YAML。勾选下方选项并提交，可手动把 HA 当前已知的所有 to_joins 状态重新下发给主控（通常只在主控重连时才会自动发生）。",
+        "data": {
+          "resync_to_joins": "重新同步所有 to_joins 到主控"
+        }
+      }
+    }
+  }
+}

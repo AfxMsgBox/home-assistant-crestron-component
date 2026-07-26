@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "All Crestron XSIG connection and entity configuration comes from the `crestron:` block in configuration.yaml. This only creates the integration entry."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Crestron XSIG options",
+        "description": "Configuration still comes from YAML. Tick the option below and submit to manually push every to_join HA currently knows back to the control system (normally only done automatically when the control system reconnects).",
+        "data": {
+          "resync_to_joins": "Resync all to_joins to the control system"
+        }
+      }
+    }
+  }
+}
