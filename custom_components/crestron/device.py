@@ -12,7 +12,12 @@ from typing import Any, Optional
 
 from homeassistant.helpers.entity import DeviceInfo
 
-from .const import DOMAIN, CONF_DEVICE_ID, CONF_DEVICE_NAME
+from .const import (
+    DOMAIN,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_NAME,
+    CONF_SUGGESTED_AREA,
+)
 
 
 def device_info(config: dict[str, Any]) -> Optional[DeviceInfo]:
@@ -23,4 +28,5 @@ def device_info(config: dict[str, Any]) -> Optional[DeviceInfo]:
     return DeviceInfo(
         identifiers={(DOMAIN, device_id)},
         name=config.get(CONF_DEVICE_NAME) or device_id,
+        suggested_area=config.get(CONF_SUGGESTED_AREA),
     )

@@ -33,15 +33,17 @@ class LightTests(unittest.TestCase):
         )
         self.assertEqual(plat, "light")
         self.assertEqual(ent["name"], "B2.车库 天花灯带")
-        self.assertEqual(ent["type"], "brightness")
+        self.assertEqual(ent["type"], "color_temp")
         self.assertEqual(ent["brightness_join"], 1)
         self.assertEqual(ent["color_temp_join"], 201)
+        self.assertEqual(ent["suggested_area"], "B2.车库")
 
     def test_brightness_only_light(self):
         plat, ent = g.build_light(
             light_row(名称="吊灯", 功能="单色温", 亮度="4")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "brightness")
         self.assertNotIn("color_temp_join", ent)
 
     def test_single_label_but_has_color_temp(self):
@@ -51,6 +53,7 @@ class LightTests(unittest.TestCase):
             light_row(名称="壁灯", 功能="单色温", 亮度="24", 色温="224")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "color_temp")
         self.assertEqual(ent["color_temp_join"], 224)
 
     def test_relay_is_onoff_light(self):
@@ -59,11 +62,28 @@ class LightTests(unittest.TestCase):
             light_row(名称="柜灯", 功能="Relay", 开="1", 关="2")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "onoff")
         self.assertEqual(ent["on_join"], 1)
         self.assertEqual(ent["off_join"], 2)
-        self.assertNotIn("type", ent)
         self.assertNotIn("brightness_join", ent)
         self.assertEqual(ent["device_id"], "light_onoff_1")
+
+    def test_color_temp_without_brightness_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(light_row(名称="错误灯", 色温="201"))
+        )
+
+    def test_incomplete_onoff_pair_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(light_row(名称="错误灯", 开="1"))
+        )
+
+    def test_mixed_analog_and_digital_control_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(
+                light_row(名称="歧义灯", 亮度="1", 开="1", 关="2")
+            )
+        )
 
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
@@ -81,6 +101,7 @@ class OutletTests(unittest.TestCase):
         self.assertEqual(ent["device_class"], "outlet")
         self.assertEqual(ent["device_id"], "outlet_147")
         self.assertEqual(ent["device_name"], "B2.会客厅 落地灯")
+        self.assertEqual(ent["suggested_area"], "B2.会客厅")
 
     def test_missing_outlet_join_skipped(self):
         self.assertIsNone(g.build_outlet(outlet_row(名称="落地灯", 开="147")))
@@ -93,7 +114,8 @@ class CoverTests(unittest.TestCase):
     def test_curtain_with_position(self):
         plat, ent = g.build_cover(
             {"楼层": "B2", "房间": "会客厅", "名称": "纱帘1",
-             "开": "700", "关": "701", "停止": "702", "位置": "480"}
+             "类型": "curtain", "开": "700", "关": "701",
+             "停止": "702", "位置": "480"}
         )
         self.assertEqual(plat, "cover")
         self.assertEqual(ent["type"], "curtain")
@@ -115,13 +137,34 @@ class CoverTests(unittest.TestCase):
         )
         self.assertNotIn("pos_join", ent2)
 
-    def test_roller_is_shade(self):
+    def test_all_supported_cover_types(self):
+        for cover_type in sorted(g.SUPPORTED_COVER_TYPES):
+            with self.subTest(cover_type=cover_type):
+                _, ent = g.build_cover(
+                    {"楼层": "1F", "房间": "书房", "名称": "窗帘",
+                     "类型": cover_type, "开": "800", "关": "801",
+                     "停止": "802", "位置": "490"}
+                )
+                self.assertEqual(ent["type"], cover_type)
+
+    def test_cover_type_is_trimmed_and_case_insensitive(self):
         _, ent = g.build_cover(
-            {"楼层": "1F", "房间": "书房", "名称": "卷1",
-             "开": "800", "关": "801", "停止": "802", "位置": "490"}
+            {"楼层": "1F", "房间": "书房", "名称": "窗帘",
+             "类型": " Shade ", "开": "800", "关": "801", "停止": "802"}
         )
         self.assertEqual(ent["type"], "shade")
-        self.assertEqual(ent["pos_join"], 490)
+
+    def test_blank_or_unknown_cover_type_defaults_to_curtain(self):
+        for cover_type in ("", None, "unsupported"):
+            with self.subTest(cover_type=cover_type):
+                _, ent = g.build_cover(
+                    {"楼层": "1F", "房间": "书房", "名称": "卷1",
+                     "类型": cover_type, "开": "800", "关": "801",
+                     "停止": "802"}
+                )
+                # The name no longer guesses the type: even 卷1 defaults to
+                # curtain when 类型 is blank or unsupported.
+                self.assertEqual(ent["type"], "curtain")
 
     def test_missing_join_skipped(self):
         # Position present but a required drive join missing -> still skipped.
@@ -192,12 +235,57 @@ class AcTests(unittest.TestCase):
 
 class DedupTests(unittest.TestCase):
     def test_duplicate_names_suffixed(self):
-        ents = [{"name": "B2.车库 柜灯"}, {"name": "B2.车库 柜灯"},
-                {"name": "B2.车库 柜灯"}, {"name": "B2.车库 吊灯"}]
+        ents = [
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 吊灯", "device_name": "B2.车库 吊灯"},
+        ]
         g.dedup_names(ents)
         self.assertEqual([e["name"] for e in ents],
                          ["B2.车库 柜灯", "B2.车库 柜灯 2",
                           "B2.车库 柜灯 3", "B2.车库 吊灯"])
+        self.assertEqual(
+            [e["device_name"] for e in ents],
+            [
+                "B2.车库 柜灯",
+                "B2.车库 柜灯 2",
+                "B2.车库 柜灯 3",
+                "B2.车库 吊灯",
+            ],
+        )
+
+
+class ValidationTests(unittest.TestCase):
+    def test_invalid_join_format_and_range_reported(self):
+        row = light_row(名称="错误灯", 亮度="a20")
+        self.assertIn("亮度: 必须只填写十进制数字", g._row_errors("灯光", row))
+        row["亮度"] = "1025"
+        self.assertIn("亮度: 必须在 1–1024 范围内", g._row_errors("灯光", row))
+
+    def test_mixed_light_controls_have_specific_error(self):
+        errors = g._row_errors(
+            "灯光",
+            light_row(名称="歧义灯", 亮度="20", 开="10", 关="11"),
+        )
+        self.assertIn(
+            "模拟量控制（亮度/色温）不能与数字量控制（开/关）混填",
+            errors,
+        )
+
+    def test_required_cover_joins_reported(self):
+        errors = g._row_errors(
+            "窗帘",
+            {
+                "楼层": "2F",
+                "房间": "主卧",
+                "名称": "窗帘",
+                "开": "700",
+                "关": "",
+                "停止": "",
+            },
+        )
+        self.assertEqual(errors, ["缺少必填 Join: 关, 停止"])
 
 
 class EmitDomainTests(unittest.TestCase):
@@ -227,6 +315,65 @@ class EmitDomainTests(unittest.TestCase):
         # nested dict (mode_joins) renders as a block
         self.assertIn("\n    mode_joins:\n", out)
         self.assertIn('\n      "制冷": 507', out)
+
+
+class ScalarEscapingTests(unittest.TestCase):
+    """A raw newline in a double-quoted scalar folds or breaks the document.
+
+    Excel cells can contain alt-enter line breaks and stray control characters,
+    which used to be written straight through into the generated YAML.
+    """
+
+    def test_newline_and_tab_escaped(self):
+        self.assertEqual(g._yaml_scalar("a\nb"), '"a\\nb"')
+        self.assertEqual(g._yaml_scalar("a\tb"), '"a\\tb"')
+        self.assertEqual(g._yaml_scalar("a\rb"), '"a\\rb"')
+
+    def test_other_control_chars_escaped(self):
+        self.assertEqual(g._yaml_scalar("a\x00b"), '"a\\x00b"')
+        self.assertEqual(g._yaml_scalar("a\x7fb"), '"a\\x7fb"')
+
+    def test_quotes_and_backslashes_still_escaped(self):
+        self.assertEqual(g._yaml_scalar('a"b'), '"a\\"b"')
+        self.assertEqual(g._yaml_scalar("a\\b"), '"a\\\\b"')
+
+    def test_ordinary_values_unchanged(self):
+        self.assertEqual(g._yaml_scalar("curtain"), "curtain")
+        self.assertEqual(g._yaml_scalar("1F.客厅 灯带"), '"1F.客厅 灯带"')
+        self.assertEqual(g._yaml_scalar(42), "42")
+
+    def test_escaped_output_round_trips(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        raw = "客厅\n灯带\t2"
+        parsed = yaml.safe_load("name: " + g._yaml_scalar(raw))
+        self.assertEqual(parsed["name"], raw)
+
+
+class OutputPathTests(unittest.TestCase):
+    def test_output_directory_appends_default_filename(self):
+        self.assertEqual(
+            g._resolve_output_path("../custom_components/crestron"),
+            ("../custom_components/crestron",
+             "../custom_components/crestron/crestron.yaml"),
+        )
+
+    def test_explicit_yaml_path_is_used_verbatim(self):
+        self.assertEqual(
+            g._resolve_output_path(
+                "../custom_components/crestron/crestron.yaml"
+            ),
+            ("../custom_components/crestron",
+             "../custom_components/crestron/crestron.yaml"),
+        )
+
+    def test_filename_in_current_directory(self):
+        self.assertEqual(
+            g._resolve_output_path("crestron.yml"),
+            (".", "crestron.yml"),
+        )
 
 
 if __name__ == "__main__":

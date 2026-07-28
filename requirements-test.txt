@@ -1,0 +1,6 @@
+# Dependencies for the standalone unittest and type-check jobs.
+#
+# The entity tests provide lightweight Home Assistant stubs, but the platform
+# modules still import voluptuous for their schemas.
+voluptuous
+mypy

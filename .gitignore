@@ -1,0 +1,8 @@
+# Local project data and generated runtime configuration.
+# Keep real join tables/crestron.yaml out of the repository.
+/local/
+
+# Python build artifacts.
+__pycache__/
+*.py[cod]
+.mypy_cache/

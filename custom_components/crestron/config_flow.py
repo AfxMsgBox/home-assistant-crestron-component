@@ -49,10 +49,15 @@ class CrestronOptionsFlow(config_entries.OptionsFlow):
     """
 
     async def async_step_init(self, user_input=None):
-        if user_input is not None and user_input.get("resync_to_joins"):
-            hub = self.hass.data.get(DOMAIN, {}).get(HUB_WRAPPER)
-            if hub is not None:
-                hub.resync_to_joins()
+        if user_input is not None:
+            # Submitting closes the dialog either way — testing the tick box in
+            # the same condition as "was the form submitted" used to re-show the
+            # form forever, leaving no way to back out without triggering the
+            # resync.
+            if user_input.get("resync_to_joins"):
+                hub = self.hass.data.get(DOMAIN, {}).get(HUB_WRAPPER)
+                if hub is not None:
+                    hub.resync_to_joins()
             return self.async_create_entry(title="", data={})
         return self.async_show_form(
             step_id="init",

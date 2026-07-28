@@ -16,5 +16,11 @@
         }
       }
     }
+  },
+  "services": {
+    "reload": {
+      "name": "Reload",
+      "description": "Re-read the `crestron:` block from configuration.yaml and reload the integration. Use this after editing or regenerating crestron.yaml instead of restarting Home Assistant."
+    }
   }
 }

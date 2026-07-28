@@ -1,6 +1,7 @@
 """Tests for pulse-mode switch feedback on on/off command joins."""
 
 import asyncio
+import enum
 import os
 import sys
 import types
@@ -30,6 +31,11 @@ class RestoreEntity:
         return None
 
 
+class SwitchDeviceClass(str, enum.Enum):
+    OUTLET = "outlet"
+    SWITCH = "switch"
+
+
 def _install_stubs():
     ha = _module("homeassistant")
     helpers = _module("homeassistant.helpers")
@@ -37,7 +43,11 @@ def _install_stubs():
     _module("homeassistant.helpers.restore_state", RestoreEntity=RestoreEntity)
     _module("homeassistant.helpers.entity", DeviceInfo=dict)
     components = _module("homeassistant.components")
-    switch = _module("homeassistant.components.switch", SwitchEntity=SwitchEntity)
+    switch = _module(
+        "homeassistant.components.switch",
+        SwitchDeviceClass=SwitchDeviceClass,
+        SwitchEntity=SwitchEntity,
+    )
     _module(
         "homeassistant.const",
         CONF_NAME="name",
@@ -83,7 +93,7 @@ def make_switch(hub):
 class SwitchFeedbackTests(unittest.TestCase):
     def setUp(self):
         try:
-            self.previous_loop = asyncio.get_event_loop()
+            self.previous_loop = asyncio.get_running_loop()
         except RuntimeError:
             self.previous_loop = None
         self.loop = asyncio.new_event_loop()
@@ -97,7 +107,7 @@ class SwitchFeedbackTests(unittest.TestCase):
         if self.previous_loop is not None:
             asyncio.set_event_loop(self.previous_loop)
         else:
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            asyncio.set_event_loop(None)
 
     def run_async(self, coro):
         return self.loop.run_until_complete(coro)
@@ -141,6 +151,19 @@ class SwitchFeedbackTests(unittest.TestCase):
         self.assertTrue(self.switch.is_on)
         self.assertIn((147, True), self.hub.sent_digital)
         self.assertIn((147, False), self.hub.sent_digital)
+
+    def test_unique_id_does_not_include_name(self):
+        renamed = switch_mod.CrestronSwitch(
+            self.hub,
+            {
+                "name": "Renamed outlet",
+                "on_join": 147,
+                "off_join": 148,
+                "device_class": "outlet",
+            },
+        )
+        self.assertEqual(self.switch._attr_unique_id, "crestron_switch_d147")
+        self.assertEqual(renamed._attr_unique_id, self.switch._attr_unique_id)
 
 
 if __name__ == "__main__":

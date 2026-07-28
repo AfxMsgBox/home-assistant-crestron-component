@@ -13,6 +13,7 @@ These cover the wiring that moved out of CrestronHub:
 """
 
 import asyncio
+import contextlib
 import logging
 import sys
 import types
@@ -122,7 +123,13 @@ class FakeHub:
     def set_serial(self, n, v):
         self.serial[n] = v
 
-    def register_callback(self, cb, joins=None):
+    def batched_writes(self):
+        # The real hub coalesces every set_* in the block into one socket
+        # write; for the fake the frames land in the same dicts either way,
+        # so a null context manager is enough.
+        return contextlib.nullcontext()
+
+    def register_callback(self, cb, joins):
         self.callbacks.append((cb, joins))
 
     def remove_callback(self, cb):
@@ -205,17 +212,57 @@ class FromJoinBridgeTests(unittest.TestCase):
         async def run():
             await self.bridge._join_change(cbtype, value)
             # Drain the background script task scheduled via async_create_task.
-            if self.hass.tasks:
-                await asyncio.gather(*self.hass.tasks)
+            # Each _fire gets its own loop, so the list must be emptied here or
+            # the next call would await futures belonging to a closed loop.
+            tasks, self.hass.tasks = self.hass.tasks, []
+            if tasks:
+                await asyncio.gather(*tasks)
 
         asyncio.run(run())
 
     def test_rising_edge_runs_script(self):
+        self._fire("d5", "0")  # establish the low baseline
         self._fire("d5", "1")
         self.assertEqual(self.script.runs, [{"value": "1"}])
 
     def test_falling_edge_skipped(self):
         self._fire("d5", "0")
+        self.assertEqual(self.script.runs, [])
+
+    def test_first_report_high_does_not_run_script(self):
+        """The 0xFD full sync reports every join's current level.
+
+        Treating that as a press would replay scenes on every HA restart or
+        control-system reconnect.
+        """
+        self._fire("d5", "1")
+        self.assertEqual(self.script.runs, [])
+
+    def test_repeated_high_runs_once(self):
+        self._fire("d5", "0")
+        self._fire("d5", "1")
+        self._fire("d5", "1")
+        self.assertEqual(self.script.runs, [{"value": "1"}])
+
+    def test_press_release_press_runs_twice(self):
+        self._fire("d5", "0")
+        for _ in range(2):
+            self._fire("d5", "1")
+            self._fire("d5", "0")
+        self.assertEqual(self.script.runs, [{"value": "1"}, {"value": "1"}])
+
+    def test_reconnect_resync_does_not_replay(self):
+        """A held-high join re-reported after a reconnect is not a new press."""
+        self._fire("d5", "0")
+        self._fire("d5", "1")
+        self.script.runs.clear()
+        self._fire("d5", "1")  # control system re-reports on reconnect
+        self.assertEqual(self.script.runs, [])
+
+    def test_stop_clears_edge_history(self):
+        self._fire("d5", "0")
+        self.bridge.stop()
+        self._fire("d5", "1")  # first observation after reload: not an edge
         self.assertEqual(self.script.runs, [])
 
     def test_unconfigured_join_ignored(self):

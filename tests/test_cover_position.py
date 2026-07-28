@@ -27,8 +27,16 @@ def _module(name, **attrs):
 
 
 class CoverDeviceClass(str, enum.Enum):
+    AWNING = "awning"
+    BLIND = "blind"
     CURTAIN = "curtain"
+    DAMPER = "damper"
+    DOOR = "door"
+    GARAGE = "garage"
+    GATE = "gate"
     SHADE = "shade"
+    SHUTTER = "shutter"
+    WINDOW = "window"
 
 
 class CoverEntityFeature(enum.IntFlag):
@@ -133,6 +141,7 @@ if _faked_vol:
 class FakeHub:
     def __init__(self):
         self.analog = {}
+        self.digital = {}
         self.sent_analog = []  # (join, value) analog writes to the wire
         self.sent_digital = []  # (join, value) digital writes to the wire
 
@@ -143,7 +152,7 @@ class FakeHub:
         return join in self.analog
 
     def get_digital(self, join, default=False):
-        return False
+        return self.digital.get(join, default)
 
     def set_analog(self, join, value):
         self.sent_analog.append((join, value))
@@ -184,6 +193,86 @@ def make_optimistic_cover(hub, last_state=None):
     if last_state is not None:
         ent._last_state = last_state
     return ent
+
+
+class CoverTypeTests(unittest.TestCase):
+    def _cover(self, cover_type=None):
+        config = {
+            "name": "测试",
+            "pos_join": 480,
+            "stop_join": 702,
+        }
+        if cover_type is not None:
+            config["type"] = cover_type
+        return cover_mod.CrestronShade(FakeHub(), config)
+
+    def test_all_supported_types_map_to_matching_device_class(self):
+        for cover_type in (
+            "awning", "blind", "curtain", "damper", "door",
+            "garage", "gate", "shade", "shutter", "window",
+        ):
+            with self.subTest(cover_type=cover_type):
+                self.assertEqual(
+                    self._cover(cover_type)._attr_device_class.value,
+                    cover_type,
+                )
+
+    def test_type_is_trimmed_and_case_insensitive(self):
+        self.assertEqual(
+            self._cover(" Shade ")._attr_device_class,
+            CoverDeviceClass.SHADE,
+        )
+
+    def test_missing_blank_or_unknown_type_defaults_to_curtain(self):
+        self.assertEqual(
+            self._cover()._attr_device_class,
+            CoverDeviceClass.CURTAIN,
+        )
+        for cover_type in ("", "unsupported"):
+            with self.subTest(cover_type=cover_type):
+                self.assertEqual(
+                    self._cover(cover_type)._attr_device_class,
+                    CoverDeviceClass.CURTAIN,
+                )
+
+
+class UniqueIdTests(unittest.TestCase):
+    """pos_join is analog, open/close_join are digital — separate join spaces.
+
+    Deriving the id from "first one configured" without recording which space
+    it came from lets two covers collide, and HA drops the one registered
+    second.
+    """
+
+    def _cover(self, **joins):
+        return cover_mod.CrestronShade(
+            FakeHub(), {"name": "x", "type": "curtain", "stop_join": 702, **joins}
+        )
+
+    def test_pos_only_fallback_keeps_bare_number(self):
+        self.assertEqual(
+            self._cover(pos_join=480)._attr_unique_id, "crestron_cover_480"
+        )
+
+    def test_digital_fallback_is_namespaced(self):
+        self.assertEqual(
+            self._cover(open_join=704, close_join=705)._attr_unique_id,
+            "crestron_cover_d704",
+        )
+
+    def test_analog_and_digital_same_number_do_not_collide(self):
+        self.assertNotEqual(
+            self._cover(pos_join=480)._attr_unique_id,
+            self._cover(open_join=480, close_join=481)._attr_unique_id,
+        )
+
+    def test_optional_position_join_does_not_change_id(self):
+        without = self._cover(open_join=704, close_join=705)._attr_unique_id
+        with_position = self._cover(
+            open_join=704, close_join=705, pos_join=480
+        )._attr_unique_id
+        self.assertEqual(without, "crestron_cover_d704")
+        self.assertEqual(with_position, without)
 
 
 class CoverPositionTests(unittest.IsolatedAsyncioTestCase):
@@ -237,13 +326,35 @@ class CoverOptimisticFallbackTests(unittest.IsolatedAsyncioTestCase):
     def test_unknown_before_any_command(self):
         self.assertIsNone(self.cover.current_cover_position)
 
-    def test_no_slider_without_feedback(self):
+    def test_slider_is_stable_before_feedback(self):
         from homeassistant.components.cover import CoverEntityFeature
-        self.assertFalse(
+        self.assertTrue(
             self.cover.supported_features & CoverEntityFeature.SET_POSITION
         )
         # assumed_state so the open/close buttons aren't gated on state.
         self.assertTrue(self.cover.assumed_state)
+
+    async def test_set_position_is_optimistic_before_feedback(self):
+        await self.cover.async_set_cover_position(position=37)
+        self.assertEqual(self.cover.current_cover_position, 37)
+        self.assertEqual(self.hub.sent_analog, [(481, 37)])
+
+    async def test_open_close_feedback_reconciles_state(self):
+        await self.cover.async_added_to_hass()
+        self.assertIn("d704", self.hub.registered_joins)
+        self.assertIn("d705", self.hub.registered_joins)
+
+        self.hub.digital[704] = True
+        self.hub.digital[705] = False
+        await self.cover.process_callback("d704", "1")
+        self.assertEqual(self.cover.current_cover_position, 100)
+        self.assertFalse(self.cover.is_closed)
+
+        self.hub.digital[704] = False
+        self.hub.digital[705] = True
+        await self.cover.process_callback("d705", "1")
+        self.assertEqual(self.cover.current_cover_position, 0)
+        self.assertTrue(self.cover.is_closed)
 
     async def test_open_infers_full_open(self):
         await self.cover.async_open_cover()

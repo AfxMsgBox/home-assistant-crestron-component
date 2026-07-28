@@ -2,12 +2,16 @@
 """Generate the Crestron `crestron:` domain YAML from a multi-sheet xlsx table.
 
 Usage:
-    python3 tools/xlsx_to_yaml.py <input.xlsx> <output_dir>
+    python3 tools/xlsx_to_yaml.py <input.xlsx> <output_dir_or_yaml_file>
+    python3 tools/xlsx_to_yaml.py --check <input.xlsx>
 
 Writes a single `crestron.yaml` holding the port plus all entities grouped by
 platform key (light:/switch:/number:/select:/sensor:/cover:). The integration
 imports this into a config entry, which lets Home Assistant group an AC's
 several entities into one device (device_id/device_name).
+
+The second argument may be either a directory (the file will be named
+`crestron.yaml`) or an explicit `.yaml`/`.yml` output path.
 
 Include it in configuration.yaml with:
     crestron: !include crestron.yaml
@@ -17,10 +21,15 @@ Pure standard library — no openpyxl/pandas/PyYAML required.
 
 import sys
 import os
+import argparse
 import zipfile
 import xml.etree.ElementTree as ET
 
 _A = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+class WorkbookValidationError(ValueError):
+    """Raised when validation errors make partial YAML unsafe to write."""
 
 
 # --------------------------------------------------------------------------- #
@@ -88,9 +97,13 @@ def _read_sheet(z, path, shared):
         return []
     header = grid[0]
     rows = []
-    for raw in grid[1:]:
-        rows.append({header[i]: (raw[i] if i < len(raw) else "")
-                     for i in range(len(header))})
+    for excel_row, raw in enumerate(grid[1:], start=2):
+        parsed = {
+            header[i]: (raw[i] if i < len(raw) else "")
+            for i in range(len(header))
+        }
+        parsed["_xlsx_row"] = excel_row
+        rows.append(parsed)
     return rows
 
 
@@ -116,46 +129,85 @@ def _group(row):
     return ".".join(p for p in (floor, room) if p)
 
 
+def _add_device_metadata(entity, row, device_id, device_name):
+    """Attach stable device identity and a non-authoritative HA area hint."""
+    entity["device_id"] = device_id
+    entity["device_name"] = device_name
+    group = _group(row)
+    if group:
+        entity["suggested_area"] = group
+    entity["_group"] = group
+
+
+# Home Assistant CoverDeviceClass values supported by cover.py. Keep this list
+# in sync with _COVER_DEVICE_CLASSES there; the generator deliberately falls
+# back to curtain instead of emitting a value the runtime cannot represent.
+SUPPORTED_COVER_TYPES = frozenset({
+    "awning",
+    "blind",
+    "curtain",
+    "damper",
+    "door",
+    "garage",
+    "gate",
+    "shade",
+    "shutter",
+    "window",
+})
+
+
+def _cover_type(value):
+    """Normalize an xlsx 类型 cell; blank/unknown values become curtain."""
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in SUPPORTED_COVER_TYPES else "curtain"
+
+
 # --------------------------------------------------------------------------- #
 # row -> (platform, entity) builders  (pure, unit-tested)
 # --------------------------------------------------------------------------- #
 def build_light(row):
     """灯光 sheet row -> ('light', entity) or None.
 
-    灯光 sheet 永远只产出 light（绝不产出 switch）。能力由「哪一列带 join」决定，
-    而非「功能」标签：有亮度 join -> 调光灯（色温可选）；只有开/关 -> 只开关的灯
-    （relay 式、无亮度，ColorMode.ONOFF——只开关的灯仍是灯）；都没有 -> 跳过
-    （如 '//' 占位）。
+    灯光 sheet 永远只产出 light（绝不产出 switch）。类型严格由 join 能力决定，
+    而非「功能」标签：
+      - 亮度 + 色温 -> color_temp（双色温）
+      - 仅亮度      -> brightness（单色温）
+      - 仅开 + 关   -> onoff（只开关）
+
+    混合模拟量与数字量控制、只有色温、开/关不成对或没有任何能力的行都跳过。
     """
     bri = _to_int(row.get("亮度"))
     cct = _to_int(row.get("色温"))
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
+    has_analog_control = bri is not None or cct is not None
+    has_digital_control = on is not None or off is not None
+
+    if has_analog_control and has_digital_control:
+        return None
+
     if bri is not None:
         name = _name(row, "名称")
         ent = {
             "platform": "crestron",
             "name": name,
-            "type": "brightness",
+            "type": "color_temp" if cct is not None else "brightness",
             "brightness_join": bri,
         }
         if cct is not None:
             ent["color_temp_join"] = cct
-        ent["device_id"] = f"light_{bri}"
-        ent["device_name"] = name
-        ent["_group"] = _group(row)
+        _add_device_metadata(ent, row, f"light_{bri}", name)
         return "light", ent
-    if on is not None and off is not None:
+    if cct is None and on is not None and off is not None:
         name = _name(row, "名称")
         ent = {
             "platform": "crestron",
             "name": name,
+            "type": "onoff",
             "on_join": on,
             "off_join": off,
-            "device_id": f"light_onoff_{on}",
-            "device_name": name,
-            "_group": _group(row),
         }
+        _add_device_metadata(ent, row, f"light_onoff_{on}", name)
         return "light", ent
     return None
 
@@ -178,10 +230,8 @@ def build_outlet(row):
         "on_join": on,
         "off_join": off,
         "device_class": "outlet",
-        "device_id": f"outlet_{on}",
-        "device_name": name,
-        "_group": _group(row),
     }
+    _add_device_metadata(ent, row, f"outlet_{on}", name)
     return "switch", ent
 
 
@@ -192,6 +242,9 @@ def build_cover(row):
     0=全关/100=全开）：有则作为 pos_join 输出，让 HA 显示真实百分比；无则
     cover.py 退回假定状态（开/关/停按钮常驻可按，不受反馈影响——符合说明页
     「开和关的控制不能因为反馈状态影响」）。
+
+    「类型」使用 Home Assistant CoverDeviceClass 的英文值；合法值原样输出
+    （忽略大小写和首尾空格），空白或未知值一律按 curtain 处理。
     """
     op = _to_int(row.get("开"))
     cl = _to_int(row.get("关"))
@@ -199,8 +252,7 @@ def build_cover(row):
     if op is None or cl is None or stop is None:
         return None
     pos = _to_int(row.get("位置"))
-    label = row.get("名称", "").strip()
-    cover_type = "shade" if label.startswith("卷") else "curtain"
+    cover_type = _cover_type(row.get("类型"))
     name = _name(row, "名称")
     ent = {
         "platform": "crestron",
@@ -212,9 +264,7 @@ def build_cover(row):
     }
     if pos is not None:
         ent["pos_join"] = pos
-    ent["device_id"] = f"cover_{op}"
-    ent["device_name"] = name
-    ent["_group"] = _group(row)
+    _add_device_metadata(ent, row, f"cover_{op}", name)
     return "cover", ent
 
 
@@ -239,7 +289,7 @@ _AC_FAN_JOIN_KEYS = {
     "高速": "fan_high_join",
     "自动": "fan_auto_join",
 }
-# 空调模式列 -> climate mode_*_join 字段名(只读，仅用于显示运行模式)
+# 空调模式列 -> climate mode_*_join 字段名（控制与反馈共用）
 _AC_MODE_JOIN_KEYS = {
     "制冷": "mode_cool_join",
     "制热": "mode_heat_join",
@@ -281,9 +331,7 @@ def build_ac(row):
         ent[_AC_MODE_JOIN_KEYS[label]] = join
     for label, join in fans.items():
         ent[_AC_FAN_JOIN_KEYS[label]] = join
-    ent["device_id"] = f"ac_{on}"
-    ent["device_name"] = base
-    ent["_group"] = _group(row)
+    _add_device_metadata(ent, row, f"ac_{on}", base)
     return "climate", ent
 
 
@@ -306,8 +354,192 @@ def dedup_names(entities):
         base = ent["name"]
         seen[base] = seen.get(base, 0) + 1
         if seen[base] > 1:
-            ent["name"] = f"{base} {seen[base]}"
+            renamed = f"{base} {seen[base]}"
+            ent["name"] = renamed
+            # A one-entity device should receive the same suffix; otherwise HA
+            # still shows several devices with an identical device name.
+            if ent.get("device_name") == base:
+                ent["device_name"] = renamed
     return entities
+
+
+# --------------------------------------------------------------------------- #
+# workbook validation / diagnostics
+# --------------------------------------------------------------------------- #
+_INSTRUCTION_SHEETS = frozenset({"说明"})
+_DIGITAL_COLUMNS = {
+    "灯光": ("开", "关"),
+    "插座": ("开", "关"),
+    "窗帘": ("开", "关", "停止"),
+    "空调": (
+        "开", "关", "制冷", "制热", "通风", "除湿",
+        "低速", "中速", "高速", "自动",
+    ),
+}
+_ANALOG_COLUMNS = {
+    "灯光": ("亮度", "色温"),
+    "插座": (),
+    "窗帘": ("位置",),
+    "空调": ("温度", "室温"),
+}
+
+
+def _join_cell_error(value, maximum):
+    """Explain a non-empty invalid join cell; return None when valid/blank."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not text.isdigit():
+        return "必须只填写十进制数字"
+    number = int(text)
+    if not 1 <= number <= maximum:
+        return f"必须在 1–{maximum} 范围内"
+    return None
+
+
+def _row_errors(sheet_name, row):
+    errors = []
+    for column in _DIGITAL_COLUMNS[sheet_name]:
+        if error := _join_cell_error(row.get(column), 4096):
+            errors.append(f"{column}: {error}")
+    for column in _ANALOG_COLUMNS[sheet_name]:
+        if error := _join_cell_error(row.get(column), 1024):
+            errors.append(f"{column}: {error}")
+    if errors:
+        return errors
+
+    if sheet_name == "灯光":
+        brightness = _to_int(row.get("亮度"))
+        color_temp = _to_int(row.get("色温"))
+        on = _to_int(row.get("开"))
+        off = _to_int(row.get("关"))
+        if (brightness is not None or color_temp is not None) and (
+            on is not None or off is not None
+        ):
+            errors.append("模拟量控制（亮度/色温）不能与数字量控制（开/关）混填")
+        elif color_temp is not None and brightness is None:
+            errors.append("填写色温时必须同时填写亮度")
+        elif (on is None) != (off is None):
+            errors.append("开和关必须成对填写")
+        elif brightness is None and on is None:
+            errors.append("缺少亮度，或完整的开/关 Join")
+    elif sheet_name == "插座":
+        if _to_int(row.get("开")) is None or _to_int(row.get("关")) is None:
+            errors.append("开和关都是必填 Join")
+    elif sheet_name == "窗帘":
+        missing = [
+            column
+            for column in ("开", "关", "停止")
+            if _to_int(row.get(column)) is None
+        ]
+        if missing:
+            errors.append(f"缺少必填 Join: {', '.join(missing)}")
+    elif sheet_name == "空调":
+        if _to_int(row.get("开")) is None or _to_int(row.get("关")) is None:
+            errors.append("开和关都是必填 Join")
+    return errors
+
+
+def _is_placeholder_row(sheet_name, row):
+    """Return True for genuinely empty/template rows that need no warning."""
+    relevant = set(_DIGITAL_COLUMNS[sheet_name]) | set(_ANALOG_COLUMNS[sheet_name])
+    relevant |= {"楼层", "房间", "名称"}
+    values = [str(row.get(column) or "").strip() for column in relevant]
+    if not any(values):
+        return True
+    return str(row.get("功能") or "").strip() == "//" and not any(
+        str(row.get(column) or "").strip()
+        for column in set(_DIGITAL_COLUMNS[sheet_name])
+        | set(_ANALOG_COLUMNS[sheet_name])
+    )
+
+
+def _entity_joins(entity):
+    """Yield (signal space, join, field) for duplicate-join warnings."""
+    analog_fields = {
+        "brightness_join",
+        "color_temp_join",
+        "pos_join",
+        "set_temp_join",
+        "reg_temp_join",
+    }
+    for field, value in entity.items():
+        if not field.endswith("_join") or not isinstance(value, int):
+            continue
+        yield ("analog" if field in analog_fields else "digital", value, field)
+
+
+def _build_from_workbook(xlsx_path):
+    """Parse and validate a workbook, returning entities and issue counts."""
+    sheets = parse_xlsx(xlsx_path)
+    by_platform = {}
+    errors = 0
+    warnings = 0
+    seen_joins = {}
+
+    for sheet_name, rows in sheets.items():
+        if sheet_name in _INSTRUCTION_SHEETS:
+            print(f"  [info] ignored instruction sheet {sheet_name!r}")
+            continue
+        builder = SHEET_BUILDERS.get(sheet_name)
+        if builder is None:
+            warnings += 1
+            print(f"  [warning] ignored unknown sheet {sheet_name!r}")
+            continue
+
+        placeholders = 0
+        for row in rows:
+            row_number = row.get("_xlsx_row", "?")
+            if _is_placeholder_row(sheet_name, row):
+                placeholders += 1
+                continue
+            row_errors = _row_errors(sheet_name, row)
+            if row_errors:
+                errors += 1
+                print(
+                    f"  [error] {sheet_name}!{row_number}: "
+                    + "; ".join(row_errors)
+                )
+                continue
+
+            if sheet_name == "窗帘":
+                raw_type = str(row.get("类型") or "").strip()
+                if raw_type and raw_type.lower() not in SUPPORTED_COVER_TYPES:
+                    warnings += 1
+                    print(
+                        f"  [warning] {sheet_name}!{row_number}: unknown type "
+                        f"{raw_type!r}; using curtain"
+                    )
+
+            result = builder(row)
+            if not result:
+                errors += 1
+                print(
+                    f"  [error] {sheet_name}!{row_number}: row could not be converted"
+                )
+                continue
+            if isinstance(result, tuple):
+                result = [result]
+            for platform, entity in result:
+                by_platform.setdefault(platform, []).append(entity)
+                for space, join, field in _entity_joins(entity):
+                    key = (space, join)
+                    owner = seen_joins.get(key)
+                    current = f"{sheet_name}!{row_number} {entity['name']} ({field})"
+                    if owner is not None:
+                        warnings += 1
+                        print(
+                            f"  [warning] duplicate {space} join {join}: "
+                            f"{owner}; {current}"
+                        )
+                    else:
+                        seen_joins[key] = current
+        if placeholders:
+            print(f"  [{sheet_name}] ignored {placeholders} empty/template row(s)")
+
+    for entities in by_platform.values():
+        dedup_names(entities)
+    return by_platform, errors, warnings
 
 
 # --------------------------------------------------------------------------- #
@@ -316,6 +548,17 @@ def dedup_names(entities):
 # Stable, readable order for the platform sections under `crestron:`.
 _PLATFORM_ORDER = ["light", "switch", "cover", "number", "select",
                    "sensor", "binary_sensor", "media_player", "climate"]
+
+
+# Control characters that have a YAML double-quoted escape. Anything else in
+# the C0 range is emitted as \xNN.
+_YAML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
 
 
 def _yaml_scalar(value):
@@ -328,7 +571,18 @@ def _yaml_scalar(value):
     # anything else (names with spaces, dots, Chinese, etc.).
     if s and all(c.isalnum() or c == "_" for c in s) and s.isascii():
         return s
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    # A raw newline inside a double-quoted scalar folds into a space (or breaks
+    # the document); an Excel cell with alt-enter in it produced exactly that.
+    out = []
+    for ch in s:
+        escape = _YAML_ESCAPES.get(ch)
+        if escape is not None:
+            out.append(escape)
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def _emit_entity(ent, indent, skip=("_group",)):
@@ -386,55 +640,57 @@ def emit_domain(by_platform, source):
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
-def generate(xlsx_path, out_dir):
-    sheets = parse_xlsx(xlsx_path)
+def _resolve_output_path(output):
+    """Return (parent_directory, yaml_path) for either supported CLI form."""
+    if output.lower().endswith((".yaml", ".yml")):
+        return os.path.dirname(output) or ".", output
+    return output, os.path.join(output, "crestron.yaml")
+
+
+def generate(xlsx_path, output):
+    by_platform, errors, warnings = _build_from_workbook(xlsx_path)
     source = os.path.basename(xlsx_path)
-    by_platform = {}  # platform -> [entities]  (in sheet order)
+    if errors:
+        raise WorkbookValidationError(
+            f"refusing to write partial YAML: {errors} workbook error(s)"
+        )
 
-    for sheet_name, rows in sheets.items():
-        builder = SHEET_BUILDERS.get(sheet_name)
-        if builder is None:
-            print(f"  [skip] unknown sheet {sheet_name!r}")
-            continue
-        skipped = 0
-        for row in rows:
-            result = builder(row)
-            if not result:
-                skipped += 1
-                continue
-            if isinstance(result, tuple):
-                result = [result]  # single-entity builders
-            for platform, ent in result:
-                by_platform.setdefault(platform, []).append(ent)
-        if skipped:
-            print(f"  [{sheet_name}] skipped {skipped} placeholder/empty row(s)")
-
-    for entities in by_platform.values():
-        dedup_names(entities)
-
+    out_dir, path = _resolve_output_path(output)
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "crestron.yaml")
     with open(path, "w", encoding="utf-8") as f:
         f.write(emit_domain(by_platform, source))
     counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
-    print(f"  wrote {path}  ({counts})")
+    print(
+        f"  wrote {path}  ({counts}; errors:{errors}, warnings:{warnings})"
+    )
     _print_usage(path)
     return by_platform
 
 
+def check(xlsx_path):
+    """Validate without writing YAML; return a process exit status."""
+    by_platform, errors, warnings = _build_from_workbook(xlsx_path)
+    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
+    print(
+        f"  check complete ({counts}; errors:{errors}, warnings:{warnings})"
+    )
+    return 1 if errors else 0
+
+
 def _print_usage(path):
     """Tell the user exactly what to do with the file we just wrote."""
+    filename = os.path.basename(path)
     print(
         "\n"
         "下一步（如何使用这个配置文件）：\n"
-        f"  1. 把生成的 {os.path.basename(path)} 复制到 Home Assistant 配置目录\n"
+        f"  1. 把生成的 {filename} 复制到 Home Assistant 配置目录\n"
         "     （与 configuration.yaml 同一个文件夹）。\n"
         "  2. 在 configuration.yaml 里加一行（include 这个文件）：\n"
-        "         crestron: !include crestron.yaml\n"
+        f"         crestron: !include {filename}\n"
         "     注意：整个 configuration.yaml 只能有一个 `crestron:` 键。端口写在\n"
-        "     crestron.yaml 顶部的 `port:`，不要在 configuration.yaml 里再写一个\n"
+        f"     {filename} 顶部的 `port:`，不要在 configuration.yaml 里再写一个\n"
         "     `crestron:`（会冲突）。\n"
-        f"  3. 打开 {os.path.basename(path)}，把顶部的 `port:` 改成你的快思聪 XSIG 端口。\n"
+        f"  3. 打开 {filename}，把顶部的 `port:` 改成你的快思聪 XSIG 端口。\n"
         "  4. 重启 Home Assistant。\n"
         "  5. 若实体类型变过（如旧的开关灯变成灯、空调合并成一个 climate），重启后到\n"
         "     设置 → 设备与服务 → 实体，筛选「不可用」，把旧实体批量删除即可。\n"
@@ -442,10 +698,30 @@ def _print_usage(path):
 
 
 def main(argv):
-    if len(argv) != 3:
-        print(__doc__)
-        return 2
-    generate(argv[1], argv[2])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate the xlsx and print diagnostics without writing YAML",
+    )
+    parser.add_argument("xlsx", help="input .xlsx workbook")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        help="output directory or .yaml file (not used with --check)",
+    )
+    args = parser.parse_args(argv[1:])
+    if args.check:
+        if args.output is not None:
+            parser.error("output must be omitted with --check")
+        return check(args.xlsx)
+    if args.output is None:
+        parser.error("output is required unless --check is used")
+    try:
+        generate(args.xlsx, args.output)
+    except WorkbookValidationError as error:
+        print(f"  [aborted] {error}")
+        return 1
     return 0
 
 

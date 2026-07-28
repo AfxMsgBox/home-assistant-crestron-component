@@ -18,13 +18,19 @@ from .schema import digital_join
 from .device import device_info
 from .entity import CrestronEntity, setup_platform_entities
 from .join_commands import set_one_clear_others
+from .unique_ids import select_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORM_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): cv.string,
-        vol.Required(CONF_OPTIONS): {cv.string: digital_join},
+        # Non-empty: a select with no options has nothing to select and no join
+        # to derive a stable unique_id from.
+        vol.Required(CONF_OPTIONS): vol.All(
+            {cv.string: digital_join},
+            vol.Length(min=1, msg="options must not be empty"),
+        ),
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -42,8 +48,7 @@ class CrestronSelect(CrestronEntity, SelectEntity, RestoreEntity):
         self._attr_name = config.get(CONF_NAME)
         self._joins = dict(config.get(CONF_OPTIONS))  # label -> digital join
         self._attr_options = list(self._joins.keys())
-        first_join = next(iter(self._joins.values()))
-        self._attr_unique_id = f"crestron_select_{first_join}"
+        self._attr_unique_id = select_unique_id(config)
         self._attr_device_info = device_info(config)
         self._current = None  # optimistic/cached option
 
@@ -76,7 +81,7 @@ class CrestronSelect(CrestronEntity, SelectEntity, RestoreEntity):
         fb = self._feedback_option()
         if fb is not None:
             self._current = fb
-        self.async_write_ha_state()
+        self._schedule_write()
 
     @property
     def current_option(self):

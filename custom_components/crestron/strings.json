@@ -16,5 +16,11 @@
         }
       }
     }
+  },
+  "services": {
+    "reload": {
+      "name": "重新加载",
+      "description": "重新读取 configuration.yaml 里的 `crestron:` 段并重载集成。改完（或重新生成）crestron.yaml 后用它代替重启 Home Assistant。"
+    }
   }
 }
