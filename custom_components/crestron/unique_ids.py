@@ -373,26 +373,31 @@ def unique_id_migrations(
             lowest = _lowest_join(joins)
             if lowest is None:
                 continue
-            first = next(
-                (
-                    j
-                    for j in joins.values()
-                    if isinstance(j, int) and not isinstance(j, bool)
-                ),
-                None,
+            # The old ID came from whichever join YAML listed first *at the
+            # time the entity was registered* — which we cannot read off the
+            # current file, because the user may well have reordered the
+            # options in the same edit that prompted the upgrade. So offer a
+            # migration from every join in the group; async_migrate_unique_ids
+            # only acts on one that actually exists in the registry, and stops
+            # as soon as the new ID is present.
+            candidates = sorted(
+                j
+                for j in joins.values()
+                if isinstance(j, int) and not isinstance(j, bool)
             )
-            if first is None or first == lowest:
-                continue
-            migrations.append(
-                UniqueIdMigration(
-                    platform,
-                    f"{prefix}{lowest}",
-                    f"{prefix}{first}",
-                    None,
-                    config.get(CONF_DEVICE_ID),
-                    str(config.get("name") or ""),
+            for candidate in candidates:
+                if candidate == lowest:
+                    continue
+                migrations.append(
+                    UniqueIdMigration(
+                        platform,
+                        f"{prefix}{lowest}",
+                        f"{prefix}{candidate}",
+                        None,
+                        config.get(CONF_DEVICE_ID),
+                        str(config.get("name") or ""),
+                    )
                 )
-            )
 
     return migrations
 

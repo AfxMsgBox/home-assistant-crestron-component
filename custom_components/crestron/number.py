@@ -1,7 +1,9 @@
 """Platform for Crestron Number (e.g. AC temperature setpoint) integration."""
 
-import voluptuous as vol
 import logging
+import math
+
+import voluptuous as vol
 
 from homeassistant.components.number import NumberEntity
 from homeassistant.const import (
@@ -20,8 +22,14 @@ from .unique_ids import number_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
+
 def _require_usable_range(config):
     """min < max and step > 0; otherwise the slider is unusable or divides by 0."""
+    # Every comparison against nan is False, so nan would sail through the
+    # ordering checks below and reach Home Assistant as a bound.
+    for key in (CONF_MIN, CONF_MAX, CONF_STEP):
+        if not math.isfinite(config[key]):
+            raise vol.Invalid(f"{key} must be a finite number; got {config[key]}")
     if config[CONF_MIN] >= config[CONF_MAX]:
         raise vol.Invalid(
             f"min ({config[CONF_MIN]}) must be less than max ({config[CONF_MAX]})"

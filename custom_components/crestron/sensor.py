@@ -6,8 +6,10 @@ Two variants:
     of whichever join is high, or "关闭" when none are.
 """
 
-import voluptuous as vol
 import logging
+import math
+
+import voluptuous as vol
 
 from homeassistant.components.sensor import SensorEntity, CONF_STATE_CLASS
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS, CONF_UNIT_OF_MEASUREMENT
@@ -22,6 +24,18 @@ from .unique_ids import sensor_unique_id
 _LOGGER = logging.getLogger(__name__)
 
 MODE_OFF = "关闭"
+
+
+def _finite(value):
+    if not math.isfinite(value):
+        raise vol.Invalid(f"must be a finite number; got {value}")
+    return value
+
+
+def _nonzero(value):
+    if value == 0:
+        raise vol.Invalid("divisor must not be zero")
+    return value
 
 
 def _require_one_source(config):
@@ -47,7 +61,11 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_DEVICE_CLASS): cv.string,
             vol.Optional(CONF_STATE_CLASS): cv.string,
             vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
-            vol.Optional(CONF_DIVISOR, default=1): vol.Coerce(float),
+            # Finite and non-zero: 0 was silently rewritten to 1 in the
+            # constructor, and nan/inf produce a nan/0 sensor value.
+            vol.Optional(CONF_DIVISOR, default=1): vol.All(
+                vol.Coerce(float), _finite, _nonzero
+            ),
         },
         extra=vol.ALLOW_EXTRA,
     ),

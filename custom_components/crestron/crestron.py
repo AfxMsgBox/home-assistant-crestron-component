@@ -209,6 +209,12 @@ class CrestronXsig:
         try:
             writer.write(b"\xfd")
             await writer.drain()
+            # Stamped here, not after the connect callback below: the metric is
+            # "how long until the control system answered our 0xFD", and the
+            # callback (a full to_joins render) can itself take a while. Taking
+            # the timestamp afterwards subtracted that from the measurement and
+            # could report 0.00s.
+            t_request = time.monotonic()
             await self._notify_available(True)
 
             # Push our side of the state out too. 0xFD only asks the control
@@ -225,7 +231,6 @@ class CrestronXsig:
             # Timing probe for the initial full-join-sync burst. It follows the
             # normal integration logger: enabled at info/debug, disabled at
             # warning+.
-            t_request = time.monotonic()
             stats = (
                 {
                     "frames": 0,

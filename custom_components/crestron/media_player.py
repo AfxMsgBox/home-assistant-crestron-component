@@ -24,10 +24,18 @@ from .unique_ids import media_player_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
+# Source 0 is this component's "off" value (async_turn_off writes 0), so a
+# source *numbered* 0 could be selected but never turned back on — and
+# cv.positive_int accepts 0. Require 1+.
+_source_number = vol.All(
+    vol.Coerce(int),
+    vol.Range(min=1, msg="source numbers start at 1; 0 means off"),
+)
+
 # Non-empty: with no sources there is nothing to select and turn_on has no
 # input number to restore.
 SOURCES_SCHEMA = vol.All(
-    vol.Schema({cv.positive_int: cv.string}),
+    vol.Schema({_source_number: cv.string}),
     vol.Length(min=1, msg="sources must not be empty"),
 )
 

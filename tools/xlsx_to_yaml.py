@@ -561,6 +561,28 @@ _YAML_ESCAPES = {
 }
 
 
+# YAML 1.1 reads these bare words as booleans or null, so a string that happens
+# to equal one has to be quoted or it changes type on load.
+_YAML_RESERVED = frozenset(
+    "y yes n no true false on off null none ~".split()
+)
+
+
+def _is_safe_bare(s):
+    """True when ``s`` survives a YAML round-trip unquoted, as a string.
+
+    Requiring a leading letter (or underscore) is what keeps numbers out:
+    ``123`` would load as an int and ``0x1F`` as 31, silently retyping a name.
+    """
+    if not s or not s.isascii():
+        return False
+    if not all(c.isalnum() or c == "_" for c in s):
+        return False
+    if not (s[0].isalpha() or s[0] == "_"):
+        return False
+    return s.lower() not in _YAML_RESERVED
+
+
 def _yaml_scalar(value):
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -568,8 +590,8 @@ def _yaml_scalar(value):
         return str(value)
     s = str(value)
     # Leave plain ASCII identifiers bare (brightness/curtain/...), double-quote
-    # anything else (names with spaces, dots, Chinese, etc.).
-    if s and all(c.isalnum() or c == "_" for c in s) and s.isascii():
+    # anything else (names with spaces, dots, Chinese, reserved words, digits).
+    if _is_safe_bare(s):
         return s
     # A raw newline inside a double-quoted scalar folds into a space (or breaks
     # the document); an Excel cell with alt-enter in it produced exactly that.
@@ -628,7 +650,9 @@ def emit_domain(by_platform, source):
         for ent in by_platform[platform]:
             group = ent.get("_group")
             if group and group != last_group:
-                lines.append(f"  # {group}")
+                # A newline in a 楼层/房间 cell would end the comment and let
+                # the rest of the text land in the document as YAML.
+                lines.append("  # " + " ".join(str(group).split()))
                 last_group = group
             # Drop the legacy `platform:` key — under the domain config the
             # platform is implied by the section key.
