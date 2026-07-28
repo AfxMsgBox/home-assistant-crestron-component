@@ -111,14 +111,18 @@ class ToJoinBridge:
     def sync_all(self):
         """Re-render and resend every join (control system's sync-all request)."""
         _LOGGER.debug("Syncing joins to control system")
-        for join, template in self._join_to_template.items():
-            # Isolate per-join failures: a single bad template (e.g. referencing
-            # an unknown entity attribute) must not abort the rest of the sync
-            # or bubble up and tear down the XSIG connection.
-            try:
-                self._set_join(join, template.async_render())
-            except Exception:
-                _LOGGER.exception("Failed to sync join %s to control system", join)
+        # One socket write for the whole sync instead of one per join.
+        with self.hub.batched_writes():
+            for join, template in self._join_to_template.items():
+                # Isolate per-join failures: a single bad template (e.g.
+                # referencing an unknown entity attribute) must not abort the
+                # rest of the sync or bubble up and tear down the connection.
+                try:
+                    self._set_join(join, template.async_render())
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to sync join %s to control system", join
+                    )
 
 
 class FromJoinBridge:
@@ -129,9 +133,19 @@ class FromJoinBridge:
         self.hub = hub
         self.context = Context()
         self._scripts = {}  # join key -> Script
+        # Last value seen per digital join, for real edge detection. Empty at
+        # start, which is what makes the initial full sync inert (see below).
+        self._last_digital = {}
         for entry in entries or []:
-            self._scripts[entry[CONF_JOIN]] = Script(
-                hass, entry[CONF_SCRIPT], f"Crestron {entry[CONF_JOIN]}", DOMAIN
+            join = entry[CONF_JOIN]
+            if join in self._scripts:
+                _LOGGER.warning(
+                    "Duplicate from_joins entry for %s — only the last script "
+                    "will run",
+                    join,
+                )
+            self._scripts[join] = Script(
+                hass, entry[CONF_SCRIPT], f"Crestron {join}", DOMAIN
             )
 
     def start(self):
@@ -143,14 +157,34 @@ class FromJoinBridge:
     def stop(self):
         if self._scripts:
             self.hub.remove_callback(self._join_change)
+        # Drop edge history: after a reload the joins have to be observed again
+        # before anything counts as a transition.
+        self._last_digital.clear()
+
+    def _is_rising_edge(self, cbtype, value):
+        """True only for a genuine 0 -> 1 transition on a digital join.
+
+        Testing ``value != "0"`` is not edge detection — it fires on *any*
+        report of a high join. The control system answers our 0xFD with the
+        current level of every join, so on every connect (HA restart, control
+        system reboot, a dropped TCP session) every button-style join that
+        happens to be latched high would run its script: scenes replayed, lights
+        commanded on, at the worst possible moment.
+
+        A join whose previous value we have never seen is therefore *not* an
+        edge. That deliberately makes the first report after a connect inert,
+        at the cost of missing a press that happens in the same instant the
+        connection comes up — the safe direction to be wrong in.
+        """
+        previous = self._last_digital.get(cbtype)
+        self._last_digital[cbtype] = value
+        return previous == "0" and value == "1"
 
     async def _join_change(self, cbtype, value):
         script = self._scripts.get(cbtype)
         if script is None:
             return
-        # For digital joins, only fire on rising edge (1) to avoid
-        # double-trigger from momentary buttons.
-        if cbtype[:1] == "d" and value == "0":
+        if cbtype[:1] == "d" and not self._is_rising_edge(cbtype, value):
             return
         _LOGGER.debug(f"Running script for {cbtype} = {value}")
         # Run in background so a slow script can't block XSIG dispatch / TCP read.

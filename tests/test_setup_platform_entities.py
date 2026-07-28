@@ -43,6 +43,37 @@ def strict_schema(item):
     return item
 
 
+class JoinUidTests(unittest.TestCase):
+    """join_uid keeps the analog and digital join spaces from colliding.
+
+    a1..a1024 and d1..d4096 are unrelated signals, so "first configured join
+    wins" can give two entities the same unique_id and make HA silently drop
+    one of them.
+    """
+
+    def test_analog_wins_and_stays_bare(self):
+        # Bare number == the historical format, so entities that already
+        # resolved to an analog join keep their id (no migration).
+        self.assertEqual(entity.join_uid(analog=(480,), digital=(704, 705)), "480")
+
+    def test_digital_fallback_is_prefixed(self):
+        self.assertEqual(entity.join_uid(analog=(None,), digital=(704, 705)), "d704")
+
+    def test_same_number_in_each_space_does_not_collide(self):
+        analog_side = entity.join_uid(analog=(480,), digital=(None, None))
+        digital_side = entity.join_uid(analog=(None,), digital=(480, None))
+        self.assertNotEqual(analog_side, digital_side)
+
+    def test_preference_order_within_a_space(self):
+        self.assertEqual(entity.join_uid(analog=(415, 414)), "415")
+        self.assertEqual(entity.join_uid(analog=(None, 414)), "414")
+        self.assertEqual(entity.join_uid(digital=(None, 706)), "d706")
+
+    def test_nothing_configured(self):
+        self.assertIsNone(entity.join_uid())
+        self.assertIsNone(entity.join_uid(analog=(None,), digital=(None,)))
+
+
 class SetupPlatformEntitiesTests(unittest.TestCase):
     def _run(self, items, schema=strict_schema, factory=good_factory):
         hass = FakeHass(SENTINEL_HUB, {"light": items})

@@ -72,6 +72,7 @@ def _install_stubs():
     helpers = _module("homeassistant.helpers")
     _module("homeassistant.helpers.config_validation", string=str)
     _module("homeassistant.helpers.restore_state", RestoreEntity=RestoreEntity)
+    _module("homeassistant.helpers.entity", DeviceInfo=dict)
     components = _module("homeassistant.components")
     climate = _module(
         "homeassistant.components.climate",
@@ -113,7 +114,7 @@ class FakeHub:
         return True
 
     def register_callback(self, cb, joins=None):
-        pass
+        self.registered_joins = joins
 
     def remove_callback(self, cb):
         pass
@@ -179,13 +180,13 @@ class PowerOffTests(unittest.TestCase):
         self.ac = make_ac(self.hub)
 
     def test_off_when_on_join_low_even_if_mode_latched(self):
-        # The core fix: power is read from on_join. After turn-off, on_join goes
-        # low — the unit is OFF even though the cool mode join is still latched.
+        # CP4N reports a definitive off pair even though the mode remains latched.
         asyncio.run(self.ac.async_turn_off())
         self.ac._power_settle_until = 0.0  # settle window elapsed
         self.hub.digital[505] = False  # on_join feedback: powered off
+        self.hub.digital[506] = True   # off_join feedback: powered off
         self.hub.digital[507] = True   # cool mode still latched high
-        asyncio.run(self.ac.process_callback("d505", "0"))
+        asyncio.run(self.ac.process_callback("d506", "1"))
         self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.OFF)
 
     def test_stale_on_join_within_settle_does_not_bounce(self):
@@ -193,6 +194,7 @@ class PowerOffTests(unittest.TestCase):
         # high; within the settle window that stale level must be ignored.
         asyncio.run(self.ac.async_turn_off())
         self.hub.digital[505] = True  # stale "still on" feedback
+        self.hub.digital[506] = False
         asyncio.run(self.ac.process_callback("d505", "1"))
         self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.OFF)
 
@@ -202,6 +204,7 @@ class PowerOffTests(unittest.TestCase):
         asyncio.run(self.ac.async_turn_off())
         self.ac._power_settle_until = 0.0  # settle window elapsed
         self.hub.digital[505] = True   # on_join feedback: powered on
+        self.hub.digital[506] = False  # off_join feedback: powered on
         self.hub.digital[507] = True   # running in cool
         asyncio.run(self.ac.process_callback("d505", "1"))
         self.assertEqual(self.ac.hvac_mode, climate_mod.HVACMode.COOL)
@@ -213,6 +216,82 @@ class PowerOffTests(unittest.TestCase):
         self.hub.sent_digital.clear()
         asyncio.run(self.ac.async_turn_off())
         self.assertNotIn((507, False), self.hub.sent_digital)
+
+    def test_subscribes_to_both_power_feedback_joins(self):
+        asyncio.run(self.ac.async_added_to_hass())
+        self.assertIn("d505", self.hub.registered_joins)
+        self.assertIn("d506", self.hub.registered_joins)
+
+    def test_ambiguous_pair_keeps_optimistic_state(self):
+        self.ac._optimistic_on = True
+        self.ac._power_settle_until = 0.0
+        self.hub.digital[505] = False
+        self.hub.digital[506] = False
+        asyncio.run(self.ac.process_callback("d505", "0"))
+        self.assertNotEqual(self.ac.hvac_mode, climate_mod.HVACMode.OFF)
+
+
+class DeviceGroupingTests(unittest.TestCase):
+    """climate was the one platform that never built DeviceInfo, so ACs showed
+    no device in HA even though the generator emits device_id/device_name."""
+
+    def _ac(self, **extra):
+        return climate_mod.CrestronAC(
+            FakeHub(), {"name": "AC", "on_join": 505, "off_join": 506, **extra}
+        )
+
+    def test_device_id_builds_device_info(self):
+        ac = self._ac(
+            device_id="ac_505",
+            device_name="B2.洗衣房 空调",
+            suggested_area="B2.洗衣房",
+        )
+        self.assertEqual(
+            ac._attr_device_info["identifiers"], {("crestron", "ac_505")}
+        )
+        self.assertEqual(ac._attr_device_info["name"], "B2.洗衣房 空调")
+        self.assertEqual(
+            ac._attr_device_info["suggested_area"], "B2.洗衣房"
+        )
+
+    def test_device_name_defaults_to_id(self):
+        ac = self._ac(device_id="ac_505")
+        self.assertEqual(ac._attr_device_info["name"], "ac_505")
+
+    def test_no_device_id_means_no_device(self):
+        self.assertIsNone(self._ac()._attr_device_info)
+
+
+class UniqueIdTests(unittest.TestCase):
+    """Optional temperature feedback must never change climate identity."""
+
+    def _ac(self, **joins):
+        return climate_mod.CrestronAC(
+            FakeHub(), {"name": "AC", "on_join": 505, "off_join": 506, **joins}
+        )
+
+    def test_id_uses_mandatory_on_join(self):
+        self.assertEqual(
+            self._ac(reg_temp_join=415)._attr_unique_id, "crestron_climate_d505"
+        )
+        self.assertEqual(
+            self._ac(set_temp_join=414)._attr_unique_id, "crestron_climate_d505"
+        )
+
+    def test_optional_temperature_joins_do_not_change_id(self):
+        ac = self._ac(reg_temp_join=415, set_temp_join=414)
+        self.assertEqual(ac._attr_unique_id, self._ac()._attr_unique_id)
+
+    def test_digital_fallback_is_namespaced(self):
+        # No temperature joins at all -> falls back to the digital on_join.
+        self.assertEqual(self._ac()._attr_unique_id, "crestron_climate_d505")
+
+    def test_name_does_not_change_id(self):
+        renamed = climate_mod.CrestronAC(
+            FakeHub(),
+            {"name": "Renamed AC", "on_join": 505, "off_join": 506},
+        )
+        self.assertEqual(renamed._attr_unique_id, self._ac()._attr_unique_id)
 
 
 if __name__ == "__main__":

@@ -3,11 +3,38 @@ import re
 
 import voluptuous as vol
 
-from .crestron import ANALOG_JOIN_MAX, DIGITAL_JOIN_MAX, SERIAL_JOIN_MAX
+# Import straight from the codec: config validation must not depend on the
+# transport layer (crestron.py owns the socket and used to re-export these).
+from .xsig_protocol import ANALOG_JOIN_MAX, DIGITAL_JOIN_MAX, SERIAL_JOIN_MAX
 
-digital_join = vol.All(int, vol.Range(min=1, max=DIGITAL_JOIN_MAX))
-analog_join = vol.All(int, vol.Range(min=1, max=ANALOG_JOIN_MAX))
-serial_join = vol.All(int, vol.Range(min=1, max=SERIAL_JOIN_MAX))
+def _join_number(kind: str, maximum: int):
+    """Build a validator for a bare join number.
+
+    ``vol.All(int, vol.Range(...))`` is an isinstance check, and in Python
+    ``bool`` is a subclass of ``int`` — so a YAML ``on_join: true`` sailed
+    through as a "join" and later rendered as the callback key ``"dTrue"``,
+    which simply never matches anything the control system reports. Reject
+    bools explicitly; everything non-int is already refused.
+    """
+
+    def validator(value):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise vol.Invalid(
+                f"{kind} join must be a whole number 1..{maximum}; "
+                f"got {value!r}"
+            )
+        if not 1 <= value <= maximum:
+            raise vol.Invalid(
+                f"{kind} join must be in 1..{maximum}; got {value}"
+            )
+        return value
+
+    return validator
+
+
+digital_join = _join_number("digital", DIGITAL_JOIN_MAX)
+analog_join = _join_number("analog", ANALOG_JOIN_MAX)
+serial_join = _join_number("serial", SERIAL_JOIN_MAX)
 
 _JOIN_LIMITS = {
     "d": DIGITAL_JOIN_MAX,

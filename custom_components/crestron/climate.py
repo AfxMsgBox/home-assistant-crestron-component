@@ -28,7 +28,6 @@ from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
-    HVACAction,
 )
 from homeassistant.components.climate.const import (
     FAN_LOW,
@@ -54,8 +53,10 @@ from .const import (
     CONF_FAN_AUTO_JOIN,
 )
 from .schema import analog_join, digital_join
+from .device import device_info
 from .entity import CrestronEntity, setup_platform_entities
-from .join_commands import pulse_digital, set_one_clear_others
+from .join_commands import paired_feedback, pulse_digital, set_one_clear_others
+from .unique_ids import climate_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,8 +64,7 @@ _LOGGER = logging.getLogger(__name__)
 # so a chatty control system can't flood the recorder database.
 TEMP_REPORT_THRESHOLD = 0.5
 # After issuing a power command, trust the optimistic power state for this long
-# and ignore the on_join feedback, which hasn't echoed the new level yet (so a
-# stale on_join reading doesn't briefly bounce the just-commanded state).
+# while the on/off feedback pair may still represent the previous state.
 POWER_SETTLE_SECONDS = 2.0
 
 PLATFORM_SCHEMA = vol.Schema(
@@ -76,7 +76,7 @@ PLATFORM_SCHEMA = vol.Schema(
         # Setpoint + current temperature (raw integer °C, no scaling).
         vol.Optional(CONF_SET_TEMP_JOIN): analog_join,
         vol.Optional(CONF_REG_TEMP_JOIN): analog_join,
-        # Running-mode feedback (read-only): drives hvac_action display only.
+        # Selectable running modes; CP4N returns state on the same joins.
         vol.Optional(CONF_MODE_COOL_JOIN): digital_join,
         vol.Optional(CONF_MODE_HEAT_JOIN): digital_join,
         vol.Optional(CONF_MODE_FAN_JOIN): digital_join,
@@ -104,14 +104,6 @@ _MODE_ORDER = (
     (CONF_MODE_DRY_JOIN, HVACMode.DRY),
     (CONF_MODE_FAN_JOIN, HVACMode.FAN_ONLY),
 )
-_MODE_TO_ACTION = {
-    HVACMode.COOL: HVACAction.COOLING,
-    HVACMode.HEAT: HVACAction.HEATING,
-    HVACMode.DRY: HVACAction.DRYING,
-    HVACMode.FAN_ONLY: HVACAction.FAN,
-}
-
-
 class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
     _attr_target_temperature_step = 1
     _attr_min_temp = 16
@@ -146,8 +138,8 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
         if config.get(CONF_FAN_AUTO_JOIN) is not None:
             self._fan_joins[FAN_AUTO] = config[CONF_FAN_AUTO_JOIN]
         self._pulse_lock = asyncio.Lock()
-        uid = self._reg_temp_join or self._set_temp_join or self._on_join
-        self._attr_unique_id = f"crestron_climate_{uid}"
+        self._attr_unique_id = climate_unique_id(config)
+        self._attr_device_info = device_info(config)
 
         # Selectable modes: OFF + the real running modes. Fall back to a plain
         # on/off ([OFF, AUTO]) when no per-mode joins are configured.
@@ -158,8 +150,8 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
 
         # Optimistic/cached state (reconciled with feedback in process_callback).
         self._optimistic_on = False
-        # Monotonic deadline until which on_join feedback is ignored in favour of
-        # the optimistic state (see POWER_SETTLE_SECONDS); 0 = no command in flight.
+        # Monotonic deadline until which the on/off feedback pair is ignored in
+        # favour of optimistic state; 0 means no command is in flight.
         self._power_settle_until = 0.0
         self._optimistic_mode = next(iter(self._mode_joins), HVACMode.AUTO)
         self._target_temp = None
@@ -192,19 +184,23 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
                 return mode
         return None
 
+    def _feedback_is_on(self):
+        """Return definitive CP4N power feedback from the existing join pair."""
+        return paired_feedback(self._hub, self._on_join, self._off_join)
+
     def _callback_joins(self):
         analog_joins = [
             j for j in (self._set_temp_join, self._reg_temp_join) if j is not None
         ]
-        # on_join carries the actual power state back from the control system, so
-        # subscribe to it (alongside the mode/fan joins) and treat it as truth.
+        # The existing on/off command joins also carry CP4N's mutually-exclusive
+        # power feedback. Subscribe to both; no extra state join is required.
         digital_joins = (
-            [self._on_join]
+            [self._on_join, self._off_join]
             + list(self._mode_joins.values())
             + list(self._fan_joins.values())
         )
         joins = [f"a{j}" for j in analog_joins]
-        joins += [f"d{j}" for j in digital_joins]
+        joins += list(dict.fromkeys(f"d{j}" for j in digital_joins))
         return joins
 
     async def async_added_to_hass(self):
@@ -230,12 +226,12 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
             c = last.attributes.get("current_temperature")
             if c is not None:
                 self._reported_temp = c
-        # If already connected, upgrade to live feedback. Only *raise* to on here
-        # — don't force "off" from a not-yet-pushed on_join on cold start; a real
-        # on_join feedback event will reconcile us down if the unit is actually off.
+        # If already connected, upgrade to live feedback only when the on/off
+        # pair is definitive; otherwise retain the restored cold-start state.
         if self._hub.is_available():
-            if self._hub.get_digital(self._on_join):
-                self._optimistic_on = True
+            power = self._feedback_is_on()
+            if power is not None:
+                self._optimistic_on = power
             fb = self._feedback_mode()
             if fb is not None:
                 self._optimistic_mode = fb
@@ -268,21 +264,21 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
             ):
                 return
             self._reported_temp = v
-            self.async_write_ha_state()
+            self._schedule_write()
             return
-        # Power state is read straight from the on_join feedback level — the
-        # control system drives it to reflect actual power (on=1/off=0), so it's
-        # the single source of truth (a latched mode join can't bounce us back
-        # on). During the settle window right after a command, trust the
-        # optimistic state instead, since the feedback hasn't echoed yet.
+        # CP4N returns mutually-exclusive on/off levels on the existing command
+        # joins. During the settle window right after a command, trust the
+        # optimistic state because feedback may still represent the old state.
         if time.monotonic() >= self._power_settle_until:
-            self._optimistic_on = self._hub.get_digital(self._on_join)
+            power = self._feedback_is_on()
+            if power is not None:
+                self._optimistic_on = power
         # Running-mode display follows whichever mode join is asserted.
         fb = self._feedback_mode()
         if fb is not None:
             self._optimistic_mode = fb
         self._reconcile_temp_fan()
-        self.async_write_ha_state()
+        self._schedule_write()
 
     @property
     def hvac_mode(self):
@@ -292,12 +288,6 @@ class CrestronAC(CrestronEntity, ClimateEntity, RestoreEntity):
             return self._optimistic_mode
         # Mode-less fallback (or mode not yet known): report the first non-off.
         return self._attr_hvac_modes[1]
-
-    @property
-    def hvac_action(self):
-        if not self._optimistic_on:
-            return HVACAction.OFF
-        return _MODE_TO_ACTION.get(self._optimistic_mode, HVACAction.IDLE)
 
     @property
     def current_temperature(self):

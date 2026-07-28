@@ -29,7 +29,8 @@ from .const import (
 from .schema import analog_join, digital_join
 from .device import device_info
 from .entity import CrestronEntity, setup_platform_entities
-from .join_commands import pulse_digital
+from .join_commands import paired_feedback, pulse_digital
+from .unique_ids import light_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,25 +39,65 @@ _LOGGER = logging.getLogger(__name__)
 # zero-delay re-assert+0 lands in one scan and the 0 gets missed).
 OFF_REASSERT_SECONDS = 0.2
 
-PLATFORM_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_NAME): cv.string,
-        vol.Optional(CONF_TYPE): cv.string,
-        # Dimmable
-        vol.Optional(CONF_BRIGHTNESS_JOIN): analog_join,
-        vol.Optional(CONF_COLOR_TEMP_JOIN): analog_join,
-        # On/off only (relay-style light)
-        vol.Optional(CONF_ON_JOIN): digital_join,
-        vol.Optional(CONF_OFF_JOIN): digital_join,
-        vol.Optional(CONF_SWITCH_JOIN): digital_join,
-        vol.Optional(CONF_STATE_JOIN): digital_join,
-    },
-    extra=vol.ALLOW_EXTRA,
+def _require_light_capability(config):
+    """Reject join combinations that cannot produce a controllable light.
+
+    Every join is individually optional, so without this a hand-written entry
+    with only a colour-temperature join, only half of an on/off pair, or no
+    control join at all validated cleanly and then built an entity that can
+    never be commanded (and, with no control join, a unique_id ending in
+    ``None``). Mirrors the rules the xlsx converter applies to a row.
+    """
+    has_analog = (
+        CONF_BRIGHTNESS_JOIN in config or CONF_COLOR_TEMP_JOIN in config
+    )
+    has_on = CONF_ON_JOIN in config
+    has_off = CONF_OFF_JOIN in config
+    has_digital = has_on or has_off or CONF_SWITCH_JOIN in config
+
+    if has_analog and has_digital:
+        raise vol.Invalid(
+            "analog control (brightness_join/color_temp_join) cannot be "
+            "combined with digital control (on_join/off_join/switch_join)"
+        )
+    if CONF_COLOR_TEMP_JOIN in config and CONF_BRIGHTNESS_JOIN not in config:
+        raise vol.Invalid("color_temp_join requires brightness_join")
+    if has_on != has_off:
+        raise vol.Invalid(
+            "on_join and off_join must be configured together (pulse mode)"
+        )
+    if not (CONF_BRIGHTNESS_JOIN in config or has_on or CONF_SWITCH_JOIN in config):
+        raise vol.Invalid(
+            "a light needs brightness_join, or both on_join and off_join, or "
+            "switch_join; state_join alone is feedback with no way to control"
+        )
+    return config
+
+
+PLATFORM_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required(CONF_NAME): cv.string,
+            vol.Optional(CONF_TYPE): cv.string,
+            # Dimmable
+            vol.Optional(CONF_BRIGHTNESS_JOIN): analog_join,
+            vol.Optional(CONF_COLOR_TEMP_JOIN): analog_join,
+            # On/off only (relay-style light)
+            vol.Optional(CONF_ON_JOIN): digital_join,
+            vol.Optional(CONF_OFF_JOIN): digital_join,
+            vol.Optional(CONF_SWITCH_JOIN): digital_join,
+            vol.Optional(CONF_STATE_JOIN): digital_join,
+        },
+        extra=vol.ALLOW_EXTRA,
+    ),
+    _require_light_capability,
 )
 
 
 def _make_light(hub, cfg):
-    # Dimmable (analog brightness join) vs on/off-only (relay-style).
+    # Capabilities come from the configured joins, not the descriptive `type`
+    # field emitted by the xlsx converter. This keeps legacy hand-written YAML
+    # working and prevents stale metadata from overriding real capabilities.
     if cfg.get(CONF_BRIGHTNESS_JOIN) is not None:
         return CrestronLight(hub, cfg)
     return CrestronOnOffLight(hub, cfg)
@@ -78,7 +119,7 @@ class CrestronLight(CrestronEntity, LightEntity):
         self._attr_name = config.get(CONF_NAME)
         self._brightness_join = config.get(CONF_BRIGHTNESS_JOIN)
         self._color_temp_join = config.get(CONF_COLOR_TEMP_JOIN)
-        self._attr_unique_id = f"crestron_light_{self._brightness_join}"
+        self._attr_unique_id = light_unique_id(config)
         self._attr_device_info = device_info(config)
         self._command_seq = 0
         if self._color_temp_join is not None:
@@ -177,8 +218,7 @@ class CrestronOnOffLight(CrestronEntity, LightEntity, RestoreEntity):
         self._attr_device_info = device_info(config)
         self._optimistic_state = False
         self._pulse_lock = asyncio.Lock()
-        uid = self._switch_join or self._state_join or self._on_join
-        self._attr_unique_id = f"crestron_light_onoff_{uid}_{self._attr_name}"
+        self._attr_unique_id = light_unique_id(config)
 
     def _callback_joins(self):
         if self._state_join is not None:
@@ -210,23 +250,22 @@ class CrestronOnOffLight(CrestronEntity, LightEntity, RestoreEntity):
 
     def _feedback_is_on(self):
         if self._state_join is not None:
+            # Unreported = unknown, so the restored/optimistic state stands.
+            if not self._hub.has_digital(self._state_join):
+                return None
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
+            if not self._hub.has_digital(self._switch_join):
+                return None
             return self._hub.get_digital(self._switch_join)
         # Pulse-only light: state comes back on the command joins themselves.
-        # Exactly one asserted is definitive; both low (not reported yet) or
-        # both high (a momentary transition) is indeterminate — keep current.
-        on = self._on_join is not None and self._hub.get_digital(self._on_join)
-        off = self._off_join is not None and self._hub.get_digital(self._off_join)
-        if on != off:
-            return on
-        return None
+        return paired_feedback(self._hub, self._on_join, self._off_join)
 
     async def process_callback(self, cbtype, value):
         fb = self._feedback_is_on()
         if fb is not None:
             self._optimistic_state = fb
-        self.async_write_ha_state()
+        self._schedule_write()
 
     @property
     def is_on(self):

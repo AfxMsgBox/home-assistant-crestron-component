@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from contextlib import contextmanager
 
 from .xsig_protocol import (
     FrameDecoder,
@@ -8,7 +9,6 @@ from .xsig_protocol import (
     encode_analog,
     encode_digital,
     encode_serial,
-    # Re-exported so schema.py and existing importers keep working unchanged.
     DIGITAL_JOIN_MAX,
     ANALOG_JOIN_MAX,
     SERIAL_JOIN_MAX,
@@ -40,11 +40,12 @@ class CrestronXsig:
         self._analog = {}
         self._serial = {}
         self._writer = None
-        self._broadcast_callbacks = set()
+        self._write_batch = None  # list of frames while batching, else None
         self._join_callbacks = {}
         self._server = None
         self._available = False
         self._sync_all_joins_callback = None
+        self._connect_callback = None
         self._port = None
         self._peer = None  # str repr of the most-recent connection's peername
 
@@ -75,23 +76,29 @@ class CrestronXsig:
         _LOGGER.debug("Sync-all-joins callback registered")
         self._sync_all_joins_callback = callback
 
-    def register_callback(self, callback, joins=None):
-        """Register a callback.
+    def register_connect_callback(self, callback):
+        """Register a coroutine to run once a control system has connected.
 
-        If ``joins`` is None, the callback receives every join event plus
-        availability changes (broadcast). If a list of join keys is given,
-        the callback is only invoked for those joins and for availability
-        changes.
+        The handshake is otherwise one-way: we ask the control system to report
+        everything (0xFD) but never volunteer our own side. Without this hook a
+        reconnect leaves every ``to_join`` at whatever value the control system
+        last received, so panel feedback can sit stale indefinitely — the
+        protocol has no "push me your outputs" request in that direction.
         """
-        if joins is None:
-            self._broadcast_callbacks.add(callback)
-            return
+        _LOGGER.debug("Connect callback registered")
+        self._connect_callback = callback
+
+    def register_callback(self, callback, joins):
+        """Register ``callback`` for the given join keys (e.g. ``["d5", "a3"]``).
+
+        Availability changes are always delivered too, so every subscriber can
+        react to the connection going up or down without asking for it.
+        """
         for key in joins:
             self._join_callbacks.setdefault(key, set()).add(callback)
         self._join_callbacks.setdefault(AVAILABLE_KEY, set()).add(callback)
 
     def remove_callback(self, callback):
-        self._broadcast_callbacks.discard(callback)
         for callbacks in self._join_callbacks.values():
             callbacks.discard(callback)
 
@@ -106,23 +113,12 @@ class CrestronXsig:
             )
 
     async def _dispatch(self, cbtype, value):
-        # Snapshot the callback sets before iterating: each callback is awaited,
+        # Snapshot the callback set before iterating: each callback is awaited,
         # and during those awaits another task (e.g. an entity being added or
-        # removed) may register/remove callbacks and mutate these sets, which
+        # removed) may register/remove callbacks and mutate this set, which
         # would otherwise raise "Set changed size during iteration".
-        join_targets = tuple(self._join_callbacks.get(cbtype, ()))
-        if not self._broadcast_callbacks:
-            for cb in join_targets:
-                await self._safe_call(cb, cbtype, value)
-            return
-        # Deduplicate when a callback registered both broadcast and per-join.
-        seen = set()
-        for cb in join_targets:
-            seen.add(cb)
+        for cb in tuple(self._join_callbacks.get(cbtype, ())):
             await self._safe_call(cb, cbtype, value)
-        for cb in tuple(self._broadcast_callbacks):
-            if cb not in seen:
-                await self._safe_call(cb, cbtype, value)
 
     async def _timed_dispatch(self, cbtype, value, stats):
         """Dispatch a join event, optionally accumulating timing stats.
@@ -137,6 +133,10 @@ class CrestronXsig:
         if stats["first"] is None:
             stats["first"] = now
         stats["frames"] += 1
+        # Distinct joins, not frames: the control system can report the same
+        # join several times in one sync, so "332 frames" was being logged as
+        # "332 joins" and read as a join count.
+        stats["joins"].add(cbtype)
         await self._dispatch(cbtype, value)
         stats["last"] = time.monotonic()
         stats["dispatch"] += stats["last"] - now
@@ -211,12 +211,29 @@ class CrestronXsig:
             await writer.drain()
             await self._notify_available(True)
 
+            # Push our side of the state out too. 0xFD only asks the control
+            # system to report *its* joins; without this, to_joins keep whatever
+            # value the control system last saw until a template happens to
+            # change or it asks for a resync (0xFB). Isolated so a bad template
+            # can't take down a connection that is otherwise fine.
+            if self._connect_callback is not None:
+                try:
+                    await self._connect_callback()
+                except Exception:
+                    _LOGGER.exception("Connect callback failed")
+
             # Timing probe for the initial full-join-sync burst. It follows the
             # normal integration logger: enabled at info/debug, disabled at
             # warning+.
             t_request = time.monotonic()
             stats = (
-                {"frames": 0, "first": None, "last": None, "dispatch": 0.0}
+                {
+                    "frames": 0,
+                    "joins": set(),
+                    "first": None,
+                    "last": None,
+                    "dispatch": 0.0,
+                }
                 if _sync_timing_enabled()
                 else None
             )
@@ -224,13 +241,21 @@ class CrestronXsig:
             async def _log_sync_when_settled():
                 while True:
                     await asyncio.sleep(SYNC_SETTLE_SECONDS)
-                    if stats["first"] is not None and (
+                    # Gate on "last", not "first": _timed_dispatch sets "first"
+                    # *before* awaiting the dispatch and "last" only after it
+                    # returns, so a first frame whose dispatch outlives this
+                    # sleep (hundreds of entities writing state on a cold
+                    # start) would otherwise land us on `monotonic() - None`.
+                    # "last" being set implies "first" is too.
+                    if stats["last"] is not None and (
                         time.monotonic() - stats["last"] >= SYNC_SETTLE_SECONDS
                     ):
                         _LOGGER.info(
-                            "Initial join sync settled: %d joins, span %.2fs "
+                            "Initial join sync settled: %d frames covering %d "
+                            "joins, span %.2fs "
                             "(HA dispatch %.2fs of that; first frame %.2fs after 0xFD)",
                             stats["frames"],
+                            len(stats["joins"]),
                             stats["last"] - stats["first"],
                             stats["dispatch"],
                             stats["first"] - t_request,
@@ -277,18 +302,37 @@ class CrestronXsig:
     def is_available(self):
         return self._available
 
-    def diagnostics(self):
+    def diagnostics(self, redact=True):
         """Snapshot of connection + cache state for the diagnostics download.
 
         Read-only; safe to call any time. The join caches can be large (1000+
-        entries on a full sync), so this returns their sizes plus the full
-        contents keyed by join — the diagnostics platform decides how to render.
+        entries on a full sync), so this returns their sizes plus the contents
+        keyed by join — the diagnostics platform decides how to render.
+
+        ``redact`` (the default) withholds two things, because the entire point
+        of this download is to hand it to someone else:
+
+          - **serial join contents**, which carry free text — door-access names,
+            calendar entries, whatever the panel displays. The join numbers and
+            value lengths are kept, which is what "has this join ever been
+            reported?" actually needs.
+          - **the control system's address**, which is site information.
+
+        Digital and analog values are just levels and numbers, so they stay.
         """
+        peer = self._peer
+        serial = {join: value for join, value in self._serial.items()}
+        if redact:
+            peer = "**REDACTED**" if peer is not None else None
+            serial = {
+                join: f"<{len(value)} chars redacted>"
+                for join, value in self._serial.items()
+            }
         return {
             "available": self._available,
             "listening_port": self._port,
             "connected": self._writer is not None,
-            "peer": self._peer,
+            "peer": peer,
             "cache_counts": {
                 "digital": len(self._digital),
                 "analog": len(self._analog),
@@ -296,7 +340,7 @@ class CrestronXsig:
             },
             "digital": dict(self._digital),
             "analog": dict(self._analog),
-            "serial": dict(self._serial),
+            "serial": serial,
         }
 
     # State getters. The control system pushes state on change only; until a
@@ -324,7 +368,36 @@ class CrestronXsig:
     def get_serial(self, join, default=""):
         return self._serial.get(join, default)
 
+    @contextmanager
+    def batched_writes(self):
+        """Coalesce every ``set_*`` made inside the block into one socket write.
+
+        A full ``to_joins`` resync renders hundreds of joins back to back; one
+        ``writer.write()`` per join means hundreds of small buffer appends (and,
+        on the control system's side, potentially hundreds of tiny segments).
+        The frames are independent and order-preserving, so concatenating them
+        is equivalent on the wire and strictly cheaper.
+
+        Reentrant-safe: a nested block joins the outermost batch. The batch is
+        flushed even if the body raises, so a mid-sync failure still delivers
+        the joins that were already rendered.
+        """
+        if self._write_batch is not None:
+            yield  # already batching; the outermost block owns the flush
+            return
+        self._write_batch = []
+        try:
+            yield
+        finally:
+            batch = self._write_batch
+            self._write_batch = None
+            if batch:
+                self._write(b"".join(batch))
+
     def _write(self, data):
+        if self._write_batch is not None:
+            self._write_batch.append(data)
+            return
         if self._writer is None:
             _LOGGER.info("Could not send. No connection to hub")
             return

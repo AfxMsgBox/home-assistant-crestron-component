@@ -260,7 +260,9 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
             if t == "available":
                 events.append(v)
 
-        self.hub.register_callback(cb)  # broadcast
+        # Availability is delivered to every subscriber regardless of which
+        # joins it asked for.
+        self.hub.register_callback(cb, joins=["d1"])
         await self.hub._notify_available(True)  # already True -> no dispatch
         self.assertEqual(events, [])
         await self.hub._notify_available(False)
@@ -313,6 +315,130 @@ class TimingStatsTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(xsig._sync_timing_enabled())
         finally:
             xsig._LOGGER.setLevel(old_level)
+
+
+class SettleWatchdogTests(unittest.IsolatedAsyncioTestCase):
+    """The sync-settled logger must survive a slow first dispatch.
+
+    _timed_dispatch sets stats["first"] before awaiting the dispatch but
+    stats["last"] only after it returns, so a first frame whose dispatch
+    outlives SYNC_SETTLE_SECONDS used to leave the watchdog computing
+    `monotonic() - None` -> TypeError, killing the task and losing the one
+    measurement that explains a slow cold-start sync.
+    """
+
+    async def test_slow_first_dispatch_does_not_crash_watchdog(self):
+        crashes = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, ctx: crashes.append(ctx)
+        )
+        old_level = xsig._LOGGER.level
+        old_settle = xsig.SYNC_SETTLE_SECONDS
+        try:
+            # INFO enables the timing probe at all; a short settle window keeps
+            # the test fast while still expiring mid-dispatch.
+            xsig._LOGGER.setLevel(logging.INFO)
+            xsig.SYNC_SETTLE_SECONDS = 0.05
+
+            hub = CrestronXsig()
+            await hub.listen(0)
+            port = hub._server.sockets[0].getsockname()[1]
+
+            # Dispatch that outlives the settle window, as on a cold start with
+            # hundreds of entities each writing HA state.
+            async def slow(cbtype, value):
+                await asyncio.sleep(0.25)
+
+            hub.register_callback(slow, joins=["d1"])
+
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            await asyncio.wait_for(reader.readexactly(1), timeout=2)  # 0xFD
+            writer.write(enc_digital(1, 1))
+            await writer.drain()
+            await asyncio.sleep(0.5)  # let the watchdog fire during and after
+
+            writer.close()
+            await hub.stop()
+        finally:
+            xsig._LOGGER.setLevel(old_level)
+            xsig.SYNC_SETTLE_SECONDS = old_settle
+
+        # Report just the exceptions; the raw contexts carry whole tracebacks
+        # and drown the failure message.
+        raised = [repr(c.get("exception")) for c in crashes]
+        self.assertEqual(raised, [], f"watchdog task crashed: {raised}")
+
+
+class ConnectCallbackTests(unittest.IsolatedAsyncioTestCase):
+    """A new connection must trigger the "push our side out" hook.
+
+    0xFD only asks the control system to report its joins; without this hook a
+    reconnect leaves every to_join at whatever value the control system last
+    received.
+    """
+
+    async def asyncSetUp(self):
+        self.hub = CrestronXsig()
+        await self.hub.listen(0)
+        self.port = self.hub._server.sockets[0].getsockname()[1]
+
+    async def asyncTearDown(self):
+        await self.hub.stop()
+
+    async def _connect(self):
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        await asyncio.wait_for(reader.readexactly(1), timeout=2)  # 0xFD
+        return reader, writer
+
+    async def test_fires_on_connect(self):
+        called = asyncio.Event()
+
+        async def on_connect():
+            called.set()
+
+        self.hub.register_connect_callback(on_connect)
+        reader, writer = await self._connect()
+        await asyncio.wait_for(called.wait(), timeout=2)
+        writer.close()
+
+    async def test_fires_again_on_reconnect(self):
+        calls = []
+
+        async def on_connect():
+            calls.append(1)
+
+        self.hub.register_connect_callback(on_connect)
+        reader, writer = await self._connect()
+        await _wait_for(lambda: len(calls) == 1)
+        writer.close()
+        await _wait_for(lambda: not self.hub.is_available())
+
+        reader2, writer2 = await self._connect()
+        await _wait_for(lambda: len(calls) == 2)
+        self.assertEqual(len(calls), 2)
+        writer2.close()
+
+    async def test_failure_does_not_drop_the_connection(self):
+        async def boom():
+            raise RuntimeError("bad to_joins template")
+
+        self.hub.register_connect_callback(boom)
+        # The component logs the traceback itself; keep expected noise quiet.
+        logging.getLogger(xsig.__name__).setLevel(logging.CRITICAL)
+        reader, writer = await self._connect()
+
+        # Connection survives and still parses inbound frames.
+        writer.write(enc_digital(7, 1))
+        await writer.drain()
+        await _wait_for(lambda: self.hub.get_digital(7))
+        self.assertTrue(self.hub.get_digital(7))
+        self.assertTrue(self.hub.is_available())
+        writer.close()
+
+    async def test_no_callback_registered_is_fine(self):
+        reader, writer = await self._connect()
+        self.assertTrue(self.hub.is_available())
+        writer.close()
 
 
 class StateGetterTests(unittest.TestCase):
@@ -372,7 +498,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.hub._peer = "('10.0.0.9', 5001)"
         self.hub._port = 32000
         self.hub._writer = object()  # simulate an active connection
-        d = self.hub.diagnostics()
+        d = self.hub.diagnostics(redact=False)
         self.assertTrue(d["connected"])
         self.assertEqual(d["peer"], "('10.0.0.9', 5001)")
         self.assertEqual(d["listening_port"], 32000)
@@ -382,6 +508,28 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(d["digital"], {5: True})
         self.assertEqual(d["analog"], {3: 1000})
         self.assertEqual(d["serial"], {7: "hi"})
+
+    def test_download_redacts_serial_text_and_peer(self):
+        """The download is meant to be handed to someone else.
+
+        Serial joins carry free text (door-access names, calendar entries) and
+        the peer address is site information; neither is needed to answer "has
+        this join ever been reported?".
+        """
+        self.hub._digital[5] = True
+        self.hub._analog[3] = 1000
+        self.hub._serial[7] = "张三 已开门"
+        self.hub._peer = "('10.0.0.9', 5001)"
+        d = self.hub.diagnostics()
+        self.assertNotIn("张三", str(d))
+        self.assertNotIn("10.0.0.9", str(d))
+        # Still enough to tell that join 7 has been reported, and how long.
+        self.assertIn(7, d["serial"])
+        self.assertIn("6", d["serial"][7])
+        self.assertEqual(d["cache_counts"]["serial"], 1)
+        # Levels and numbers are not sensitive and stay readable.
+        self.assertEqual(d["digital"], {5: True})
+        self.assertEqual(d["analog"], {3: 1000})
 
     def test_cache_dicts_are_copies(self):
         # Mutating the returned snapshot must not corrupt the live cache.

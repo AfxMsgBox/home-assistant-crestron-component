@@ -20,8 +20,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
-        # voluptuous is only needed by tests/test_schema.py (otherwise skipped);
-        # the XSIG and value-coercion modules are pure stdlib.
+        # Platform tests stub Home Assistant, but still use real voluptuous
+        # schemas. mypy checks the HA-independent modules listed in mypy.ini.
         run: pip install -r requirements-test.txt
 
       - name: Run unittest suite
