@@ -102,6 +102,7 @@ crestron = load("__init__")
 # _invalid_entities imports the nine platform modules, which need far heavier
 # stubs than this file's scope; test_platform_schemas covers that validation
 # directly. Here the reload flow itself is what matters.
+_REAL_INVALID_ENTITIES = crestron._invalid_entities
 crestron._invalid_entities = lambda config: []
 logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
 
@@ -129,9 +130,11 @@ class FakeConfigEntries:
         self.reloaded.append(entry_id)
         entry = next(e for e in self._entries if e.entry_id == entry_id)
         pending = self.outcomes.get(entry_id)
-        entry.state = (
-            pending.pop(0) if pending else ConfigEntryState.LOADED
-        )
+        outcome = pending.pop(0) if pending else ConfigEntryState.LOADED
+        if isinstance(outcome, Exception):
+            entry.state = ConfigEntryState.SETUP_ERROR
+            raise outcome
+        entry.state = outcome
 
 
 class FakeHass:
@@ -251,6 +254,60 @@ class ReloadServiceTests(unittest.TestCase):
             logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
         self.assertTrue(any("will be skipped" in m for m in logs.output))
         self.assertEqual(self.hass.config_entries.reloaded, ["entry-1"])
+
+
+    def test_raising_reload_triggers_rollback(self):
+        """async_reload can raise; that is still a failed reload."""
+        before = self.hass.data[DOMAIN][YAML_CONF]
+        self.hass.config_entries.outcomes["entry-1"] = [
+            RuntimeError("address already in use")
+        ]
+        self._reload({DOMAIN: {"port": 9999}})
+        self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
+        self.assertEqual(
+            self.hass.config_entries.reloaded, ["entry-1", "entry-1"]
+        )
+
+    def test_failed_rollback_is_reported(self):
+        """If the old config can't come back either, say so loudly."""
+        self.hass.config_entries.outcomes["entry-1"] = [
+            ConfigEntryState.SETUP_ERROR,   # new config fails
+            ConfigEntryState.SETUP_ERROR,   # and so does the rollback
+        ]
+        logging.getLogger(crestron.__name__).setLevel(logging.ERROR)
+        try:
+            with self.assertLogs(crestron.__name__, level="ERROR") as logs:
+                self._reload({DOMAIN: {"port": 9999}})
+        finally:
+            logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
+        self.assertTrue(
+            any("Rollback did not restore" in m for m in logs.output)
+        )
+
+
+class SectionShapeTests(unittest.TestCase):
+    """A platform key that isn't a list makes every entity under it vanish."""
+
+    def test_non_list_platform_section_is_reported(self):
+        original = crestron._platform_schemas
+        crestron._platform_schemas = lambda: {"light": lambda cfg: cfg}
+        try:
+            problems = _REAL_INVALID_ENTITIES(
+                {"light": {"name": "写成了映射"}}
+            )
+        finally:
+            crestron._platform_schemas = original
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(problems[0][0], "light")
+        self.assertIn("must be a list", problems[0][2])
+
+    def test_absent_section_is_not_a_problem(self):
+        original = crestron._platform_schemas
+        crestron._platform_schemas = lambda: {"light": lambda cfg: cfg}
+        try:
+            self.assertEqual(_REAL_INVALID_ENTITIES({}), [])
+        finally:
+            crestron._platform_schemas = original
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from homeassistant.core import callback, Context
 from homeassistant.const import CONF_VALUE_TEMPLATE, CONF_ATTRIBUTE, CONF_ENTITY_ID
 
 from .const import CONF_JOIN, CONF_SCRIPT, CONF_TO_HUB, CONF_FROM_HUB, DOMAIN
+from .crestron import AVAILABLE_KEY
 from .value_coercion import resolve_join_write
 
 _LOGGER = logging.getLogger(__name__)
@@ -181,6 +182,14 @@ class FromJoinBridge:
         return previous == "0" and value == "1"
 
     async def _join_change(self, cbtype, value):
+        # Availability flips bracket every connection, including a plain TCP
+        # reconnect that never tears this bridge down. The baseline has to go
+        # with them: a join recorded low before the drop and re-reported high
+        # by the reconnect's full sync would otherwise look like a real press,
+        # which is the exact false trigger the edge detection exists to stop.
+        if cbtype == AVAILABLE_KEY:
+            self._last_digital.clear()
+            return
         script = self._scripts.get(cbtype)
         if script is None:
             return

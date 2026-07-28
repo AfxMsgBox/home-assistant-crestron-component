@@ -337,6 +337,41 @@ class ScalarEscapingTests(unittest.TestCase):
         self.assertEqual(g._yaml_scalar('a"b'), '"a\\"b"')
         self.assertEqual(g._yaml_scalar("a\\b"), '"a\\\\b"')
 
+    def test_yaml_reserved_words_quoted(self):
+        """Bare `on`/`off`/`no`/`null` load as booleans or None, not strings."""
+        for word in ("on", "off", "true", "false", "yes", "no", "null",
+                     "Yes", "OFF", "Null", "y", "n"):
+            self.assertEqual(g._yaml_scalar(word), f'"{word}"', word)
+
+    def test_numeric_looking_strings_quoted(self):
+        """`123` would load as an int and `0x1F` as 31, retyping a name."""
+        for text in ("123", "0x1F", "0o17", "007"):
+            self.assertEqual(g._yaml_scalar(text), f'"{text}"', text)
+
+    def test_reserved_and_numeric_round_trip_as_strings(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for text in ("on", "off", "null", "no", "123", "0x1F"):
+            parsed = yaml.safe_load("name: " + g._yaml_scalar(text))
+            self.assertEqual(parsed["name"], text, text)
+
+    def test_group_comment_strips_newlines(self):
+        entities = [{"name": "灯", "on_join": 1, "_group": "1F\n客厅"}]
+        out = g.emit_domain({"light": entities}, "x.xlsx")
+        self.assertIn("# 1F 客厅", out)
+        self.assertNotIn("# 1F\n", out)
+
+    def test_group_comment_newline_does_not_break_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        entities = [{"name": "灯", "on_join": 1, "_group": "1F\n客厅: 坏"}]
+        parsed = yaml.safe_load(g.emit_domain({"light": entities}, "x.xlsx"))
+        self.assertEqual(len(parsed["light"]), 1)
+
     def test_ordinary_values_unchanged(self):
         self.assertEqual(g._yaml_scalar("curtain"), "curtain")
         self.assertEqual(g._yaml_scalar("1F.客厅 灯带"), '"1F.客厅 灯带"')

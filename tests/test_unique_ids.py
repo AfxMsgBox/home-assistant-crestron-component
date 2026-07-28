@@ -59,8 +59,39 @@ class UniqueIdPlanningTests(unittest.TestCase):
             [("select", "crestron_select_514", "crestron_select_512")],
         )
 
-    def test_group_already_lowest_first_needs_no_migration(self):
+    def test_migration_offered_from_every_join_in_the_group(self):
+        """The old first-listed join is unknowable from the current file.
+
+        A user who reorders options in the same edit as the upgrade would
+        otherwise orphan the entity: planning from the current order alone
+        finds nothing to migrate.
+        """
+        config = {"name": "风速", "options": {"低": 512, "中": 513, "高": 514}}
+        migrations = uid.unique_id_migrations({"select": [config]})
+        self.assertEqual(
+            {m.old_unique_id for m in migrations},
+            {"crestron_select_513", "crestron_select_514"},
+        )
+        self.assertEqual(
+            {m.new_unique_id for m in migrations}, {"crestron_select_512"}
+        )
+
+    def test_group_migration_offered_even_when_order_looks_current(self):
+        """Current order proves nothing about the order at registration time.
+
+        Planning a migration for a registry entry that doesn't exist is free —
+        async_migrate_unique_ids looks it up and moves on — whereas *not*
+        planning it orphans the entity for good.
+        """
         config = {"name": "风速", "options": {"低": 512, "高": 514}}
+        migrations = uid.unique_id_migrations({"select": [config]})
+        self.assertEqual(
+            [(m.old_unique_id, m.new_unique_id) for m in migrations],
+            [("crestron_select_514", "crestron_select_512")],
+        )
+
+    def test_single_option_group_needs_no_migration(self):
+        config = {"name": "风速", "options": {"低": 512}}
         self.assertEqual(uid.unique_id_migrations({"select": [config]}), [])
 
     def test_duplicate_ids_detected(self):

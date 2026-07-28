@@ -189,6 +189,41 @@ class NumberRangeTests(unittest.TestCase):
         self.assertGreater(cfg["step"], 0)
 
 
+class NonFiniteTests(unittest.TestCase):
+    """nan compares False against everything, so it slips past range checks."""
+
+    def test_number_rejects_nan_and_inf(self):
+        for key in ("min", "max", "step"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with self.assertRaises(vol.Invalid):
+                    number.PLATFORM_SCHEMA(
+                        {"name": "n", "value_join": 1, key: bad}
+                    )
+
+    def test_sensor_divisor_must_be_finite_and_nonzero(self):
+        base = {"name": "s", "value_join": 1}
+        for bad in (0, float("nan"), float("inf")):
+            with self.assertRaises(vol.Invalid):
+                sensor.PLATFORM_SCHEMA({**base, "divisor": bad})
+
+    def test_sensor_divisor_normal_values_accepted(self):
+        base = {"name": "s", "value_join": 1}
+        self.assertEqual(sensor.PLATFORM_SCHEMA({**base, "divisor": 10})["divisor"], 10.0)
+        self.assertEqual(sensor.PLATFORM_SCHEMA(base)["divisor"], 1.0)
+
+
+class MediaSourceNumberTests(unittest.TestCase):
+    def test_source_zero_rejected(self):
+        """0 is this component's "off" value: such a source can never turn on."""
+        base = {
+            "name": "音箱", "mute_join": 27, "volume_join": 19,
+            "source_number_join": 13,
+        }
+        with self.assertRaises(vol.Invalid):
+            media_player.PLATFORM_SCHEMA({**base, "sources": {0: "HDMI"}})
+        media_player.PLATFORM_SCHEMA({**base, "sources": {1: "HDMI"}})
+
+
 class JoinNumberTests(unittest.TestCase):
     def test_bool_rejected(self):
         """bool is a subclass of int; `on_join: true` became the key "dTrue"."""

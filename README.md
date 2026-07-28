@@ -473,7 +473,7 @@ crestron:
     - join: d12
       entity_id: switch.compressor
     - join: a35
-      value_template: "{{ value | int * 10 }}"
+      value_template: "{{ states('sensor.room_temp') | float * 10 }}"
     - join: s4
       value_template: "当前天气：{{ states('weather.home') }}"
     - join: a2
@@ -517,7 +517,7 @@ crestron:
 
 ## 批量生成配置（xlsx → YAML）
 
-`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成**一个 `crestron.yaml`**（`crestron:` 域配置：port + 各平台实体），省去手写上百条实体。**纯标准库、单个自包含文件，需 Python 3.6+**，无需 openpyxl/PyYAML。它是**离线一次性工具，不在 HA 内运行**——在任意有 Python 3 的机器上跑即可，跟你的 HA 用哪个 Python 无关。
+`tools/xlsx_to_yaml.py` 把一份多 sheet 的快思聪 join 表（Excel）转成**一个 `crestron.yaml`**（`crestron:` 域配置：port + 各平台实体），省去手写上百条实体。**纯标准库、单个自包含文件，需 Python 3.8+**（用到海象运算符），无需 openpyxl/PyYAML。它是**离线一次性工具，不在 HA 内运行**——在任意有 Python 3 的机器上跑即可，跟你的 HA 用哪个 Python 无关。
 
 从零创建 Excel 的完整表头、列说明和示例见
 [tools/README.md](tools/README.md)。
@@ -530,7 +530,7 @@ python3 tools/xlsx_to_yaml.py <join表.xlsx> <输出目录或.yaml文件>
 第二个参数既可以是目录（脚本会在其中生成 `crestron.yaml`），也可以直接写完整的
 `.yaml` / `.yml` 文件路径。已有目标文件会被覆盖。
 
-> 说明：HA 全系只用 Python 3（当前要求 3.12+），所以"不依赖 Python 3"在 HA 环境里是个伪命题——脚本本就用 Python 3，而各安装方式自带的 Python 都满足 3.6+。
+> 说明：HA 全系只用 Python 3（当前要求 3.12+），所以"不依赖 Python 3"在 HA 环境里是个伪命题——脚本本就用 Python 3，而各安装方式自带的 Python 都满足 3.8+。
 
 #### 在 Home Assistant 主机上运行（以 HAOS 为例）
 

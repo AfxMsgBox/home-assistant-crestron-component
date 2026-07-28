@@ -2,25 +2,25 @@
   "config": {
     "step": {
       "user": {
-        "description": "Crestron XSIG 的连接与实体配置全部来自 configuration.yaml 的 `crestron:` 段。此处只创建集成条目。"
+        "description": "All Crestron XSIG connection and entity configuration comes from the `crestron:` block in configuration.yaml. This only creates the integration entry."
       }
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Crestron XSIG 选项",
-        "description": "配置仍来自 YAML。勾选下方选项并提交，可手动把 HA 当前已知的所有 to_joins 状态重新下发给主控（通常只在主控重连时才会自动发生）。",
+        "title": "Crestron XSIG options",
+        "description": "Configuration still comes from YAML. Tick the option below and submit to manually push every to_join HA currently knows back to the control system (normally only done automatically when the control system reconnects).",
         "data": {
-          "resync_to_joins": "重新同步所有 to_joins 到主控"
+          "resync_to_joins": "Resync all to_joins to the control system"
         }
       }
     }
   },
   "services": {
     "reload": {
-      "name": "重新加载",
-      "description": "重新读取 configuration.yaml 里的 `crestron:` 段并重载集成。改完（或重新生成）crestron.yaml 后用它代替重启 Home Assistant。"
+      "name": "Reload",
+      "description": "Re-read the `crestron:` block from configuration.yaml and reload the integration. Use this after editing or regenerating crestron.yaml instead of restarting Home Assistant."
     }
   }
 }

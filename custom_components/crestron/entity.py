@@ -75,10 +75,20 @@ def setup_platform_entities(hass, platform_key, schema, factory):
     """
     hub = hass.data[DOMAIN][HUB]
     items = hass.data[DOMAIN][YAML_CONF].get(platform_key, [])
+    if not isinstance(items, list):
+        _LOGGER.error(
+            "`%s:` under `crestron:` must be a list of entities, got %s — no "
+            "%s entities were created",
+            platform_key,
+            type(items).__name__,
+            platform_key,
+        )
+        return []
     entities = []
+    claimed = {}  # unique_id -> name of the entity that got it
     for index, item in enumerate(items):
         try:
-            entities.append(factory(hub, schema(item)))
+            entity = factory(hub, schema(item))
         except Exception:
             name = item.get("name") if isinstance(item, dict) else None
             _LOGGER.exception(
@@ -87,6 +97,30 @@ def setup_platform_entities(hass, platform_key, schema, factory):
                 index,
                 name or "unnamed",
             )
+            continue
+        # Home Assistant drops a colliding entity itself, but only says "does
+        # not generate unique IDs" — naming both configs is the difference
+        # between a two-minute fix and a hunt. Skipping here also keeps the
+        # winner deterministic (first in YAML) instead of registration-order.
+        unique_id = getattr(entity, "unique_id", None)
+        if unique_id is not None and unique_id in claimed:
+            _LOGGER.error(
+                "Skipping %s entity #%d (%s): unique ID %r is already used by "
+                "%r. Two entities deriving an ID from the same join collide; "
+                "give one of them a different control join.",
+                platform_key,
+                index,
+                (item.get("name") if isinstance(item, dict) else None)
+                or "unnamed",
+                unique_id,
+                claimed[unique_id],
+            )
+            continue
+        if unique_id is not None:
+            claimed[unique_id] = (
+                item.get("name") if isinstance(item, dict) else None
+            ) or f"#{index}"
+        entities.append(entity)
     return entities
 
 

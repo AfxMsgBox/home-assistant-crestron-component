@@ -265,6 +265,30 @@ class FromJoinBridgeTests(unittest.TestCase):
         self._fire("d5", "1")  # first observation after reload: not an edge
         self.assertEqual(self.script.runs, [])
 
+    def test_tcp_reconnect_clears_edge_history(self):
+        """A plain reconnect never calls stop(), but must still reset baseline.
+
+        Otherwise: low before the drop, re-reported high by the reconnect's
+        0xFD full sync, and the bridge sees a textbook 0->1 that never happened.
+        """
+        self._fire("d5", "0")
+        self._fire("available", "False")
+        self._fire("available", "True")
+        self._fire("d5", "1")
+        self.assertEqual(self.script.runs, [])
+
+    def test_press_after_reconnect_still_works(self):
+        """Resetting the baseline must not deafen the bridge to real presses."""
+        self._fire("available", "True")
+        self._fire("d5", "0")  # sync reports it low
+        self._fire("d5", "1")  # then the user actually presses it
+        self.assertEqual(self.script.runs, [{"value": "1"}])
+
+    def test_availability_never_runs_a_script(self):
+        self._fire("available", "True")
+        self._fire("available", "False")
+        self.assertEqual(self.script.runs, [])
+
     def test_unconfigured_join_ignored(self):
         self._fire("d99", "1")
         self.assertEqual(self.script.runs, [])

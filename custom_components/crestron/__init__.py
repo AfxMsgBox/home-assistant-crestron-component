@@ -29,13 +29,34 @@ from .unique_ids import async_migrate_unique_ids, duplicate_unique_ids
 
 _LOGGER = logging.getLogger(__name__)
 
-TO_JOINS_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_JOIN): join_key,
-        vol.Optional(CONF_ENTITY_ID): cv.entity_id,
-        vol.Optional(CONF_ATTRIBUTE): cv.string,
-        vol.Optional(CONF_VALUE_TEMPLATE): cv.template,
-    }
+
+def _require_to_join_source(entry):
+    """A to_join needs something to render, or it is silently inert.
+
+    ``_build_template`` returns None when neither an entity nor a template is
+    given (and ``attribute`` on its own has no entity to read from), so the
+    join was accepted at load time and then simply never written.
+    """
+    if CONF_VALUE_TEMPLATE in entry or CONF_ENTITY_ID in entry:
+        if CONF_ATTRIBUTE in entry and CONF_ENTITY_ID not in entry:
+            raise vol.Invalid("attribute requires entity_id")
+        return entry
+    raise vol.Invalid(
+        f"to_joins entry for {entry.get(CONF_JOIN)!r} needs entity_id or "
+        f"value_template; otherwise nothing is ever sent to this join"
+    )
+
+
+TO_JOINS_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required(CONF_JOIN): join_key,
+            vol.Optional(CONF_ENTITY_ID): cv.entity_id,
+            vol.Optional(CONF_ATTRIBUTE): cv.string,
+            vol.Optional(CONF_VALUE_TEMPLATE): cv.template,
+        }
+    ),
+    _require_to_join_source,
 )
 
 FROM_JOINS_SCHEMA = vol.Schema(
@@ -105,7 +126,7 @@ def _warn_join_conflicts(yaml_conf):
         _LOGGER.warning(
             "%d Crestron join conflict(s) found in configuration — two owners "
             "on one signal fight over it, and duplicate to_joins/from_joins "
-            "keys are dropped entirely:\n  %s",
+            "keys silently lose all but the last entry:\n  %s",
             len(conflicts),
             "\n  ".join(conflicts),
         )
@@ -180,7 +201,15 @@ def _invalid_entities(domain_config):
     problems = []
     for platform, schema in _platform_schemas().items():
         entries = domain_config.get(platform)
+        if entries is None:
+            continue
         if not isinstance(entries, list):
+            # `light: {...}` instead of `light: - {...}`: every entity under
+            # that key silently disappears. Reporting it as one problem beats
+            # a "successful" reload with no lights.
+            problems.append(
+                (platform, "<whole section>", "must be a list of entities")
+            )
             continue
         for index, item in enumerate(entries):
             try:
@@ -234,7 +263,13 @@ async def _async_reload_yaml(hass, call):
 
     entries = hass.config_entries.async_entries(DOMAIN)
     for entry in entries:
-        await hass.config_entries.async_reload(entry.entry_id)
+        try:
+            await hass.config_entries.async_reload(entry.entry_id)
+        except Exception:
+            # A raising reload is still a failed reload: fall through to the
+            # rollback rather than letting the exception escape and leave the
+            # new (broken) config installed in hass.data.
+            _LOGGER.exception("Reloading config entry %s failed", entry.entry_id)
     failed = [e for e in entries if e.state is not ConfigEntryState.LOADED]
 
     if failed:
@@ -254,8 +289,32 @@ async def _async_reload_yaml(hass, call):
             "y" if len(failed) == 1 else "ies",
         )
         domain_data[YAML_CONF] = previous
+        still_broken = []
         for entry in failed:
-            await hass.config_entries.async_reload(entry.entry_id)
+            try:
+                await hass.config_entries.async_reload(entry.entry_id)
+            except Exception:
+                _LOGGER.exception(
+                    "Rollback reload of %s failed", entry.entry_id
+                )
+            if entry.state is not ConfigEntryState.LOADED:
+                still_broken.append(entry.entry_id)
+        if still_broken:
+            # The old config not coming back means something outside the config
+            # is wrong (the port is held by another process entirely). Say so;
+            # silently "rolling back" to a dead integration is worse than loud.
+            _LOGGER.error(
+                "Rollback did not restore %d config entr%s (%s). The "
+                "integration is not running — check that the port is free, "
+                "then reload again.",
+                len(still_broken),
+                "y" if len(still_broken) == 1 else "ies",
+                ", ".join(still_broken),
+            )
+        else:
+            _LOGGER.warning(
+                "Rolled back to the previous Crestron configuration."
+            )
         return
 
     _LOGGER.info(
@@ -300,7 +359,15 @@ async def async_setup_entry(hass, entry):
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop)
     )
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        # The server is already listening and the bridges are subscribed; a
+        # failed setup must not leave the port bound, or the next reload gets
+        # "address already in use" from our own orphan.
+        domain_data.pop(HUB_WRAPPER, None)
+        await hub.stop()
+        raise
     return True
 
 
@@ -373,9 +440,22 @@ class CrestronHub:
         }
 
     async def start(self):
+        """Bring up bridges + server, leaving nothing behind if it fails.
+
+        ``listen()`` fails for a reason entirely outside this config — the port
+        is already in use — and by then the template tracker is live. The
+        caller has no handle to stop it (nothing has been stored in hass.data
+        yet), so every failed setup or reload used to strand another tracker
+        subscribed to entity state changes for the lifetime of the process.
+        """
         self.to_bridge.start()
         self.from_bridge.start()
-        await self.hub.listen(self.port)
+        try:
+            await self.hub.listen(self.port)
+        except Exception:
+            self.from_bridge.stop()
+            self.to_bridge.stop()
+            raise
 
     async def stop(self):
         """Tear down: bridges first (remove callbacks/tracker), then server."""

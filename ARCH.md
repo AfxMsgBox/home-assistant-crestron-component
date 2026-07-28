@@ -115,7 +115,9 @@ accept ──► 发 0xFD ──► available=True ──► connect_callback()�
 
 按 join key 建 `Script`，注册精确 join 回调。脚本以 `hass.async_create_task` 后台执行，慢脚本不阻塞 XSIG 读循环；脚本异常被捕获记录。重复的 join key 会告警（后者仍然覆盖前者）。
 
-数字 join **只在真正的 `0→1` 跳变时触发**，靠 `_last_digital` 记录每根 join 的前值。仅判断 `value != "0"` 不是边沿检测：`0xFD` 会让对端把**每一根** join 的当前电平报一遍，于是每次连接（HA 重启、主控重启、TCP 断线重连）所有恰好为高的按键 join 都会执行脚本——场景被重放。因此**前值未知一律不算边沿**，连接后的首次上报只建立基线；代价是与连接同一瞬间的按键会漏掉一次，这是刻意选的安全方向。`stop()` 清空基线。
+数字 join **只在真正的 `0→1` 跳变时触发**，靠 `_last_digital` 记录每根 join 的前值。仅判断 `value != "0"` 不是边沿检测：`0xFD` 会让对端把**每一根** join 的当前电平报一遍，于是每次连接（HA 重启、主控重启、TCP 断线重连）所有恰好为高的按键 join 都会执行脚本——场景被重放。因此**前值未知一律不算边沿**，连接后的首次上报只建立基线；代价是与连接同一瞬间的按键会漏掉一次，这是刻意选的安全方向。
+
+基线必须跟着**每一次连接**清空，不只是 `stop()`：普通 TCP 重连不会拆掉这个 bridge，断线前记为 `0`、重连后全量同步报 `1` 就又是一次教科书式的假边沿。所以 `_join_change` 一收到 `available` 事件就 `clear()`——这也是 `register_callback` 无条件追加 `AVAILABLE_KEY` 的用处之一。
 
 ---
 
@@ -200,7 +202,7 @@ configuration.yaml: crestron: !include crestron.yaml
 
 ## 9. 运维面
 
-- `diagnostics.py` → `CrestronHub.diagnostics()`：连接状态 + 监听端口 + 对端 + **完整的三张 join 缓存** + 各平台配置实体数 + `join_usage`（在用 join 数与冲突清单）。因为协议不能查询单根 join，“这根 join 主控到底报没报过”只能从这里判断——**不在缓存里 = 从未回传**，问题在 SIMPL 侧。（TODO 已记：串行 join 尚未脱敏。）
+- `diagnostics.py` → `CrestronHub.diagnostics()`：连接状态 + 监听端口 + 对端 + 三张 join 缓存 + 各平台配置实体数 + `join_usage`（在用 join 数与冲突清单）。因为协议不能查询单根 join，“这根 join 主控到底报没报过”只能从这里判断——**不在缓存里 = 从未回传**，问题在 SIMPL 侧。**串行正文与对端地址默认脱敏**（保留 join 号与字符数），因为这个文件的用途就是外发排障；数字/模拟量只是电平和数值，原样保留。
 - **join 归属冲突检测**（`join_registry.py`）：转换器只能查它自己生成的表，手写 YAML 和 `to_joins` 撞车完全不过检。启动与 reload 时各跑一次，判据是读/写之分——**两个写者**同占一根 join 才算冲突；`to_joins`/`from_joins` 里重复的 join 键更严重（bridge 按 join 建字典，后一条直接顶掉前一条，模板或脚本根本不会运行）；**读者与写者共用是正常的**（sensor 用 `mode_joins` 镜像空调运行模式、binary_sensor 盯着继电器），必须保持静默否则整个检查就只是噪音。实测对本项目 264 个实体 / 750 根 join 的真实配置零误报。
 - `config_flow.py::CrestronOptionsFlow`：唯一的选项是勾选后触发 `resync_to_joins()`，不持久化任何配置。提交即关闭对话框（不勾选也关），避免出现无法退出的表单。
 - 日志分层：`custom_components.crestron`（连接/同步/越界/丢弃，INFO）与 `custom_components.crestron.crestron.frames`（逐帧，DEBUG，非常吵）。帧日志一律用惰性 `%s` 格式化——冷启动会有上千帧突发。
