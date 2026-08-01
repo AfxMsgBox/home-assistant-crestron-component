@@ -22,11 +22,17 @@ from homeassistant.helpers.script import Script
 from homeassistant.core import callback, Context
 from homeassistant.const import CONF_VALUE_TEMPLATE, CONF_ATTRIBUTE, CONF_ENTITY_ID
 
-from .const import CONF_JOIN, CONF_SCRIPT, CONF_TO_HUB, CONF_FROM_HUB, DOMAIN
+from .const import CONF_JOIN, CONF_SCRIPT, DOMAIN
 from .crestron import AVAILABLE_KEY
 from .value_coercion import resolve_join_write
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _join_label(hub, key):
+    """Use rich runtime metadata when available; keep simple test hubs usable."""
+    describe = getattr(hub, "describe_join_key", None)
+    return describe(key) if describe is not None else key
 
 
 def _build_template(hass, entity):
@@ -90,7 +96,7 @@ class ToJoinBridge:
         try:
             resolved = resolve_join_write(key, result)
         except ValueError:
-            _LOGGER.warning(f"Invalid join key: {key}")
+            _LOGGER.warning("Invalid join key: %s", _join_label(self.hub, key))
             return
         if resolved is None:
             return
@@ -122,7 +128,8 @@ class ToJoinBridge:
                     self._set_join(join, template.async_render())
                 except Exception:
                     _LOGGER.exception(
-                        "Failed to sync join %s to control system", join
+                        "Failed to sync join %s to control system",
+                        _join_label(self.hub, join),
                     )
 
 
@@ -143,7 +150,7 @@ class FromJoinBridge:
                 _LOGGER.warning(
                     "Duplicate from_joins entry for %s — only the last script "
                     "will run",
-                    join,
+                    _join_label(self.hub, join),
                 )
             self._scripts[join] = Script(
                 hass, entry[CONF_SCRIPT], f"Crestron {join}", DOMAIN
@@ -160,6 +167,22 @@ class FromJoinBridge:
             self.hub.remove_callback(self._join_change)
         # Drop edge history: after a reload the joins have to be observed again
         # before anything counts as a transition.
+        self._last_digital.clear()
+
+    def reset_connection_baseline(self):
+        """Forget every remembered level; called once per new connection.
+
+        Edge detection is only meaningful within one connection: the levels
+        recorded during the previous session say nothing about what the control
+        system is about to report now, and treating them as a baseline turns
+        the incoming full sync into a burst of phantom presses.
+
+        This is driven by the hub's connect callback rather than by
+        availability, because availability answers "are we online?" and is
+        deduplicated — when a new connection takes over one that had not
+        finished closing, it never changes value and no event is emitted at
+        all, leaving the stale baseline in place.
+        """
         self._last_digital.clear()
 
     def _is_rising_edge(self, cbtype, value):
@@ -182,20 +205,25 @@ class FromJoinBridge:
         return previous == "0" and value == "1"
 
     async def _join_change(self, cbtype, value):
-        # Availability flips bracket every connection, including a plain TCP
-        # reconnect that never tears this bridge down. The baseline has to go
-        # with them: a join recorded low before the drop and re-reported high
-        # by the reconnect's full sync would otherwise look like a real press,
-        # which is the exact false trigger the edge detection exists to stop.
+        # Availability is delivered to every subscriber; it is never a join and
+        # must never run a script. Losing the connection also invalidates the
+        # baseline — reset_connection_baseline() is the authoritative hook, but
+        # clearing here too means a drop can't leave stale levels behind even
+        # if no new connection follows.
         if cbtype == AVAILABLE_KEY:
-            self._last_digital.clear()
+            if value == "False":
+                self._last_digital.clear()
             return
         script = self._scripts.get(cbtype)
         if script is None:
             return
         if cbtype[:1] == "d" and not self._is_rising_edge(cbtype, value):
             return
-        _LOGGER.debug(f"Running script for {cbtype} = {value}")
+        _LOGGER.debug(
+            "Running script for %s = %s",
+            _join_label(self.hub, cbtype),
+            value,
+        )
         # Run in background so a slow script can't block XSIG dispatch / TCP read.
         self.hass.async_create_task(self._run_script(script, cbtype, value))
 
@@ -203,4 +231,7 @@ class FromJoinBridge:
         try:
             await script.async_run({"value": value}, self.context)
         except Exception:
-            _LOGGER.exception("from_joins script for %s failed", cbtype)
+            _LOGGER.exception(
+                "from_joins script for %s failed",
+                _join_label(self.hub, cbtype),
+            )

@@ -70,6 +70,9 @@ class FakeHub:
     def get_digital(self, join):
         return self.digital.get(join, False)
 
+    def has_digital(self, join):
+        return join in self.digital
+
     def set_digital(self, join, value):
         self.sent_digital.append((join, bool(value)))
 
@@ -87,6 +90,15 @@ def make_switch(hub):
     return switch_mod.CrestronSwitch(hub, {
         "name": "Outlet", "on_join": 147, "off_join": 148,
         "device_class": "outlet",
+    })
+
+
+def make_mode_switch(hub):
+    return switch_mod.CrestronSwitch(hub, {
+        "name": "AC power",
+        "on_join": 147,
+        "off_join": 148,
+        "mode_joins": {"制冷": 507, "制热": 508},
     })
 
 
@@ -164,6 +176,38 @@ class SwitchFeedbackTests(unittest.TestCase):
         )
         self.assertEqual(self.switch._attr_unique_id, "crestron_switch_d147")
         self.assertEqual(renamed._attr_unique_id, self.switch._attr_unique_id)
+
+
+class SwitchModeFeedbackTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = FakeHub()
+        self.switch = make_mode_switch(self.hub)
+
+    def test_partial_all_low_is_still_unknown(self):
+        """One low frame cannot prove off while another join is unreported."""
+        self.hub.digital[507] = False
+        self.switch._optimistic_state = True
+
+        self.assertIsNone(self.switch._feedback_is_on())
+        self.assertTrue(self.switch.is_on)
+        self.assertIsNone(self.switch.extra_state_attributes)
+
+    def test_high_join_is_definitive_before_full_sync_finishes(self):
+        self.hub.digital[508] = True
+
+        self.assertTrue(self.switch._feedback_is_on())
+        self.assertEqual(
+            self.switch.extra_state_attributes, {"mode": "制热"}
+        )
+
+    def test_all_reported_low_is_off(self):
+        self.hub.digital[507] = False
+        self.hub.digital[508] = False
+
+        self.assertFalse(self.switch._feedback_is_on())
+        self.assertEqual(
+            self.switch.extra_state_attributes, {"mode": "关闭"}
+        )
 
 
 if __name__ == "__main__":

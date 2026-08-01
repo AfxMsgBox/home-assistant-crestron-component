@@ -52,8 +52,7 @@ class JoinUidTests(unittest.TestCase):
     """
 
     def test_analog_wins_and_stays_bare(self):
-        # Bare number == the historical format, so entities that already
-        # resolved to an analog join keep their id (no migration).
+        # Analog joins stay bare; digital joins are explicitly namespaced.
         self.assertEqual(entity.join_uid(analog=(480,), digital=(704, 705)), "480")
 
     def test_digital_fallback_is_prefixed(self):

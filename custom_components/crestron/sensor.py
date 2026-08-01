@@ -32,9 +32,15 @@ def _finite(value):
     return value
 
 
-def _nonzero(value):
-    if value == 0:
-        raise vol.Invalid("divisor must not be zero")
+def _positive(value):
+    """Divisor must be > 0.
+
+    Zero divides by zero; a negative divisor would silently invert the sign of
+    every reading, which is a sign-flip bug far more often than an intent. Use
+    a template sensor if a reading really needs inverting.
+    """
+    if value <= 0:
+        raise vol.Invalid(f"divisor must be greater than 0; got {value}")
     return value
 
 
@@ -61,10 +67,11 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_DEVICE_CLASS): cv.string,
             vol.Optional(CONF_STATE_CLASS): cv.string,
             vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
-            # Finite and non-zero: 0 was silently rewritten to 1 in the
-            # constructor, and nan/inf produce a nan/0 sensor value.
+            # Finite and positive: 0 was silently rewritten to 1 in the
+            # constructor, nan/inf produce a nan/0 reading, and a negative
+            # divisor silently inverts the sign of every value.
             vol.Optional(CONF_DIVISOR, default=1): vol.All(
-                vol.Coerce(float), _finite, _nonzero
+                vol.Coerce(float), _finite, _positive
             ),
         },
         extra=vol.ALLOW_EXTRA,

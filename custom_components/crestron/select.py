@@ -57,17 +57,17 @@ class CrestronSelect(CrestronEntity, SelectEntity, RestoreEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        # If connected, trust live feedback; otherwise restore the pre-restart
-        # option instead of showing nothing until the control system next
-        # pushes a join (it sends only on change).
+        # Restore first, then upgrade to live feedback — the same order as
+        # switch and light. Choosing between the two on "is the connection up?"
+        # left a hole: connected but no option join reported yet meant neither
+        # branch produced a value and the entity showed nothing.
+        last = await self.async_get_last_state()
+        if last is not None and last.state in self._attr_options:
+            self._current = last.state
         if self._hub.is_available():
             fb = self._feedback_option()
             if fb is not None:
                 self._current = fb
-        else:
-            last = await self.async_get_last_state()
-            if last is not None and last.state in self._attr_options:
-                self._current = last.state
 
     def _feedback_option(self):
         for label, join in self._joins.items():

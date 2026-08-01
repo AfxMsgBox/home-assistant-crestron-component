@@ -35,10 +35,11 @@ def _sync_timing_enabled():
 
 
 class CrestronXsig:
-    def __init__(self):
+    def __init__(self, join_metadata=None):
         self._digital = {}
         self._analog = {}
         self._serial = {}
+        self._join_metadata = join_metadata or {}
         self._writer = None
         self._write_batch = None  # list of frames while batching, else None
         self._join_callbacks = {}
@@ -48,6 +49,17 @@ class CrestronXsig:
         self._connect_callback = None
         self._port = None
         self._peer = None  # str repr of the most-recent connection's peername
+
+    def describe_join_key(self, key):
+        """Return a log label with configured device/entity and field meaning."""
+        descriptions = self._join_metadata.get(key)
+        if not descriptions:
+            return f"{key} [not configured in YAML]"
+        return f"{key} [" + " | ".join(descriptions) + "]"
+
+    def describe_join(self, space, join):
+        """Describe a numbered join in one of the d/a/s signal spaces."""
+        return self.describe_join_key(f"{space}{join}")
 
     async def listen(self, port):
         """Start TCP XSIG server (non-blocking; returns after server is listening)."""
@@ -109,7 +121,14 @@ class CrestronXsig:
             await cb(cbtype, value)
         except Exception:
             _LOGGER.exception(
-                f"Crestron callback {cb!r} raised on {cbtype}={value!r}"
+                "Crestron callback %r raised on %s=%r",
+                cb,
+                (
+                    cbtype
+                    if cbtype == AVAILABLE_KEY
+                    else self.describe_join_key(cbtype)
+                ),
+                value,
             )
 
     async def _dispatch(self, cbtype, value):
@@ -146,25 +165,40 @@ class CrestronXsig:
         kind = frame.kind
         if kind == "digital":
             self._digital[frame.join] = bool(frame.value)
-            # Lazy %-formatting: on a 1000+ join cold-start sync this runs
-            # thousands of times in a burst; an f-string would build the
-            # message even when debug is disabled.
-            _FRAME_LOGGER.debug("Got Digital: %s = %s", frame.join, frame.value)
+            if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+                _FRAME_LOGGER.debug(
+                    "Got Digital: %s = %s",
+                    self.describe_join("d", frame.join),
+                    frame.value,
+                )
             await self._timed_dispatch(f"d{frame.join}", str(frame.value), stats)
         elif kind == "analog":
             self._analog[frame.join] = frame.value
-            _FRAME_LOGGER.debug("Got Analog: %s = %s", frame.join, frame.value)
+            if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+                _FRAME_LOGGER.debug(
+                    "Got Analog: %s = %s",
+                    self.describe_join("a", frame.join),
+                    frame.value,
+                )
             await self._timed_dispatch(f"a{frame.join}", str(frame.value), stats)
         elif kind == "serial":
             self._serial[frame.join] = frame.value
-            _FRAME_LOGGER.debug("Got String: %s = %s", frame.join, frame.value)
+            if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+                _FRAME_LOGGER.debug(
+                    "Got String: %s = %s",
+                    self.describe_join("s", frame.join),
+                    frame.value,
+                )
             await self._timed_dispatch(f"s{frame.join}", frame.value, stats)
         elif kind == "sync_all":
             _LOGGER.debug("Got update-all-joins request")
             if self._sync_all_joins_callback is not None:
                 await self._sync_all_joins_callback()
         elif kind == "bad_utf8":
-            _LOGGER.warning(f"Invalid UTF-8 on serial join {frame.join}")
+            _LOGGER.warning(
+                "Invalid UTF-8 on serial join %s",
+                self.describe_join("s", frame.join),
+            )
         elif kind == "unknown":
             if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
                 _FRAME_LOGGER.debug("Unknown Packet: %s", frame.value)
@@ -415,35 +449,58 @@ class CrestronXsig:
         """Send Analog Join to Crestron XSIG symbol."""
         if not 1 <= join <= ANALOG_JOIN_MAX:
             _LOGGER.warning(
-                f"Analog join {join} out of range (1..{ANALOG_JOIN_MAX})"
+                "Analog join %s out of range (1..%d)",
+                self.describe_join("a", join),
+                ANALOG_JOIN_MAX,
             )
             return
         self._write(encode_analog(join, value))
-        _FRAME_LOGGER.debug("Sending Analog: %s, %s", join, value)
+        if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+            _FRAME_LOGGER.debug(
+                "Sending Analog: %s = %s",
+                self.describe_join("a", join),
+                value,
+            )
 
     def set_digital(self, join, value):
         """Send Digital Join to Crestron XSIG symbol."""
         if not 1 <= join <= DIGITAL_JOIN_MAX:
             _LOGGER.warning(
-                f"Digital join {join} out of range (1..{DIGITAL_JOIN_MAX})"
+                "Digital join %s out of range (1..%d)",
+                self.describe_join("d", join),
+                DIGITAL_JOIN_MAX,
             )
             return
         self._write(encode_digital(join, value))
-        _FRAME_LOGGER.debug("Sending Digital: %s, %s", join, bool(value))
+        if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+            _FRAME_LOGGER.debug(
+                "Sending Digital: %s = %s",
+                self.describe_join("d", join),
+                bool(value),
+            )
 
     def set_serial(self, join, string):
         """Send String Join to Crestron XSIG symbol."""
         if not 1 <= join <= SERIAL_JOIN_MAX:
             _LOGGER.warning(
-                f"Serial join {join} out of range (1..{SERIAL_JOIN_MAX})"
+                "Serial join %s out of range (1..%d)",
+                self.describe_join("s", join),
+                SERIAL_JOIN_MAX,
             )
             return
         encoded = string.encode("utf-8")
         if len(encoded) > SERIAL_MAX_BYTES:
             _LOGGER.info(
-                f"Could not send. String too long ({len(encoded)} bytes > "
-                f"{SERIAL_MAX_BYTES})"
+                "Could not send %s. String too long (%d bytes > %d)",
+                self.describe_join("s", join),
+                len(encoded),
+                SERIAL_MAX_BYTES,
             )
             return
         self._write(encode_serial(join, encoded))
-        _FRAME_LOGGER.debug("Sending Serial: %s, %s", join, string)
+        if _FRAME_LOGGER.isEnabledFor(logging.DEBUG):
+            _FRAME_LOGGER.debug(
+                "Sending Serial: %s = %s",
+                self.describe_join("s", join),
+                string,
+            )

@@ -4,9 +4,13 @@ Only the pure row->entity builders and name de-duplication are tested; they
 need no real workbook.
 """
 
+import contextlib
+import io
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import xlsx_to_yaml as g  # noqa: E402
@@ -287,6 +291,76 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertEqual(errors, ["缺少必填 Join: 关, 停止"])
 
+    def test_build_report_has_exact_ignored_rows_and_all_errors(self):
+        sheets = {
+            "说明": [],
+            "灯光": [
+                {
+                    "楼层": "", "房间": "", "名称": "", "功能": "",
+                    "亮度": "", "色温": "", "开": "", "关": "",
+                    "_xlsx_row": 2,
+                },
+                light_row(_xlsx_row=3, 功能="//", 名称="示例"),
+                light_row(_xlsx_row=4, 名称="坏 Join", 亮度="a20"),
+                light_row(_xlsx_row=5, 名称="好灯", 亮度="20"),
+            ],
+        }
+        with patch.object(g, "parse_xlsx", return_value=sheets):
+            by_platform, errors, warnings, messages = (
+                g._build_from_workbook("input.xlsx")
+            )
+        self.assertEqual(errors, 1)
+        self.assertEqual(warnings, 0)
+        self.assertEqual(len(by_platform["light"]), 1)
+        report = "\n".join(messages)
+        self.assertIn("[error] 灯光!4: 亮度: 必须只填写十进制数字", report)
+        self.assertIn("ignored 2 empty/template row(s)", report)
+        self.assertIn("2 (empty row)", report)
+        self.assertIn("3 (template row", report)
+        self.assertIn("灯光: converted 1 entity row(s)", report)
+
+    def test_duplicate_name_rename_is_reported_with_source_row(self):
+        sheets = {
+            "灯光": [
+                light_row(_xlsx_row=8, 名称="灯", 亮度="20"),
+                light_row(_xlsx_row=9, 名称="灯", 亮度="21"),
+            ],
+        }
+        with patch.object(g, "parse_xlsx", return_value=sheets):
+            _entities, errors, warnings, messages = (
+                g._build_from_workbook("input.xlsx")
+            )
+        self.assertEqual(errors, 0)
+        self.assertEqual(warnings, 1)
+        self.assertIn(
+            "[warning] 灯光!9: duplicate entity name 'B2.车库 灯'; "
+            "renamed to 'B2.车库 灯 2'",
+            messages,
+        )
+
+    def test_header_anomalies_are_all_reported(self):
+        rows = g._SheetRows(
+            [],
+            headers=(
+                "序号", "楼层", "房间", "名称", "类型",
+                "开", "开", "位置", "", "停上",
+            ),
+        )
+        issues = g._header_issues("窗帘", rows)
+        text = "\n".join(f"{level}: {message}" for level, message in issues)
+        self.assertIn("error: duplicate column header(s): 开", text)
+        self.assertIn("error: missing required column header(s): 停止, 关", text)
+        self.assertIn("warning: blank column header(s) at column position(s): 9", text)
+        self.assertIn("warning: unknown column header(s) will be ignored: 停上", text)
+
+    def test_light_headers_must_support_at_least_one_control_layout(self):
+        rows = g._SheetRows([], headers=("序号", "楼层", "房间", "名称"))
+        issues = g._header_issues("灯光", rows)
+        self.assertTrue(any(
+            level == "error" and "cannot express a light control" in message
+            for level, message in issues
+        ))
+
 
 class EmitDomainTests(unittest.TestCase):
     def test_domain_yaml_structure(self):
@@ -315,6 +389,51 @@ class EmitDomainTests(unittest.TestCase):
         # nested dict (mode_joins) renders as a block
         self.assertIn("\n    mode_joins:\n", out)
         self.assertIn('\n      "制冷": 507', out)
+
+    def test_conversion_report_is_emitted_as_safe_yaml_comments(self):
+        report = [
+            "[info] 灯光: converted 1 entity row(s)",
+            "[warning] 窗帘!9: first line\nsecond line",
+        ]
+        out = g.emit_domain(
+            {"light": [{"name": "灯", "brightness_join": 1}]},
+            "x.xlsx",
+            report,
+        )
+        self.assertIn("# [info] 灯光: converted 1 entity row(s)", out)
+        self.assertIn("# [warning] 窗帘!9: first line", out)
+        self.assertIn("# second line", out)
+        try:
+            import yaml
+        except ImportError:
+            return
+        parsed = yaml.safe_load(out)
+        self.assertEqual(parsed["light"][0]["brightness_join"], 1)
+
+    def test_generate_prints_and_embeds_the_same_report(self):
+        built = (
+            {"light": [{"name": "灯", "brightness_join": 1}]},
+            0,
+            1,
+            ["[warning] 灯光!7: example warning"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "crestron.yaml")
+            stdout = io.StringIO()
+            with patch.object(g, "_build_from_workbook", return_value=built):
+                with contextlib.redirect_stdout(stdout):
+                    g.generate("input.xlsx", output)
+            with open(output, encoding="utf-8") as stream:
+                generated = stream.read()
+        self.assertIn("[warning] 灯光!7: example warning", stdout.getvalue())
+        self.assertIn("# [warning] 灯光!7: example warning", generated)
+        self.assertIn("# wrote ", generated)
+        self.assertIn("errors:0, warnings:1", generated)
+        self.assertIn("# 下一步（如何使用这个配置文件）：", generated)
+        self.assertIn(
+            "#   1. 把生成的 crestron.yaml 复制到 Home Assistant 配置目录",
+            generated,
+        )
 
 
 class ScalarEscapingTests(unittest.TestCase):

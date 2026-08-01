@@ -44,9 +44,7 @@ def join_uid(analog=(), digital=()):
 
     ``analog`` and ``digital`` are the candidate joins in preference order.
     Analog candidates keep the bare number, digital ones get a ``d`` prefix;
-    that is enough to separate the two spaces, and it keeps ids stable for
-    entities that were already resolving to an analog join (the common case),
-    so no entity migration is needed.
+    that is enough to separate the two spaces.
 
     Returns ``None`` if no candidate is configured — callers should not let
     that happen (their schemas require at least one join).

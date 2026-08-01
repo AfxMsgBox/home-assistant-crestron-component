@@ -124,7 +124,26 @@ class XsigServerTests(unittest.IsolatedAsyncioTestCase):
         frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
         with self.assertLogs(xsig._FRAME_LOGGER.name, level="DEBUG") as logs:
             await self.hub._handle_frame(frame, None)
-        self.assertIn("Got Analog: 3 = 1000", "\n".join(logs.output))
+        self.assertIn(
+            "Got Analog: a3 [not configured in YAML] = 1000",
+            "\n".join(logs.output),
+        )
+
+    async def test_frame_log_includes_all_configured_join_meanings(self):
+        self.hub._join_metadata["a3"] = (
+            "climate '2F.休闲厅 空调': 当前温度 "
+            "(reg_temp_join, feedback/read)",
+            "sensor '2F.休闲厅 室温': 传感器数值 "
+            "(value_join, feedback/read)",
+        )
+        frame = types.SimpleNamespace(kind="analog", join=3, value=1000)
+        with self.assertLogs(xsig._FRAME_LOGGER.name, level="DEBUG") as logs:
+            await self.hub._handle_frame(frame, None)
+        text = "\n".join(logs.output)
+        self.assertIn("2F.休闲厅 空调", text)
+        self.assertIn("当前温度", text)
+        self.assertIn("2F.休闲厅 室温", text)
+        self.assertIn("传感器数值", text)
 
     async def test_main_info_does_not_emit_frame_debug_logs(self):
         frame = types.SimpleNamespace(kind="analog", join=3, value=1000)

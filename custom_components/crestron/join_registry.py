@@ -22,7 +22,7 @@ Kept free of Home Assistant imports so it can be unit tested directly.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, NamedTuple, Optional
+from typing import Any, Iterable, NamedTuple
 
 # Fields that address the *analog* signal space. Everything else ending in
 # `_join` is digital. The two spaces are unrelated, so a1 and d1 never clash.
@@ -76,6 +76,54 @@ _READ_FIELDS: dict[str, frozenset[str]] = {
 # Fields holding a {label: join} map rather than a bare join number.
 _MAP_FIELDS = frozenset({"mode_joins", "options"})
 
+_FIELD_MEANINGS = {
+    "brightness_join": "灯光亮度",
+    "color_temp_join": "灯光色温",
+    "on_join": "开启控制/反馈",
+    "off_join": "关闭控制/反馈",
+    "switch_join": "开关控制/反馈",
+    "state_join": "开关状态反馈",
+    "open_join": "打开控制",
+    "close_join": "关闭控制",
+    "stop_join": "停止控制",
+    "pos_join": "位置控制/反馈",
+    "is_opening_join": "正在打开反馈",
+    "is_closing_join": "正在关闭反馈",
+    "is_closed_join": "已关闭反馈",
+    "set_temp_join": "目标温度",
+    "reg_temp_join": "当前温度",
+    "mode_cool_join": "制冷模式",
+    "mode_heat_join": "制热模式",
+    "mode_fan_join": "通风模式",
+    "mode_dry_join": "除湿模式",
+    "fan_low_join": "低速风",
+    "fan_med_join": "中速风",
+    "fan_high_join": "高速风",
+    "fan_auto_join": "自动风速",
+    "mute_join": "静音",
+    "volume_join": "音量",
+    "source_number_join": "音源编号/开关机",
+    "is_on_join": "开关状态反馈",
+    "to_joins": "HA 状态下发到快思聪",
+    "from_joins": "快思聪触发 HA 脚本",
+}
+
+_PLATFORM_VALUE_MEANINGS = {
+    "number": "可读写数值",
+    "sensor": "传感器数值",
+}
+
+
+def _field_meaning(platform: str, field: str) -> str:
+    """Human meaning for one YAML join field."""
+    if field.startswith("mode_joins["):
+        return f"模式反馈 {field[len('mode_joins['):-1]}"
+    if field.startswith("options["):
+        return f"选项 {field[len('options['):-1]}"
+    if field == "value_join":
+        return _PLATFORM_VALUE_MEANINGS.get(platform, "数值")
+    return _FIELD_MEANINGS.get(field, field)
+
 
 class Usage(NamedTuple):
     """One claim on one join."""
@@ -84,16 +132,28 @@ class Usage(NamedTuple):
     join: int
     owner: str  # human-readable "platform 'name'"
     field: str
+    meaning: str
     writes: bool
 
     def describe(self) -> str:
-        return f"{self.owner} ({self.field}, {'write' if self.writes else 'read'})"
+        direction = "control/write" if self.writes else "feedback/read"
+        return (
+            f"{self.owner}: {self.meaning} "
+            f"({self.field}, {direction})"
+        )
 
 
 def _entity_usages(platform: str, config: dict[str, Any]) -> Iterable[Usage]:
     writes = _WRITE_FIELDS.get(platform, frozenset())
     reads = _READ_FIELDS.get(platform, frozenset())
-    owner = f"{platform} {config.get('name', '<unnamed>')!r}"
+    entity_name = config.get("name", "<unnamed>")
+    device_name = config.get("device_name")
+    if device_name and device_name != entity_name:
+        owner = (
+            f"{platform} device {device_name!r}, entity {entity_name!r}"
+        )
+    else:
+        owner = f"{platform} {entity_name!r}"
     for field in sorted(writes | reads):
         value = config.get(field)
         if value is None:
@@ -102,14 +162,29 @@ def _entity_usages(platform: str, config: dict[str, Any]) -> Iterable[Usage]:
         if field in _MAP_FIELDS:
             if not isinstance(value, dict):
                 continue
-            for join in value.values():
+            for label, join in value.items():
                 if isinstance(join, int):
-                    yield Usage("d", join, owner, field, is_write)
+                    detailed_field = f"{field}[{label}]"
+                    yield Usage(
+                        "d",
+                        join,
+                        owner,
+                        detailed_field,
+                        _field_meaning(platform, detailed_field),
+                        is_write,
+                    )
             continue
         if not isinstance(value, int):
             continue
         space = "a" if field in _ANALOG_FIELDS else "d"
-        yield Usage(space, value, owner, field, is_write)
+        yield Usage(
+            space,
+            value,
+            owner,
+            field,
+            _field_meaning(platform, field),
+            is_write,
+        )
 
 
 def _bridge_usages(
@@ -123,7 +198,20 @@ def _bridge_usages(
         space, number = key[:1], key[1:]
         if space not in ("d", "a", "s") or not number.isdigit():
             continue
-        yield Usage(space, int(number), f"{label}[{index}]", "join", writes)
+        source = entry.get("entity_id")
+        if source is None:
+            source = "value_template" if "value_template" in entry else None
+        owner = f"{label}[{index}]"
+        if source:
+            owner += f" {source!r}"
+        yield Usage(
+            space,
+            int(number),
+            owner,
+            label,
+            _field_meaning(label, label),
+            writes,
+        )
 
 
 def collect_join_usage(
@@ -183,4 +271,17 @@ def usage_summary(yaml_config: dict[str, Any]) -> dict[str, Any]:
     return {
         "joins_in_use": len(usage),
         "conflicts": find_conflicts(yaml_config),
+    }
+
+
+def build_join_metadata(yaml_config: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Build runtime log descriptions keyed by XSIG key (``a430``/``d5``).
+
+    A join may legitimately have several readers plus one writer, so every
+    claim is retained rather than choosing an arbitrary "owner".
+    """
+    usage = collect_join_usage(yaml_config)
+    return {
+        f"{space}{join}": tuple(claim.describe() for claim in claims)
+        for (space, join), claims in usage.items()
     }

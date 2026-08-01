@@ -1,7 +1,7 @@
 """Platform for Crestron Number (e.g. AC temperature setpoint) integration."""
 
+from decimal import Decimal, InvalidOperation
 import logging
-import math
 
 import voluptuous as vol
 
@@ -23,13 +23,21 @@ from .unique_ids import number_unique_id
 _LOGGER = logging.getLogger(__name__)
 
 
+def _whole_number(value):
+    """Return an integer without silently truncating a fractional value."""
+    if isinstance(value, bool):
+        raise vol.Invalid(f"value must be a whole number; got {value!r}")
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as err:
+        raise vol.Invalid(f"value must be a whole number; got {value!r}") from err
+    if not number.is_finite() or number != number.to_integral_value():
+        raise vol.Invalid(f"value must be a whole number; got {value!r}")
+    return int(number)
+
+
 def _require_usable_range(config):
     """min < max and step > 0; otherwise the slider is unusable or divides by 0."""
-    # Every comparison against nan is False, so nan would sail through the
-    # ordering checks below and reach Home Assistant as a bound.
-    for key in (CONF_MIN, CONF_MAX, CONF_STEP):
-        if not math.isfinite(config[key]):
-            raise vol.Invalid(f"{key} must be a finite number; got {config[key]}")
     if config[CONF_MIN] >= config[CONF_MAX]:
         raise vol.Invalid(
             f"min ({config[CONF_MIN]}) must be less than max ({config[CONF_MAX]})"
@@ -44,9 +52,9 @@ PLATFORM_SCHEMA = vol.All(
         {
             vol.Required(CONF_NAME): cv.string,
             vol.Required(CONF_VALUE_JOIN): analog_join,
-            vol.Optional(CONF_MIN, default=16): vol.Coerce(float),
-            vol.Optional(CONF_MAX, default=30): vol.Coerce(float),
-            vol.Optional(CONF_STEP, default=1): vol.Coerce(float),
+            vol.Optional(CONF_MIN, default=16): _whole_number,
+            vol.Optional(CONF_MAX, default=30): _whole_number,
+            vol.Optional(CONF_STEP, default=1): _whole_number,
             vol.Optional(CONF_DEVICE_CLASS): cv.string,
             vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
         },
@@ -81,26 +89,32 @@ class CrestronNumber(CrestronEntity, NumberEntity, RestoreEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        # If connected, trust live feedback; otherwise restore the pre-restart
-        # value instead of showing 0/unknown until the control system next
-        # pushes the analog join (it sends only on change). Treat 0 as "not yet
-        # known" so the setpoint never briefly shows below its min (e.g. 16).
-        if self._hub.is_available():
-            v = self._hub.get_analog(self._join)
-            if v:
-                self._value = v
-        else:
-            last = await self.async_get_last_state()
-            if last is not None:
-                try:
-                    self._value = float(last.state)
-                except (TypeError, ValueError):
-                    pass
+        # Restore first, then upgrade to live feedback — the same order as
+        # switch and light. Choosing between the two on "is the connection up?"
+        # left a hole: connected but this particular join not yet reported
+        # meant neither branch produced a value and the entity showed unknown,
+        # even though the pre-restart value was sitting right there.
+        last = await self.async_get_last_state()
+        if last is not None:
+            try:
+                restored = _whole_number(last.state)
+                if (
+                    self._attr_native_min_value
+                    <= restored
+                    <= self._attr_native_max_value
+                ):
+                    self._value = restored
+            except vol.Invalid:
+                pass
+        # Treat an unreported join as unknown rather than 0, so the setpoint
+        # never briefly shows below its min (e.g. 16). Once it has actually
+        # been reported, 0 is a real value and must not be swallowed.
+        if self._hub.is_available() and self._hub.has_analog(self._join):
+            self._value = self._hub.get_analog(self._join)
 
     async def process_callback(self, cbtype, value):
-        v = self._hub.get_analog(self._join)
-        if v:
-            self._value = v
+        if self._hub.has_analog(self._join):
+            self._value = self._hub.get_analog(self._join)
         self._schedule_write()
 
     @property
@@ -108,6 +122,21 @@ class CrestronNumber(CrestronEntity, NumberEntity, RestoreEntity):
         return self._value
 
     async def async_set_native_value(self, value):
+        try:
+            value = _whole_number(value)
+        except vol.Invalid as err:
+            raise ValueError(
+                f"Crestron analog joins only support whole numbers; got {value!r}"
+            ) from err
+        if not (
+            self._attr_native_min_value
+            <= value
+            <= self._attr_native_max_value
+        ):
+            raise ValueError(
+                f"value {value} is outside "
+                f"{self._attr_native_min_value}..{self._attr_native_max_value}"
+            )
         self._value = value
         self.async_write_ha_state()
-        self._hub.set_analog(self._join, int(value))
+        self._hub.set_analog(self._join, value)

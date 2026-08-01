@@ -129,13 +129,8 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
         (制冷/制热/…): the unit is on iff one of them is asserted.
         """
         if self._mode_joins:
-            if any(self._hub.get_digital(j) for j in self._mode_joins.values()):
-                return True
-            # All-low only means "off" once every mode join has been reported;
-            # mid-sync it just means the high one hasn't arrived yet.
-            if all(self._hub.has_digital(j) for j in self._mode_joins.values()):
-                return False
-            return None
+            is_on, _mode = self._mode_feedback()
+            return is_on
         if self._state_join is not None:
             # Unreported = unknown, so the restored/optimistic state stands.
             if not self._hub.has_digital(self._state_join):
@@ -147,6 +142,21 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
             return self._hub.get_digital(self._switch_join)
         # Pulse mode can still carry feedback on the command joins themselves.
         return paired_feedback(self._hub, self._on_join, self._off_join)
+
+    def _mode_feedback(self):
+        """Return ``(is_on, label)`` from mode joins.
+
+        A high join is definitive even while the rest of the initial sync is
+        still arriving. All-low is definitive only after every configured join
+        has been reported; before that both the switch state and its ``mode``
+        attribute must remain unknown/restored rather than claiming "关闭".
+        """
+        for label, join in self._mode_joins.items():
+            if self._hub.get_digital(join):
+                return True, label
+        if all(self._hub.has_digital(j) for j in self._mode_joins.values()):
+            return False, "关闭"
+        return None, None
 
     async def process_callback(self, cbtype, value):
         # Reconcile with CP4N feedback, including feedback returned on the same
@@ -167,10 +177,10 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
     def extra_state_attributes(self):
         if not self._mode_joins:
             return None
-        for label, join in self._mode_joins.items():
-            if self._hub.get_digital(join):
-                return {"mode": label}
-        return {"mode": "关闭"}
+        is_on, mode = self._mode_feedback()
+        if is_on is None:
+            return None
+        return {"mode": mode}
 
     async def _pulse(self, join):
         await pulse_digital(self._hub, self._pulse_lock, join)

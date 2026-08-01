@@ -6,6 +6,7 @@ to command it (and a unique_id ending in "None"). The xlsx converter never
 emits these, but hand-written YAML and `crestron.reload` both can.
 """
 
+import asyncio
 import sys
 import types
 import unittest
@@ -188,6 +189,13 @@ class NumberRangeTests(unittest.TestCase):
         self.assertLess(cfg["min"], cfg["max"])
         self.assertGreater(cfg["step"], 0)
 
+    def test_fractional_values_rejected(self):
+        for key in ("min", "max", "step"):
+            with self.assertRaises(vol.Invalid):
+                number.PLATFORM_SCHEMA(
+                    {"name": "n", "value_join": 1, key: 0.5}
+                )
+
 
 class NonFiniteTests(unittest.TestCase):
     """nan compares False against everything, so it slips past range checks."""
@@ -200,9 +208,10 @@ class NonFiniteTests(unittest.TestCase):
                         {"name": "n", "value_join": 1, key: bad}
                     )
 
-    def test_sensor_divisor_must_be_finite_and_nonzero(self):
+    def test_sensor_divisor_must_be_finite_and_positive(self):
         base = {"name": "s", "value_join": 1}
-        for bad in (0, float("nan"), float("inf")):
+        # A negative divisor would silently invert every reading's sign.
+        for bad in (0, -10, float("nan"), float("inf")):
             with self.assertRaises(vol.Invalid):
                 sensor.PLATFORM_SCHEMA({**base, "divisor": bad})
 
@@ -213,15 +222,117 @@ class NonFiniteTests(unittest.TestCase):
 
 
 class MediaSourceNumberTests(unittest.TestCase):
+    BASE = {
+        "name": "音箱", "mute_join": 27, "volume_join": 19,
+        "source_number_join": 13,
+    }
+
     def test_source_zero_rejected(self):
         """0 is this component's "off" value: such a source can never turn on."""
-        base = {
-            "name": "音箱", "mute_join": 27, "volume_join": 19,
-            "source_number_join": 13,
-        }
         with self.assertRaises(vol.Invalid):
-            media_player.PLATFORM_SCHEMA({**base, "sources": {0: "HDMI"}})
-        media_player.PLATFORM_SCHEMA({**base, "sources": {1: "HDMI"}})
+            media_player.PLATFORM_SCHEMA({**self.BASE, "sources": {0: "HDMI"}})
+        media_player.PLATFORM_SCHEMA({**self.BASE, "sources": {1: "HDMI"}})
+
+    def test_bool_and_float_source_numbers_rejected(self):
+        """Coerce(int) mapped True->1 and 1.9->1, colliding with a real source."""
+        for bad in (True, False, 1.9, "1.9", "abc"):
+            with self.assertRaises(vol.Invalid):
+                media_player.PLATFORM_SCHEMA(
+                    {**self.BASE, "sources": {bad: "HDMI"}}
+                )
+
+    def test_decimal_string_source_number_accepted(self):
+        """YAML quoting is easy to do by accident."""
+        got = media_player.PLATFORM_SCHEMA(
+            {**self.BASE, "sources": {"2": "Roku"}}
+        )["sources"]
+        self.assertEqual(got, {2: "Roku"})
+
+    def test_unicode_digits_rejected_as_vol_invalid(self):
+        with self.assertRaises(vol.Invalid):
+            media_player.PLATFORM_SCHEMA(
+                {**self.BASE, "sources": {"²": "Roku"}}
+            )
+
+    def test_normalized_source_numbers_must_be_unique(self):
+        with self.assertRaises(vol.Invalid):
+            media_player.PLATFORM_SCHEMA(
+                {**self.BASE, "sources": {"1": "TV", 1: "Roku"}}
+            )
+
+    def test_source_display_names_must_be_unique(self):
+        with self.assertRaises(vol.Invalid):
+            media_player.PLATFORM_SCHEMA(
+                {**self.BASE, "sources": {1: "TV", 2: "TV"}}
+            )
+
+
+class NumberBehaviourTests(unittest.TestCase):
+    class Hub:
+        def __init__(self):
+            self.analog = {}
+            self.sent = []
+
+        def is_available(self):
+            return True
+
+        def has_analog(self, join):
+            return join in self.analog
+
+        def get_analog(self, join):
+            return self.analog.get(join, 0)
+
+        def set_analog(self, join, value):
+            self.sent.append((join, value))
+
+        def register_callback(self, callback, joins):
+            pass
+
+        def remove_callback(self, callback):
+            pass
+
+    def _entity(self, **overrides):
+        config = number.PLATFORM_SCHEMA(
+            {
+                "name": "设定值",
+                "value_join": 1,
+                "min": 0,
+                "max": 30,
+                **overrides,
+            }
+        )
+        hub = self.Hub()
+        entity = number.CrestronNumber(hub, config)
+        entity.async_write_ha_state = lambda: None
+        return hub, entity
+
+    def test_reported_zero_is_not_ignored(self):
+        hub, entity = self._entity()
+        hub.analog[1] = 0
+
+        async def no_last_state():
+            return None
+
+        entity.async_get_last_state = no_last_state
+        asyncio.run(entity.async_added_to_hass())
+        self.assertEqual(entity.native_value, 0)
+
+    def test_restore_ignores_value_outside_configured_range(self):
+        hub, entity = self._entity(min=16)
+
+        async def old_out_of_range_state():
+            return types.SimpleNamespace(state="0")
+
+        entity.async_get_last_state = old_out_of_range_state
+        asyncio.run(entity.async_added_to_hass())
+        self.assertIsNone(entity.native_value)
+
+    def test_fractional_command_is_rejected_without_writing(self):
+        hub, entity = self._entity()
+        with self.assertRaises(ValueError):
+            asyncio.run(entity.async_set_native_value(20.5))
+        self.assertEqual(hub.sent, [])
+        self.assertIsNone(entity.native_value)
 
 
 class JoinNumberTests(unittest.TestCase):
