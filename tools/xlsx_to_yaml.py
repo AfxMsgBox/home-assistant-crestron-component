@@ -32,6 +32,14 @@ class WorkbookValidationError(ValueError):
     """Raised when validation errors make partial YAML unsafe to write."""
 
 
+class _SheetRows(list):
+    """Rows plus the original header cells needed for typo diagnostics."""
+
+    def __init__(self, rows=(), headers=()):
+        super().__init__(rows)
+        self.headers = tuple(headers)
+
+
 # --------------------------------------------------------------------------- #
 # xlsx parsing (stdlib only)
 # --------------------------------------------------------------------------- #
@@ -94,7 +102,7 @@ def _read_sheet(z, path, shared):
             cells[ci] = val.strip()
         grid.append([cells.get(i, "") for i in range(maxc + 1)])
     if not grid:
-        return []
+        return _SheetRows()
     header = grid[0]
     rows = []
     for excel_row, raw in enumerate(grid[1:], start=2):
@@ -104,7 +112,7 @@ def _read_sheet(z, path, shared):
         }
         parsed["_xlsx_row"] = excel_row
         rows.append(parsed)
-    return rows
+    return _SheetRows(rows, header)
 
 
 # --------------------------------------------------------------------------- #
@@ -346,7 +354,7 @@ SHEET_BUILDERS = {
 # --------------------------------------------------------------------------- #
 # name de-duplication  (pure)
 # --------------------------------------------------------------------------- #
-def dedup_names(entities):
+def dedup_names(entities, on_rename=None):
     """In-place: the 2nd, 3rd... entity sharing a name get ' 2', ' 3' suffixes
     (matches the hand-written configuration.yaml convention)."""
     seen = {}
@@ -360,6 +368,8 @@ def dedup_names(entities):
             # still shows several devices with an identical device name.
             if ent.get("device_name") == base:
                 ent["device_name"] = renamed
+            if on_rename is not None:
+                on_rename(ent, base, renamed)
     return entities
 
 
@@ -382,6 +392,109 @@ _ANALOG_COLUMNS = {
     "窗帘": ("位置",),
     "空调": ("温度", "室温"),
 }
+_EXPECTED_COLUMNS = {
+    "灯光": (
+        "序号", "楼层", "房间", "名称", "功能",
+        "亮度", "色温", "开", "关",
+    ),
+    "插座": ("序号", "楼层", "房间", "名称", "开", "关"),
+    "窗帘": (
+        "序号", "楼层", "房间", "名称", "类型",
+        "开", "关", "停止", "位置",
+    ),
+    "空调": (
+        "序号", "楼层", "房间",
+        "开", "关", "制冷", "制热", "通风", "除湿",
+        "低速", "中速", "高速", "自动", "温度", "室温", "风速值",
+    ),
+}
+_REQUIRED_COLUMNS = {
+    "灯光": (),
+    "插座": ("开", "关"),
+    "窗帘": ("开", "关", "停止"),
+    "空调": ("开", "关"),
+}
+
+
+def _header_issues(sheet_name, rows):
+    """Return ``(severity, message)`` for every detectable header anomaly.
+
+    Tests and callers may pass an ordinary list of row dictionaries; only rows
+    produced by parse_xlsx carry the original headers, so those legacy/pure
+    inputs intentionally skip this workbook-level check.
+    """
+    original = getattr(rows, "headers", None)
+    if original is None:
+        return []
+    headers = [str(value or "").strip() for value in original]
+    if not headers:
+        return [("error", "sheet is empty or has no header row")]
+
+    issues = []
+    nonblank = [header for header in headers if header]
+    duplicates = sorted({
+        header for header in nonblank if nonblank.count(header) > 1
+    })
+    if duplicates:
+        issues.append(
+            ("error", f"duplicate column header(s): {', '.join(duplicates)}")
+        )
+    if "" in headers:
+        positions = [
+            str(index + 1) for index, header in enumerate(headers) if not header
+        ]
+        issues.append(
+            (
+                "warning",
+                "blank column header(s) at column position(s): "
+                + ", ".join(positions),
+            )
+        )
+
+    present = set(nonblank)
+    expected = set(_EXPECTED_COLUMNS[sheet_name])
+    required = set(_REQUIRED_COLUMNS[sheet_name])
+    missing_required = sorted(required - present)
+    if missing_required:
+        issues.append(
+            (
+                "error",
+                "missing required column header(s): "
+                + ", ".join(missing_required),
+            )
+        )
+    missing_optional = sorted((expected - required) - present)
+    if missing_optional:
+        issues.append(
+            (
+                "warning",
+                "missing recognized column header(s); those fields will not "
+                "be converted: " + ", ".join(missing_optional),
+            )
+        )
+    unknown = sorted(present - expected)
+    if unknown:
+        issues.append(
+            (
+                "warning",
+                "unknown column header(s) will be ignored: "
+                + ", ".join(unknown),
+            )
+        )
+
+    # A light has two alternative control layouts rather than globally
+    # required columns. Reject a sheet whose headers cannot express either.
+    if sheet_name == "灯光" and (
+        "亮度" not in present and not {"开", "关"} <= present
+    ):
+        issues.append(
+            (
+                "error",
+                "headers cannot express a light control: provide 亮度, "
+                "or both 开 and 关",
+            )
+        )
+    return issues
 
 
 def _join_cell_error(value, maximum):
@@ -440,18 +553,25 @@ def _row_errors(sheet_name, row):
     return errors
 
 
-def _is_placeholder_row(sheet_name, row):
-    """Return True for genuinely empty/template rows that need no warning."""
+def _placeholder_reason(sheet_name, row):
+    """Why a row is intentionally ignored, or None when it needs conversion."""
     relevant = set(_DIGITAL_COLUMNS[sheet_name]) | set(_ANALOG_COLUMNS[sheet_name])
     relevant |= {"楼层", "房间", "名称"}
     values = [str(row.get(column) or "").strip() for column in relevant]
     if not any(values):
-        return True
-    return str(row.get("功能") or "").strip() == "//" and not any(
+        return "empty row"
+    if str(row.get("功能") or "").strip() == "//" and not any(
         str(row.get(column) or "").strip()
         for column in set(_DIGITAL_COLUMNS[sheet_name])
         | set(_ANALOG_COLUMNS[sheet_name])
-    )
+    ):
+        return "template row (功能='//' and all Join cells are blank)"
+    return None
+
+
+def _is_placeholder_row(sheet_name, row):
+    """Compatibility wrapper used by pure row tests."""
+    return _placeholder_reason(sheet_name, row) is not None
 
 
 def _entity_joins(entity):
@@ -470,34 +590,48 @@ def _entity_joins(entity):
 
 
 def _build_from_workbook(xlsx_path):
-    """Parse and validate a workbook, returning entities and issue counts."""
+    """Parse and validate a workbook, returning entities, counts and messages."""
     sheets = parse_xlsx(xlsx_path)
     by_platform = {}
     errors = 0
     warnings = 0
     seen_joins = {}
+    entity_sources = {}
+    messages = []
+
+    def report(message):
+        messages.append(" ".join(str(message).split()))
 
     for sheet_name, rows in sheets.items():
         if sheet_name in _INSTRUCTION_SHEETS:
-            print(f"  [info] ignored instruction sheet {sheet_name!r}")
+            report(f"[info] ignored instruction sheet {sheet_name!r}")
             continue
         builder = SHEET_BUILDERS.get(sheet_name)
         if builder is None:
             warnings += 1
-            print(f"  [warning] ignored unknown sheet {sheet_name!r}")
+            report(f"[warning] ignored unknown sheet {sheet_name!r}")
             continue
 
-        placeholders = 0
+        for severity, message in _header_issues(sheet_name, rows):
+            if severity == "error":
+                errors += 1
+            else:
+                warnings += 1
+            report(f"[{severity}] {sheet_name}: {message}")
+
+        placeholders = []
+        converted = 0
         for row in rows:
             row_number = row.get("_xlsx_row", "?")
-            if _is_placeholder_row(sheet_name, row):
-                placeholders += 1
+            placeholder_reason = _placeholder_reason(sheet_name, row)
+            if placeholder_reason is not None:
+                placeholders.append((row_number, placeholder_reason))
                 continue
             row_errors = _row_errors(sheet_name, row)
             if row_errors:
                 errors += 1
-                print(
-                    f"  [error] {sheet_name}!{row_number}: "
+                report(
+                    f"[error] {sheet_name}!{row_number}: "
                     + "; ".join(row_errors)
                 )
                 continue
@@ -506,40 +640,71 @@ def _build_from_workbook(xlsx_path):
                 raw_type = str(row.get("类型") or "").strip()
                 if raw_type and raw_type.lower() not in SUPPORTED_COVER_TYPES:
                     warnings += 1
-                    print(
-                        f"  [warning] {sheet_name}!{row_number}: unknown type "
+                    report(
+                        f"[warning] {sheet_name}!{row_number}: unknown type "
                         f"{raw_type!r}; using curtain"
+                    )
+            if sheet_name == "空调":
+                fan_value = str(row.get("风速值") or "").strip()
+                if fan_value:
+                    report(
+                        f"[info] {sheet_name}!{row_number}: 风速值 "
+                        f"{fan_value!r} is intentionally ignored; digital "
+                        "低速/中速/高速/自动 Join columns are used"
                     )
 
             result = builder(row)
             if not result:
                 errors += 1
-                print(
-                    f"  [error] {sheet_name}!{row_number}: row could not be converted"
+                report(
+                    f"[error] {sheet_name}!{row_number}: "
+                    "row could not be converted"
                 )
                 continue
             if isinstance(result, tuple):
                 result = [result]
             for platform, entity in result:
+                entity_sources[id(entity)] = (sheet_name, row_number)
                 by_platform.setdefault(platform, []).append(entity)
+                converted += 1
                 for space, join, field in _entity_joins(entity):
                     key = (space, join)
                     owner = seen_joins.get(key)
                     current = f"{sheet_name}!{row_number} {entity['name']} ({field})"
                     if owner is not None:
                         warnings += 1
-                        print(
-                            f"  [warning] duplicate {space} join {join}: "
+                        report(
+                            f"[warning] duplicate {space} join {join}: "
                             f"{owner}; {current}"
                         )
                     else:
                         seen_joins[key] = current
         if placeholders:
-            print(f"  [{sheet_name}] ignored {placeholders} empty/template row(s)")
+            details = ", ".join(
+                f"{row_number} ({reason})"
+                for row_number, reason in placeholders
+            )
+            report(
+                f"[info] {sheet_name}: ignored {len(placeholders)} "
+                f"empty/template row(s): {details}"
+            )
+        report(
+            f"[info] {sheet_name}: converted {converted} entity row(s)"
+        )
+
+    def renamed(entity, old_name, new_name):
+        nonlocal warnings
+        warnings += 1
+        source_sheet, source_row = entity_sources.get(id(entity), ("?", "?"))
+        report(
+            f"[warning] {source_sheet}!{source_row}: "
+            f"duplicate entity name {old_name!r}; "
+            f"renamed to {new_name!r}"
+        )
 
     for entities in by_platform.values():
-        dedup_names(entities)
-    return by_platform, errors, warnings
+        dedup_names(entities, renamed)
+    return by_platform, errors, warnings, messages
 
 
 # --------------------------------------------------------------------------- #
@@ -626,7 +791,7 @@ def _emit_entity(ent, indent, skip=("_group",)):
     return lines
 
 
-def emit_domain(by_platform, source):
+def emit_domain(by_platform, source, report_lines=()):
     """by_platform: {platform: [entities]} -> the `crestron:` domain config.
 
     Entities live under their platform key (light:/switch:/number:/...) so they
@@ -635,10 +800,19 @@ def emit_domain(by_platform, source):
     lines = [
         f"# Generated from {source} by tools/xlsx_to_yaml.py",
         "# Include in configuration.yaml as:  crestron: !include crestron.yaml",
-        "",
-        "port: 10200  # <- 改成你的快思聪 XSIG 端口；如有 to_joins/from_joins 也放这里",
-        "",
     ]
+    if report_lines:
+        lines.extend(["#", "# Conversion report (same messages printed by the tool):"])
+        for message in report_lines:
+            physical_lines = str(message).replace("\r", "\n").split("\n")
+            lines.extend(f"# {line}" if line else "#" for line in physical_lines)
+    lines.extend(
+        [
+            "",
+            "port: 10200  # <- 改成你的快思聪 XSIG 端口；如有 to_joins/from_joins 也放这里",
+            "",
+        ]
+    )
     ordered = sorted(
         by_platform,
         key=lambda p: (_PLATFORM_ORDER.index(p) if p in _PLATFORM_ORDER
@@ -672,7 +846,9 @@ def _resolve_output_path(output):
 
 
 def generate(xlsx_path, output):
-    by_platform, errors, warnings = _build_from_workbook(xlsx_path)
+    by_platform, errors, warnings, messages = _build_from_workbook(xlsx_path)
+    for message in messages:
+        print("  " + message)
     source = os.path.basename(xlsx_path)
     if errors:
         raise WorkbookValidationError(
@@ -680,20 +856,30 @@ def generate(xlsx_path, output):
         )
 
     out_dir, path = _resolve_output_path(output)
+    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
+    summary = (
+        f"wrote {path} ({counts}; errors:{errors}, warnings:{warnings})"
+    )
+    usage = _usage_text(path)
     os.makedirs(out_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(emit_domain(by_platform, source))
-    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
-    print(
-        f"  wrote {path}  ({counts}; errors:{errors}, warnings:{warnings})"
-    )
-    _print_usage(path)
+        f.write(
+            emit_domain(
+                by_platform,
+                source,
+                messages + [summary, "", usage],
+            )
+        )
+    print("  " + summary)
+    print("\n" + usage)
     return by_platform
 
 
 def check(xlsx_path):
     """Validate without writing YAML; return a process exit status."""
-    by_platform, errors, warnings = _build_from_workbook(xlsx_path)
+    by_platform, errors, warnings, messages = _build_from_workbook(xlsx_path)
+    for message in messages:
+        print("  " + message)
     counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
     print(
         f"  check complete ({counts}; errors:{errors}, warnings:{warnings})"
@@ -701,11 +887,10 @@ def check(xlsx_path):
     return 1 if errors else 0
 
 
-def _print_usage(path):
-    """Tell the user exactly what to do with the file we just wrote."""
+def _usage_text(path):
+    """Return the post-generation instructions printed and embedded in YAML."""
     filename = os.path.basename(path)
-    print(
-        "\n"
+    return (
         "下一步（如何使用这个配置文件）：\n"
         f"  1. 把生成的 {filename} 复制到 Home Assistant 配置目录\n"
         "     （与 configuration.yaml 同一个文件夹）。\n"

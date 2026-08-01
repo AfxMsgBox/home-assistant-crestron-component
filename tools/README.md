@@ -208,8 +208,19 @@ python3 tools/xlsx_to_yaml.py \
 
 ```text
 [info] ignored instruction sheet '说明'
-wrote .../crestron.yaml  (light:205, climate:18, cover:32, switch:9; errors:0, warnings:0)
+[info] 灯光: ignored 1 empty/template row(s): 108 (template row ...)
+[info] 灯光: converted 205 entity row(s)
+[warning] 灯光!6: duplicate entity name 'B2.车库 吊灯'; renamed to 'B2.车库 吊灯 2'
+wrote .../crestron.yaml (light:205, climate:18, cover:32, switch:9; errors:0, warnings:1)
 ```
+
+这些转换结果、最终数量汇总和“下一步”提示会原样复制到生成 YAML 的头部，并全部
+加上 `#`，因此既能保留本次完整命令行输出，又不会参与配置解析。报告包含每个设备
+sheet 的实体数；空行/模板行的 Excel 行号及忽略原因；未知 sheet、未知窗帘类型、
+重复 Join、重复实体名及自动改名；`风速值` 等明确不采用的非空单元格；以及每一条
+校验错误。缺少、未知、空白或重复表头也会逐项报告，避免列名拼错后整列能力静默
+消失；缺少必填 Join 表头或表头重复会作为 error。`灯光!108` 表示“灯光 sheet 的
+Excel 第 108 行”。
 
 只检查、不生成文件：
 
@@ -218,8 +229,9 @@ python3 tools/xlsx_to_yaml.py --check 你的设备表.xlsx
 ```
 
 检查会报告准确的 sheet、Excel 行号和原因。错误包括 Join 格式/范围错误、必填
-Join 缺失或灯光控制方式混填；未知窗帘类型和重复 Join 产生警告。存在错误时，
-正常生成命令也会停止且不会覆盖已有 YAML；警告不会阻止生成。
+Join 缺失或灯光控制方式混填；未知窗帘类型、重复 Join、重复实体名会产生警告。
+存在错误时，正常生成命令会输出完整错误清单后停止，且不会覆盖已有 YAML；警告
+不会阻止生成。
 
 ## 9. 在 Home Assistant 中加载
 

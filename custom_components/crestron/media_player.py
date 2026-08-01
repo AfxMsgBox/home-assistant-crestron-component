@@ -24,20 +24,66 @@ from .unique_ids import media_player_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
-# Source 0 is this component's "off" value (async_turn_off writes 0), so a
-# source *numbered* 0 could be selected but never turned back on — and
-# cv.positive_int accepts 0. Require 1+.
-_source_number = vol.All(
-    vol.Coerce(int),
-    vol.Range(min=1, msg="source numbers start at 1; 0 means off"),
-)
+
+def _source_number(value):
+    """Strict input number: a whole number 1 or greater.
+
+    Source 0 is this component's "off" value (``async_turn_off`` writes 0), so
+    a source *numbered* 0 could be selected and then never turned back on.
+    ``vol.Coerce(int)`` is too loose to enforce that on its own — it maps
+    ``True`` to 1 and truncates ``1.9`` to 1, either of which silently
+    collides with a real source. Plain decimal strings are accepted because
+    YAML quoting is easy to do by accident.
+    """
+    if isinstance(value, bool):
+        raise vol.Invalid(f"source number must be a whole number; got {value!r}")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not text.isascii() or any(c < "0" or c > "9" for c in text):
+            raise vol.Invalid(
+                f"source number must be a whole number; got {value!r}"
+            )
+        value = int(text)
+    if not isinstance(value, int):
+        raise vol.Invalid(f"source number must be a whole number; got {value!r}")
+    if value < 1:
+        raise vol.Invalid(f"source numbers start at 1; 0 means off (got {value})")
+    return value
+
+
+def _sources(value):
+    """Normalize and validate the whole source map without silent collisions."""
+    if not isinstance(value, dict):
+        raise vol.Invalid("sources must be a mapping of number to display name")
+    if not value:
+        raise vol.Invalid("sources must not be empty")
+
+    normalized = {}
+    names = set()
+    for raw_number, raw_name in value.items():
+        try:
+            number = _source_number(raw_number)
+            name = cv.string(raw_name)
+        except vol.Invalid:
+            raise
+        except Exception as err:
+            raise vol.Invalid(
+                f"invalid source {raw_number!r}: {raw_name!r}"
+            ) from err
+        if number in normalized:
+            raise vol.Invalid(
+                f"duplicate source number {number} after normalization"
+            )
+        if name in names:
+            raise vol.Invalid(f"duplicate source display name {name!r}")
+        normalized[number] = name
+        names.add(name)
+    return normalized
+
 
 # Non-empty: with no sources there is nothing to select and turn_on has no
 # input number to restore.
-SOURCES_SCHEMA = vol.All(
-    vol.Schema({_source_number: cv.string}),
-    vol.Length(min=1, msg="sources must not be empty"),
-)
+SOURCES_SCHEMA = _sources
 
 PLATFORM_SCHEMA = vol.Schema(
     {

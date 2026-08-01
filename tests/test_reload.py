@@ -103,7 +103,7 @@ crestron = load("__init__")
 # stubs than this file's scope; test_platform_schemas covers that validation
 # directly. Here the reload flow itself is what matters.
 _REAL_INVALID_ENTITIES = crestron._invalid_entities
-crestron._invalid_entities = lambda config: []
+crestron._invalid_entities = lambda config: ([], [])
 logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
 
 DOMAIN = "crestron"
@@ -122,6 +122,10 @@ class FakeConfigEntries:
         self.reloaded = []
         # entry_id -> list of states to apply on successive reloads.
         self.outcomes = {}
+        # entry_id -> list of boolean return values.
+        self.results = {}
+        # entry_id -> exception raised while the state stays LOADED.
+        self.raise_but_keep_state = {}
 
     def async_entries(self, domain):
         return list(self._entries)
@@ -129,12 +133,17 @@ class FakeConfigEntries:
     async def async_reload(self, entry_id):
         self.reloaded.append(entry_id)
         entry = next(e for e in self._entries if e.entry_id == entry_id)
+        boom = self.raise_but_keep_state.pop(entry_id, None)
+        if boom is not None:
+            raise boom  # state deliberately left LOADED
         pending = self.outcomes.get(entry_id)
         outcome = pending.pop(0) if pending else ConfigEntryState.LOADED
         if isinstance(outcome, Exception):
             entry.state = ConfigEntryState.SETUP_ERROR
             raise outcome
         entry.state = outcome
+        results = self.results.get(entry_id)
+        return results.pop(0) if results else True
 
 
 class FakeHass:
@@ -165,6 +174,21 @@ class ReloadServiceTests(unittest.TestCase):
         self._reload({"other_domain": {}})
         self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
         self.assertEqual(self.hass.config_entries.reloaded, [])
+
+    def test_unknown_platform_key_aborts_reload(self):
+        """`lights:` is most likely a typo, not an instruction to delete lights."""
+        before = self.hass.data[DOMAIN][YAML_CONF]
+        logging.getLogger(crestron.__name__).setLevel(logging.WARNING)
+        try:
+            with self.assertLogs(crestron.__name__, level="WARNING") as logs:
+                self._reload(
+                    {DOMAIN: {"port": 10200, "lights": [{"name": "客厅灯"}]}}
+                )
+        finally:
+            logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
+        self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
+        self.assertEqual(self.hass.config_entries.reloaded, [])
+        self.assertTrue(any("Refusing to reload" in m for m in logs.output))
 
     def test_invalid_yaml_keeps_previous_config(self):
         """async_integration_yaml_config returns None when validation fails."""
@@ -242,9 +266,9 @@ class ReloadServiceTests(unittest.TestCase):
     def test_invalid_entities_are_reported_but_do_not_block(self):
         """Reload must skip bad entries like startup does, not refuse to run."""
         original = crestron._invalid_entities
-        crestron._invalid_entities = lambda config: [
-            ("light", "坏灯", "no control join")
-        ]
+        crestron._invalid_entities = lambda config: (
+            [("light", "坏灯", "no control join")], []
+        )
         try:
             logging.getLogger(crestron.__name__).setLevel(logging.WARNING)
             with self.assertLogs(crestron.__name__, level="WARNING") as logs:
@@ -284,6 +308,44 @@ class ReloadServiceTests(unittest.TestCase):
             any("Rollback did not restore" in m for m in logs.output)
         )
 
+    def test_structural_error_aborts_the_reload(self):
+        """A whole section of the wrong type would delete every entity in it.
+
+        A row-level typo skips one entity; this cannot be interpreted at all,
+        so the running configuration must stay.
+        """
+        original = crestron._invalid_entities
+        crestron._invalid_entities = lambda config: (
+            [], [("light", "<whole section>", "must be a list of entities")]
+        )
+        before = self.hass.data[DOMAIN][YAML_CONF]
+        try:
+            logging.getLogger(crestron.__name__).setLevel(logging.ERROR)
+            with self.assertLogs(crestron.__name__, level="ERROR") as logs:
+                self._reload({DOMAIN: {"port": 10200, "light": {"name": "x"}}})
+        finally:
+            crestron._invalid_entities = original
+            logging.getLogger(crestron.__name__).setLevel(logging.CRITICAL)
+        self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
+        self.assertEqual(self.hass.config_entries.reloaded, [])
+        self.assertTrue(any("Refusing to reload" in m for m in logs.output))
+
+    def test_reload_returning_false_triggers_rollback(self):
+        """async_reload has a boolean result; False is a failure too."""
+        before = self.hass.data[DOMAIN][YAML_CONF]
+        self.hass.config_entries.results["entry-1"] = [False]
+        self._reload({DOMAIN: {"port": 9999}})
+        self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
+
+    def test_raising_reload_with_loaded_state_still_rolls_back(self):
+        """Exception + state left LOADED must not be reported as success."""
+        before = self.hass.data[DOMAIN][YAML_CONF]
+        self.hass.config_entries.raise_but_keep_state["entry-1"] = RuntimeError(
+            "boom"
+        )
+        self._reload({DOMAIN: {"port": 9999}})
+        self.assertIs(self.hass.data[DOMAIN][YAML_CONF], before)
+
 
 class SectionShapeTests(unittest.TestCase):
     """A platform key that isn't a list makes every entity under it vanish."""
@@ -292,20 +354,21 @@ class SectionShapeTests(unittest.TestCase):
         original = crestron._platform_schemas
         crestron._platform_schemas = lambda: {"light": lambda cfg: cfg}
         try:
-            problems = _REAL_INVALID_ENTITIES(
+            rows, structural = _REAL_INVALID_ENTITIES(
                 {"light": {"name": "写成了映射"}}
             )
         finally:
             crestron._platform_schemas = original
-        self.assertEqual(len(problems), 1)
-        self.assertEqual(problems[0][0], "light")
-        self.assertIn("must be a list", problems[0][2])
+        self.assertEqual(rows, [])
+        self.assertEqual(len(structural), 1)
+        self.assertEqual(structural[0][0], "light")
+        self.assertIn("must be a list", structural[0][2])
 
     def test_absent_section_is_not_a_problem(self):
         original = crestron._platform_schemas
         crestron._platform_schemas = lambda: {"light": lambda cfg: cfg}
         try:
-            self.assertEqual(_REAL_INVALID_ENTITIES({}), [])
+            self.assertEqual(_REAL_INVALID_ENTITIES({}), ([], []))
         finally:
             crestron._platform_schemas = original
 

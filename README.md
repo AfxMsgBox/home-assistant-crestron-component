@@ -4,7 +4,7 @@
 
 支持的实体类型：`light`（含只开关灯）、`climate`（空调）、`cover`、`switch`、`number`、`select`、`binary_sensor`、`sensor`、`media_player`。
 
-当前版本 `0.3.0`。**实体与连接配置全部写在 YAML 里**；集成同时带一个极简的 config flow，只负责创建配置项（让实体能归属到 HA「设备」），不在 UI 里编辑任何参数。配置项的 ⋮ 菜单里还提供「选项」（手动重新下发所有 `to_joins`）和「下载诊断」（导出连接状态 + 全部 join 缓存），见「运维与排障」。
+当前版本 `0.4.0`。**实体与连接配置全部写在 YAML 里**；集成同时带一个极简的 config flow，只负责创建配置项（让实体能归属到 HA「设备」），不在 UI 里编辑任何参数。配置项的 ⋮ 菜单里还提供「选项」（手动重新下发所有 `to_joins`）和「下载诊断」（导出连接状态 + 全部 join 缓存），见「运维与排障」。
 
 ## 架构
 
@@ -338,7 +338,7 @@ switch:
 
 纯瞬动模式下开关是 `RestoreEntity`：**重启会恢复重启前的状态**，但那只是「HA 记得的上一次」，期间被面板改过就会不准。要真正可靠仍建议补 `state_join`，或让主控把状态回传到 `on_join`/`off_join` 上。
 
-**可选 `mode_joins`（多态反馈）**：一组 `{标签: 数字join}`，任一为高即视为「开」，并把命中的标签作为只读属性 `mode` 暴露出来（都为低时 `mode` 为 `关闭`）。配了 `mode_joins` 后状态只看这组 join。
+**可选 `mode_joins`（多态反馈）**：一组 `{标签: 数字join}`，任一为高即视为「开」，并把命中的标签作为只读属性 `mode` 暴露出来。所有 join 都已上报且全部为低时，状态为「关」且 `mode` 为 `关闭`；初始同步尚未收齐、同时没有高电平时保持恢复状态且暂不提供 `mode`。配了 `mode_joins` 后状态只看这组 join。
 
 ```yaml
 switch:
@@ -415,8 +415,11 @@ number:
 ```
 
 - 值直读直写模拟 join 的**原值**（不做 0–65535 换算，也没有 `divisor`）。
-- 回传值 `0` 一律当作「主控还没报过」忽略，避免开机瞬间显示成 0（低于 `min`）。
-- 是 `RestoreEntity`：未连接时先显示重启前的值，连上后以回传为准。
+- 只支持整数；`min` / `max` / `step` 和服务写入值含小数时会拒绝，不会静默截断。
+- 用 join 是否已上报来区分 unknown 和真实 `0`：未上报时不猜值，已上报的 `0`
+  会正常显示。
+- 是 `RestoreEntity`：未连接时先显示范围内的重启前值，连上后以回传为准；
+  超出当前 `min`–`max` 的旧值不恢复。
 
 ### Select（可读写多态）
 
@@ -456,7 +459,8 @@ media_player:
 - `mute_join`：数字，True=静音（非 toggle，需控制系统侧直绑）。
 - `volume_join`：模拟，0–65535 ↔ HA 0–1。
 - `source_number_join`：模拟，写 0 即视为关机。
-- `sources`：`输入编号: 显示名` 映射。
+- `sources`：`输入编号: 显示名` 映射。编号从 1 开始，只接受整数或 ASCII
+  十进制字符串；归一化后的编号和显示名都必须唯一，`0` 保留为关机。
 
 ## 控制面板同步（to_joins / from_joins）
 
@@ -509,7 +513,7 @@ crestron:
 
 `script` 段为标准 [HA Script](https://www.home-assistant.io/docs/scripts/) 语法。脚本上下文中 `value` 变量即该 join 的当前值。数字 join 仅在 `0→1` 上升沿触发（按钮点动只会执行一次）。
 
-> **「首次看到高电平」不算上升沿。** 主控连上来时会响应 `0xFD` 把**所有** join 的当前电平报一遍。如果把这次上报当成按键，那么每次 HA 重启、主控重启或断线重连，所有当时恰好为高的按键 join 都会执行一次脚本——场景被重放、灯被打开。因此集成要求先看到过 `0`、再看到 `1` 才触发；连接后的第一次上报只用来建立基线。
+> **「首次看到高电平」不算上升沿。** 每建立一次连接（含断线重连、以及新连接接管旧连接），基线都会被清空重建。主控连上来时会响应 `0xFD` 把**所有** join 的当前电平报一遍。如果把这次上报当成按键，那么每次 HA 重启、主控重启或断线重连，所有当时恰好为高的按键 join 都会执行一次脚本——场景被重放、灯被打开。因此集成要求先看到过 `0`、再看到 `1` 才触发；连接后的第一次上报只用来建立基线。
 >
 > 代价是：如果按键**恰好在连接建立的同一瞬间**被按下，这一次会被忽略。这是刻意选的方向——宁可漏一次按键，不可在重启时误动作。
 >
@@ -570,7 +574,13 @@ HAOS 自带的 `homeassistant` 容器跑的就是 Python 3.13，所以无需额�
   或没有任何能力的行都会跳过。`功能` 列只是给人看的备注，脚本不读。
 - **有任何 error 就不写文件**：被跳过的行只是「这行不生成实体」；而 Join 格式/范围
   错误、必填 Join 缺失这类 **error 会中止整个生成**，不会写出半份 YAML，也不会覆盖
-  已有文件。警告（未知窗帘类型、重复 Join）不阻止生成。先用 `--check` 看清单。
+  已有文件。警告（未知窗帘类型、重复 Join、重复实体名及自动改名）不阻止生成。
+  终端会列出每个异常的 sheet、Excel 行号和原因，并给出每个 sheet 的转换数量；
+  空行/模板行也会列出具体行号与忽略原因。缺少、未知、空白或重复表头也会报告；
+  缺少必填 Join 表头或表头重复会阻止生成。先用 `--check` 看清单。
+- **生成文件自带转换记录**：终端中的转换报告、最终数量汇总和“下一步”提示会
+  作为 `#` 注释写入 `crestron.yaml` 顶部，方便以后确认这份配置由哪次转换产生，
+  不影响 YAML 加载。
 - **插座**：`开`/`关` 两根数字 join 出 `switch:`，主控在这两根 join 上回传通电状态。
 - **窗帘**：`类型` 列支持 `awning`、`blind`、`curtain`、`damper`、`door`、
   `garage`、`gate`、`shade`、`shutter`、`window`（忽略大小写和首尾空格）；
@@ -590,7 +600,7 @@ crestron: !include crestron.yaml
 
 重启 HA，集成会从该 YAML 导入一个**配置项**并建立设备；灯 / 插座 / 窗帘 / 空调各自一个设备，每台空调是一张恒温器卡。
 
-> 升级提示：把实体全部挪到 `crestron:` 之下、删掉 `- platform: crestron` 行即可（用本工具重新生成最省事）。当前 Light、Switch、Cover、Climate 的 `unique_id` 均由稳定控制 Join 决定；组件会自动迁移本集成先前按名称或可选反馈 Join 生成的 ID，保留实体 ID、历史和仪表盘引用。更早版本中跨平台改型留下的不可用实体仍需在“设置 → 实体”中人工确认后删除。
+> 升级提示：把实体全部挪到 `crestron:` 之下、删掉 `- platform: crestron` 行即可（用本工具重新生成最省事）。`unique_id` 规则从 0.4.0 正式发布起固定；组件**不会读取或改写 HA 实体注册表来猜测旧实体对应关系**。开发版升级、删除 xlsx 行或改变构成 ID 的控制 Join 后，旧实体会留在“设置 → 实体”中显示为不可用，请确认后手动删除。这样不会把旧实体的 entity_id、历史、区域或仪表盘引用误转给另一台设备。
 
 ## 稳定性说明
 
@@ -616,7 +626,7 @@ service: crestron.reload
 
 也可以在**开发者工具 → 操作**里搜 `Crestron` 找到「重新加载」。它会重新读取 `configuration.yaml` 里的 `crestron:` 段并重载集成，几百个实体一次生效，不必重启整个 Home Assistant。**需要管理员权限**。
 
-重新加载时会先把新配置整体过一遍：不合法的实体会列在日志里（和启动时一样逐条跳过，不阻止重载），join 归属冲突和重复 unique_id 也会一并报出。
+重新加载时会先把新配置整体过一遍：不合法的实体会列在日志里（和启动时一样逐条跳过，不阻止重载），join 归属冲突和重复 unique_id 也会一并报出。未知顶层键（例如把 `light:` 拼成 `lights:`）和整个平台 section 类型错误会**拒绝重载并保留旧配置**，避免一次拼写错误删除整个平台；首次启动遇到未知键仍只记录 warning。
 
 > 重读失败（YAML 语法错、或整段 `crestron:` 不见了）时会保留当前正在运行的配置并在日志里记一条 error，不会把能用的配置清空。
 >
@@ -631,7 +641,8 @@ service: crestron.reload
 - `available` / `connected` / `peer` / `listening_port`：当前连接状态与对端地址。
 - `configured_entities`：各平台配了多少个实体，以及 `to_joins` / `from_joins` 条数。
 - `join_usage`：配置里一共用到多少根 join，以及检测到的归属冲突清单。
-- `digital` / `analog` / `serial`：**主控迄今推送过的全部 join 及其值**。
+- `digital` / `analog`：**主控迄今推送过的全部 join 及其值**（原样保留）。
+- `serial`：主控推送过的串行 join 号及其**字符数**（正文脱敏，见下）。
 
 > **串行 join 的正文和主控 IP 会被脱敏**（只保留 join 号和字符数）。串行 join 常用来推送门禁姓名、日程等文本，而这个文件的用途就是发给别人排障。判断「这根 join 报没报过」只需要 join 号，脱敏不影响排查。数字/模拟量只是电平和数值，原样保留。
 
@@ -652,6 +663,17 @@ logger:
 ```
 
 调到 `info` 时，主控首次全量同步结束后会打一行汇总：同步了多少个 join、耗时多久、其中 HA 侧分发占多少。
+
+逐帧日志中的 join 会同时显示 YAML 中对应的设备/实体名、字段含义、字段名和读写
+方向，例如：
+
+```text
+Got Analog: a430 [climate '2F.休闲厅 空调': 目标温度 (set_temp_join, control/write)] = 17
+```
+
+一根 join 有多个合法只读镜像时会把所有归属都列出来；主控上报了 YAML 未使用的
+join 时显示 `[not configured in YAML]`。接收、发送、越界、串行解码、bridge 脚本
+等带 join 的日志都使用同一套说明。
 
 ### 更新集成
 
@@ -685,6 +707,7 @@ python3 -m unittest discover -s tests
 | `test_value_coercion.py` | 模板值 → XSIG 值转换（`unknown`/`unavailable`/`on/off`/数字字符串/越界裁剪） |
 | `test_schema.py` | `join_key` 与数字 join 校验器的格式/范围边界 |
 | `test_bridge.py` | `ToJoinBridge` / `FromJoinBridge`：模板追踪下发、`0xFB` 全量重发、单条失败隔离、数字 join 上升沿过滤 |
+| `test_connection_takeover.py` | 真实 TCP 重叠连接接管，以及真实 `FromJoinBridge` 在新连接全量同步时不误触发、随后真实上升沿只执行一次脚本 |
 | `test_join_commands.py` | `pulse_digital` 脉冲时序与并发串行化、`set_one_clear_others` 先清后置 |
 | `test_setup_platform_entities.py` | 单条实体配置出错只跳过该条 |
 | `test_dimmable_light.py` | 关灯的「重发当前电平 → 延时 → 写 0」两步时序，以及延时期间又被开灯时取消那个 0 |
@@ -692,9 +715,10 @@ python3 -m unittest discover -s tests
 | `test_switch_feedback.py` | 瞬动 switch 订阅两根命令 join、外部开/关能反映、两根同高或同低时保持原状态 |
 | `test_cover_position.py` | cover 位置乐观/真实反馈、开关反馈、`assumed_state` 与稳定滑块能力 |
 | `test_climate_filter.py` | 室温 0.5 °C 上报阈值、成对电源反馈、settle 窗口与设备分组 |
-| `test_unique_ids.py` | 各平台稳定 ID（含 select/sensor 组 ID 与 YAML 书写顺序无关）及旧实体注册表迁移 |
+| `test_unique_ids.py` | 全部平台的最终 ID 规则、select/sensor 组 ID 与 YAML 书写顺序无关，以及重复 ID 检测 |
 | `test_write_coalescing.py` | 一批 join 变更只写一次状态、后续批次照常写、移除时取消挂起的写 |
 | `test_join_registry.py` | join 归属冲突：两个写者报冲突、只读镜像不报、重复 to_joins/from_joins 键、模拟/数字空间独立 |
-| `test_reload.py` | `crestron.reload` 重读 YAML 并重载配置项；重读失败时保留旧配置 |
+| `test_reload.py` | `crestron.reload` 重读 YAML 并重载配置项；重读失败、平台键拼错或 section 结构错误时保留旧配置 |
+| `test_platform_schemas.py` | 平台组合校验、number 整数/零值/恢复边界，以及 media source 归一化与重复检测 |
 | `test_xlsx_to_yaml.py` | 行→实体映射（灯光→调光/只开关 light、插座→switch、空调→单个 climate、窗帘 type、重名去重、域配置输出） |
 | `loader.py` | 把被测模块挂到合成包下单独加载，绕开会 `import homeassistant` 的真实 `__init__.py` |

@@ -24,8 +24,8 @@ from .const import (
 )
 from .schema import join_key
 from .bridge import ToJoinBridge, FromJoinBridge
-from .join_registry import find_conflicts, usage_summary
-from .unique_ids import async_migrate_unique_ids, duplicate_unique_ids
+from .join_registry import build_join_metadata, find_conflicts, usage_summary
+from .unique_ids import duplicate_unique_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,24 +99,30 @@ _KNOWN_CONFIG_KEYS = frozenset(PLATFORMS) | {CONF_PORT, CONF_TO_HUB, CONF_FROM_H
 
 
 def _warn_unknown_config_keys(domain_config):
-    """Log a warning for typo'd keys directly under `crestron:`.
+    """Log and return typo'd keys directly under `crestron:`.
 
     CONFIG_SCHEMA has to allow extra keys, because entity definitions live
     under their platform key and are validated by each platform rather than
     here. The cost is that a mistyped platform key (`lights:` for `light:`) is
     accepted and then quietly ignored: no entities appear, nothing is logged,
     and there is nothing in the UI to explain why. Call this out explicitly.
+
+    Startup remains permissive for compatibility, but reload uses the returned
+    list to refuse a typo that would otherwise remove an entire platform.
     """
-    unknown = sorted(k for k in domain_config if k not in _KNOWN_CONFIG_KEYS)
+    unknown = sorted(
+        (k for k in domain_config if k not in _KNOWN_CONFIG_KEYS), key=str
+    )
     if not unknown:
-        return
+        return []
     _LOGGER.warning(
-        "Ignoring unrecognised key(s) under `crestron:`: %s — check for typos "
+        "Unrecognised key(s) under `crestron:`: %s — check for typos "
         "(entities go under a platform key, e.g. `light:` not `lights:`). "
         "Recognised keys: %s",
-        ", ".join(unknown),
+        ", ".join(map(str, unknown)),
         ", ".join(sorted(_KNOWN_CONFIG_KEYS)),
     )
+    return unknown
 
 
 def _warn_join_conflicts(yaml_conf):
@@ -190,25 +196,33 @@ def _platform_schemas():
 
 
 def _invalid_entities(domain_config):
-    """Entries that every platform would skip, as ``[(platform, name, why)]``.
+    """Validate the new config, split by how bad each problem is.
 
-    Reported *before* switching over, so an operator sees what a reload is
-    about to cost them instead of discovering it as missing entities. Not a
-    veto: startup skips bad entries one by one and keeps the rest, and reload
-    must behave the same way or a single typo would make the config
-    unreloadable.
+    Returns ``(row_problems, structural_problems)``, both
+    ``[(platform, name, why)]``. The split decides whether a reload may go
+    ahead:
+
+    - A **row** problem is one bad entity. Startup skips those individually and
+      keeps the rest, so reload must too — otherwise one typo makes the config
+      unreloadable.
+    - A **structural** problem is a whole section written as the wrong type
+      (``light:`` as a mapping instead of a list). There is no way to read the
+      user's intent, and going ahead would delete every light they have while
+      reporting success. That has to stop the reload.
     """
-    problems = []
+    rows = []
+    structural = []
     for platform, schema in _platform_schemas().items():
         entries = domain_config.get(platform)
         if entries is None:
             continue
         if not isinstance(entries, list):
-            # `light: {...}` instead of `light: - {...}`: every entity under
-            # that key silently disappears. Reporting it as one problem beats
-            # a "successful" reload with no lights.
-            problems.append(
-                (platform, "<whole section>", "must be a list of entities")
+            structural.append(
+                (
+                    platform,
+                    "<whole section>",
+                    f"must be a list of entities, got {type(entries).__name__}",
+                )
             )
             continue
         for index, item in enumerate(entries):
@@ -216,10 +230,34 @@ def _invalid_entities(domain_config):
                 schema(item)
             except Exception as err:
                 name = item.get("name") if isinstance(item, dict) else None
-                problems.append(
+                rows.append(
                     (platform, name or f"#{index}", str(err).split("\n")[0])
                 )
-    return problems
+    return rows, structural
+
+
+async def _reload_entry(hass, entry):
+    """Reload one entry; True only if it is demonstrably loaded afterwards.
+
+    Three independent things can each mean "this failed", and any one of them
+    left unchecked lets a broken reload be reported as a success:
+    ``async_reload`` returning False, it raising, or the entry simply not
+    ending up LOADED. Treat the union as failure.
+    """
+    try:
+        result = await hass.config_entries.async_reload(entry.entry_id)
+    except Exception:
+        _LOGGER.exception("Reloading config entry %s failed", entry.entry_id)
+        return False
+    if result is False:
+        _LOGGER.error("Config entry %s did not reload", entry.entry_id)
+        return False
+    if entry.state is not ConfigEntryState.LOADED:
+        _LOGGER.error(
+            "Config entry %s is %s after reloading", entry.entry_id, entry.state
+        )
+        return False
+    return True
 
 
 async def _async_reload_yaml(hass, call):
@@ -246,9 +284,26 @@ async def _async_reload_yaml(hass, call):
         return
 
     domain_config = config[DOMAIN]
-    _warn_unknown_config_keys(domain_config)
+    unknown = _warn_unknown_config_keys(domain_config)
+    if unknown:
+        _LOGGER.error(
+            "Refusing to reload: unrecognised key(s) under `crestron:`: %s. "
+            "A misspelled platform key would remove all entities from that "
+            "platform. The previous configuration stays active.",
+            ", ".join(map(str, unknown)),
+        )
+        return
     _warn_join_conflicts(domain_config)
-    problems = _invalid_entities(domain_config)
+    problems, structural = _invalid_entities(domain_config)
+    if structural:
+        _LOGGER.error(
+            "Refusing to reload: %d section(s) under `crestron:` have the "
+            "wrong shape, and loading them would delete every entity they "
+            "should contain:\n  %s\nThe previous configuration stays active.",
+            len(structural),
+            "\n  ".join(f"{p}: {why}" for p, _n, why in structural),
+        )
+        return
     if problems:
         _LOGGER.warning(
             "%d entit%s in the new configuration will be skipped:\n  %s",
@@ -262,15 +317,10 @@ async def _async_reload_yaml(hass, call):
     domain_data[YAML_CONF] = domain_config
 
     entries = hass.config_entries.async_entries(DOMAIN)
+    failed = []
     for entry in entries:
-        try:
-            await hass.config_entries.async_reload(entry.entry_id)
-        except Exception:
-            # A raising reload is still a failed reload: fall through to the
-            # rollback rather than letting the exception escape and leave the
-            # new (broken) config installed in hass.data.
-            _LOGGER.exception("Reloading config entry %s failed", entry.entry_id)
-    failed = [e for e in entries if e.state is not ConfigEntryState.LOADED]
+        if not await _reload_entry(hass, entry):
+            failed.append(entry)
 
     if failed:
         if previous is None:
@@ -289,16 +339,11 @@ async def _async_reload_yaml(hass, call):
             "y" if len(failed) == 1 else "ies",
         )
         domain_data[YAML_CONF] = previous
-        still_broken = []
-        for entry in failed:
-            try:
-                await hass.config_entries.async_reload(entry.entry_id)
-            except Exception:
-                _LOGGER.exception(
-                    "Rollback reload of %s failed", entry.entry_id
-                )
-            if entry.state is not ConfigEntryState.LOADED:
-                still_broken.append(entry.entry_id)
+        still_broken = [
+            entry.entry_id
+            for entry in failed
+            if not await _reload_entry(hass, entry)
+        ]
         if still_broken:
             # The old config not coming back means something outside the config
             # is wrong (the port is held by another process entirely). Say so;
@@ -343,11 +388,6 @@ async def async_setup_entry(hass, entry):
             hass, DOMAIN, SERVICE_RELOAD, partial(_async_reload_yaml, hass)
         )
 
-    # Preserve entity IDs, history, areas and dashboard references while moving
-    # historical name/optional-feedback-based unique IDs to stable control-join
-    # IDs. This must happen before the platforms register their entities.
-    await async_migrate_unique_ids(hass, yaml_conf)
-
     hub = CrestronHub(hass, yaml_conf)
     await hub.start()
     domain_data[HUB_WRAPPER] = hub
@@ -391,7 +431,9 @@ class CrestronHub:
     def __init__(self, hass, config):
         self.hass = hass
         self.config = config
-        self.hub = hass.data[DOMAIN][HUB] = CrestronXsig()
+        self.hub = hass.data[DOMAIN][HUB] = CrestronXsig(
+            build_join_metadata(config)
+        )
         self.port = config.get(CONF_PORT)
 
         self.to_bridge = ToJoinBridge(hass, self.hub, config.get(CONF_TO_HUB))
@@ -399,13 +441,26 @@ class CrestronHub:
 
         # The control system's sync-all request re-renders every to_join.
         self.hub.register_sync_all_joins_callback(self._sync_all)
-        # So does a fresh connection: the control system only knows the values
-        # it was last sent, so after a reconnect (or an HA restart) panel
-        # feedback would otherwise stay stale until something happened to
-        # change. Re-sending an unchanged value is a no-op on the wire side.
-        self.hub.register_connect_callback(self._sync_all)
+        # A fresh connection needs more than that, so it gets its own hook.
+        self.hub.register_connect_callback(self._on_connect)
 
     async def _sync_all(self):
+        self.to_bridge.sync_all()
+
+    async def _on_connect(self):
+        """Runs once per accepted connection, before its first join frame.
+
+        Two things have to happen at exactly this point:
+
+        - ``from_joins`` edge detection must forget the previous session's
+          levels, or the incoming full sync reads as a burst of button presses.
+          This cannot ride on availability, which is deduplicated and emits
+          nothing when a new connection takes over one that is still closing.
+        - ``to_joins`` must be re-sent: the control system only knows the values
+          it was last given, and 0xFD only asks it to report *its* joins, so
+          panel feedback would otherwise sit stale until something changed.
+        """
+        self.from_bridge.reset_connection_baseline()
         self.to_bridge.sync_all()
 
     def resync_to_joins(self):

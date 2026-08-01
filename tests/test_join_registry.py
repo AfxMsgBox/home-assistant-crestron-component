@@ -139,6 +139,38 @@ class ConflictTests(unittest.TestCase):
         self.assertEqual(summary["joins_in_use"], 2)
         self.assertEqual(summary["conflicts"], [])
 
+    def test_runtime_metadata_contains_device_field_and_direction(self):
+        config = {
+            "climate": [{
+                "name": "目标温度",
+                "device_name": "2F.休闲厅 空调",
+                "set_temp_join": 430,
+                "reg_temp_join": 431,
+            }],
+        }
+        metadata = reg.build_join_metadata(config)
+        self.assertIn("2F.休闲厅 空调", metadata["a430"][0])
+        self.assertIn("目标温度", metadata["a430"][0])
+        self.assertIn("set_temp_join", metadata["a430"][0])
+        self.assertIn("control/write", metadata["a430"][0])
+        self.assertIn("当前温度", metadata["a431"][0])
+        self.assertIn("feedback/read", metadata["a431"][0])
+
+    def test_runtime_metadata_keeps_every_reader_of_shared_join(self):
+        config = {
+            "climate": [{"name": "空调", "mode_cool_join": 507}],
+            "sensor": [{
+                "name": "运行模式",
+                "mode_joins": {"制冷": 507},
+            }],
+        }
+        descriptions = reg.build_join_metadata(config)["d507"]
+        self.assertEqual(len(descriptions), 2)
+        self.assertTrue(any("空调" in item and "制冷模式" in item
+                            for item in descriptions))
+        self.assertTrue(any("运行模式" in item and "模式反馈 制冷" in item
+                            for item in descriptions))
+
 
 if __name__ == "__main__":
     unittest.main()

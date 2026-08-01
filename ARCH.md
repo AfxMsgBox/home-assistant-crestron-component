@@ -2,7 +2,7 @@
 
 面向程序员与 AI 的实现说明：只讲**结构、约束和不变量**，不讲用法（用法见 `README.md`、`tools/README.md`）。
 
-版本：`custom_components/crestron` v0.3.0，domain = `crestron`，`iot_class = local_push`。
+版本：`custom_components/crestron` v0.4.0，domain = `crestron`，`iot_class = local_push`。
 
 ---
 
@@ -37,7 +37,7 @@ Crestron 控制系统                        Home Assistant
 | L3 桥接 | `bridge.py`、`__init__.py` (`CrestronHub`) | HA helpers | `to_joins` / `from_joins` 两个方向的数据桥；HA 生命周期粘合 |
 | L4 平台 | `light/switch/climate/cover/sensor/binary_sensor/number/select/media_player.py` | HA + `entity.py`/`device.py`/`schema.py`/`unique_ids.py` | 实体语义、能力推导、乐观状态与反馈调和 |
 
-辅助模块：`const.py`（配置键常量）、`schema.py`（join 号校验器）、`entity.py`（实体 mixin + 平台装配）、`device.py`（HA 设备分组）、`unique_ids.py`（全部 9 个平台的 unique_id 与注册表迁移）、`config_flow.py`（配置项 + 重同步选项）、`diagnostics.py`（诊断导出）。
+辅助模块：`const.py`（配置键常量）、`schema.py`（join 号校验器）、`entity.py`（实体 mixin + 平台装配）、`device.py`（HA 设备分组）、`unique_ids.py`（全部 9 个平台的最终 unique_id 规则与重复检测）、`config_flow.py`（配置项 + 重同步选项）、`diagnostics.py`（诊断导出）。
 
 **L1 与 HA 无关是有意为之**：`mypy.ini` 只对这四个纯模块做类型检查，测试也能在不安装 Home Assistant 的前提下直接加载它们（`tests/loader.py` 用合成包绕开会 `import homeassistant` 的真实 `__init__.py`）。`schema.py` 直接从 `xsig_protocol.py` 取 join 上限——配置校验不依赖传输层。
 
@@ -117,7 +117,7 @@ accept ──► 发 0xFD ──► available=True ──► connect_callback()�
 
 数字 join **只在真正的 `0→1` 跳变时触发**，靠 `_last_digital` 记录每根 join 的前值。仅判断 `value != "0"` 不是边沿检测：`0xFD` 会让对端把**每一根** join 的当前电平报一遍，于是每次连接（HA 重启、主控重启、TCP 断线重连）所有恰好为高的按键 join 都会执行脚本——场景被重放。因此**前值未知一律不算边沿**，连接后的首次上报只建立基线；代价是与连接同一瞬间的按键会漏掉一次，这是刻意选的安全方向。
 
-基线必须跟着**每一次连接**清空，不只是 `stop()`：普通 TCP 重连不会拆掉这个 bridge，断线前记为 `0`、重连后全量同步报 `1` 就又是一次教科书式的假边沿。所以 `_join_change` 一收到 `available` 事件就 `clear()`——这也是 `register_callback` 无条件追加 `AVAILABLE_KEY` 的用处之一。
+基线必须跟着**每一次连接**清空。这件事由 hub 的 **connect 回调**驱动（`CrestronHub._on_connect` → `FromJoinBridge.reset_connection_baseline()`），而不是 availability：availability 回答的是「现在在不在线」且会去重，**新连接接管一条尚未关完的旧连接时它根本不变**——新连接的 `_notify_available(True)` 被去重，旧连接的 `finally` 又发现自己已不是 active writer 而保持沉默，两头都不发事件，陈旧基线原样留下。connect 回调在读循环开始前执行，顺序上正好。断线（`available=False`）时也顺手清一次作为兜底。
 
 ---
 
@@ -135,7 +135,6 @@ configuration.yaml: crestron: !include crestron.yaml
    发起 SOURCE_IMPORT 配置流
         │
         ▼ async_setup_entry()
-   async_migrate_unique_ids()       ← 必须早于平台注册实体
    CrestronHub(...).start()         ← 建 bridge、listen(port)
    hass.data[crestron][hub_wrapper] = hub;  hass.data[crestron][hub] = CrestronXsig
    async_forward_entry_setups(PLATFORMS)
@@ -144,11 +143,11 @@ configuration.yaml: crestron: !include crestron.yaml
    setup_platform_entities(hass, "<platform>", PLATFORM_SCHEMA, factory)
 ```
 
-- 域级 schema 必须 `ALLOW_EXTRA`（实体定义在平台键下、由各平台自校验），代价是拼错的键会被静默忽略；`_warn_unknown_config_keys()` 用白名单显式补一条 warning。
+- 域级 schema 必须 `ALLOW_EXTRA`（实体定义在平台键下、由各平台自校验）。`_warn_unknown_config_keys()` 用白名单返回并记录未知键：首次启动只 warning，reload 遇到未知键直接拒绝并保留旧配置，避免 `lights:` 之类的拼写错误卸载整个平台。
 - `setup_platform_entities()` **逐条**校验+构造实体，单条失败只跳过该条并记 warning，不会让整个平台空掉。
 - `EVENT_HOMEASSISTANT_STOP` 与 `async_unload_entry` 都会走 `hub.stop()`：**先停 bridge（摘回调/模板追踪），再停 server**。
 
-**重新加载**：`async_setup` 只在 HA 启动时读一次 YAML，所以单纯重载配置项会重放 `hass.data` 里的旧副本。`crestron.reload` 服务补上这一步——用 `async_integration_yaml_config()` 重读 configuration.yaml、跑一遍同样的两项检查、覆盖 `YAML_CONF`，再逐个 `async_reload(entry_id)`。**重读失败或新配置里没有 `crestron:` 时保留旧配置并记 error**，不会把一套能用的配置清空。改完（或用转换器重新生成）`crestron.yaml` 后调这个服务即可，不必重启 HA。
+**重新加载**：`async_setup` 只在 HA 启动时读一次 YAML，所以单纯重载配置项会重放 `hass.data` 里的旧副本。`crestron.reload` 服务补上这一步——用 `async_integration_yaml_config()` 重读 configuration.yaml，先检查未知顶层键、平台 section 结构、逐条实体、join 冲突和重复 ID，再覆盖 `YAML_CONF` 并逐个 `async_reload(entry_id)`。**重读失败、缺少 `crestron:`、未知顶层键或整个 section 结构错误时均保留旧配置**；单条坏实体仍与启动一致，只跳过该条。改完（或用转换器重新生成）`crestron.yaml` 后调这个服务即可，不必重启 HA。
 
 ---
 
@@ -179,22 +178,22 @@ configuration.yaml: crestron: !include crestron.yaml
 | 平台 | 要点 |
 |---|---|
 | `light` | 能力由**已配 join** 决定而非 `type` 字段：有 `brightness_join` → 调光灯（0–65535 ↔ HA 0–255，非零亮度不四舍五入到 0）；否则 → `ColorMode.ONOFF` 的继电器灯。色温按 **K 值原样**写模拟 join（2700–6500）。**关灯是两步**：先原样重发当前电平 → `sleep(0.2 s)` → 写 0，凑出控制系统能识别的“高→0”跳变；`_command_seq` 用于在延时期间被再次开灯时取消那个 0。这段是模拟量时序，**不能**并进 `pulse_digital` |
-| `switch` | 三种合法组合由 `_require_writable_join` 强制：仅 `switch_join`（直写电平）/ `on+off(+state_join)`（各 0.2 s 脉冲）/ 二者不可混用。可选 `mode_joins` = `{标签: 数字join}`：任一为高即“开”，命中标签作为只读属性 `mode` 暴露 |
+| `switch` | 三种合法组合由 `_require_writable_join` 强制：仅 `switch_join`（直写电平）/ `on+off(+state_join)`（各 0.2 s 脉冲）/ 二者不可混用。可选 `mode_joins` = `{标签: 数字join}`：任一为高即“开”并暴露对应 `mode`；只有全部已上报且全低才判“关/关闭”，部分同步时状态与属性都不下结论 |
 | `climate` | 一台空调 = 一个实体 = 一台设备。电源用点动 `on/off_join`，**电源状态读这对 join 的回传**（模式 join 只说“是哪个模式”，因此关机后模式锁存不会误判为开机）。运行模式与风速用 `set_one_clear_others`（先清后置，观察者不会看到两根同高）。温度按**原值摄氏整数**读写，绝不跟随 HA 系统单位。室温变化 < `TEMP_REPORT_THRESHOLD`(0.5 °C) 直接丢弃，防止刷爆 recorder。命令后 `POWER_SETTLE_SECONDS`(2 s) 内忽略电源反馈，避免旧反馈把乐观状态打回去 |
 | `cover` | `pos_join` 是 **0–100 直读直写**（不是 XSIG 满量程）。三级降级：真实位置反馈 > 命令推断的乐观位置（`assumed_state = True`，开/关/停按钮永不因反馈被禁用）> 旧式 `is_closed_join` 粗判。一旦收到真实位置，乐观值立即作废 |
-| `number` | 模拟原值直读直写；回传 `0` 一律当“未上报”忽略，避免开机瞬间显示低于 `min` |
+| `number` | 模拟原值按整数直读直写；用 `has_analog()` 区分未上报与真实 `0`；schema 和命令均拒绝小数而不截断；只恢复当前 min/max 范围内的旧值 |
 | `select` | `{选项: 数字join}` 的“置一清零”；全低（切换瞬间）保持上一个值 |
 | `sensor` | `value_join`（可 `divisor`）与 `mode_joins` **恰好二选一**；未上报返回 `None` |
 | `binary_sensor` | 未上报返回 `None`（unknown），绝不返回 False |
-| `media_player` | 音量 0–65535 ↔ 0–1；`source_number_join` 写 0 视为关机，`_last_source_num` 记住上次输入用于开机 |
+| `media_player` | 音量 0–65535 ↔ 0–1；`source_number_join` 写 0 视为关机，`_last_source_num` 记住上次输入用于开机；source 编号仅正整数/ASCII 十进制字符串，整表归一化后编号和显示名均不得重复 |
 
 ---
 
 ## 8. 身份与设备
 
-- **unique_id 必须由“生命周期内一定存在的控制 join”决定**，且**全部 9 个平台都在 `unique_ids.py` 里生成**：改名或补一根反馈 join **不得**产生第二个实体。light/switch 取 `switch_join`→`on_join`，cover 取 `open_join`（pos-only 为遗留回退），climate 取 `on_join`。
-- 由一**组** join 派生的 ID（select 的 `options`、sensor 的 `mode_joins`）取组内**最小** join 号，而不是 YAML 里恰好写在第一个的那根——调整选项书写顺序是编辑习惯，不是换了个设备。旧的顺序相关 ID 有迁移条目。
-- `unique_id_migrations()` 描述历史格式 → 稳定格式的映射，`async_migrate_unique_ids()` 在平台注册前改写注册表，保住实体 ID、历史、区域与仪表盘引用。定位顺序：精确旧 ID → `old_prefix` 前缀 → 同设备候选；**候选多于一个时放弃迁移并 warning**，绝不猜测或删除注册表数据。
+- **unique_id 使用 0.4.0 的最终规则，发布后不再改变**，且全部 9 个平台都在 `unique_ids.py` 里生成。light/switch 取稳定控制 join，cover 取 `open_join`（pos-only 为回退），climate 取 `on_join`。
+- 由一**组** join 派生的 ID（select 的 `options`、sensor 的 `mode_joins`）用**组内全部 join 升序拼接**（`crestron_select_512_513_514`）。只取最小 join 不唯一：`{507,508}` 与 `{507,510}` 会碰撞；完整集合同时避免碰撞和 YAML 书写顺序影响。增删组内 join 被视为换了一项实体定义，会产生新的 ID。
+- **集成绝不自动迁移、删除或认领 entity registry 记录**。旧 ID 缺少足够信息，猜测对应关系可能把另一实体的 entity_id、历史和区域转错。开发版升级、配置删除或构成 ID 的 join 变化留下的 unavailable 实体，由用户在 HA 实体页面确认后手动删除。
 - `device.py::device_info()`：所有平台都支持可选的 `device_id` / `device_name` / `suggested_area`，同 `device_id` 的实体归入同一 HA 设备（例如一台空调的若干实体）。`suggested_area` 只是新设备的建议，不覆盖用户手工设置。
 - 模拟与数字是**独立的编号空间**（a1..a1024 与 d1..d4096 无关）。`entity.py::join_uid()` 因此给数字 join 加 `d` 前缀——混用会让两个实体撞 ID，HA 会静默丢弃后注册的那个。
 
@@ -230,7 +229,7 @@ configuration.yaml: crestron: !include crestron.yaml
 1. `tests/loader.py` 把纯逻辑模块挂到合成包 `crestron_under_test` 下单独加载，使 `schema.py` 的 `from .crestron import ...` 仍能解析，同时绕开会 `import homeassistant` 的真实 `__init__.py`。
 2. 平台测试在 `sys.modules` 里塞 Home Assistant 最小替身，但**保留真实 voluptuous**（所以 `requirements-test.txt` 需要它）。
 
-`test_xsig.py` 是唯一的端到端层：真起 TCP server + ephemeral 端口，覆盖入站解析、字节流拆碎重组、出站序列化、越界裁剪、`0xFB`、精细回调过滤、回调异常隔离、可用性去抖。其余按模块一一对应（协议、强制转换、schema、bridge、join 命令、平台装配、各平台行为、unique_id 迁移、写合并、join 冲突、reload 服务、xlsx 转换）。
+`test_xsig.py` 是主要的端到端层：真起 TCP server + ephemeral 端口，覆盖入站解析、字节流拆碎重组、出站序列化、越界裁剪、`0xFB`、精细回调过滤、回调异常隔离、可用性去抖；`test_connection_takeover.py` 进一步把真实 TCP、连接接管、`FromJoinBridge` 边沿判定和 Script 执行串成一条链。其余按模块一一对应（协议、强制转换、schema、bridge、join 命令、平台装配、各平台行为、最终 unique_id、写合并、join 冲突、reload 服务、xlsx 转换）。
 
 ---
 
@@ -242,7 +241,7 @@ configuration.yaml: crestron: !include crestron.yaml
 4. **成对 join 的反馈判定**统一走 `paired_feedback()`，不要再手写第五份。
 5. **乐观状态只能被确定的反馈覆盖**；命令后需要 settle 窗口的地方（climate 电源）不要省。
 5b. **平台 schema 必须校验能力组合**，不能只逐字段校验——单字段全合法、组合起来无法控制的实体照样会被建出来。
-6. **unique_id 只能依赖必存的控制 join**，且必须在 `unique_ids.py` 里生成；由一组 join 派生时取最小值（顺序无关）。改变生成规则必须同时补迁移。
+6. **0.4.0 的 unique_id 规则是发布边界**：只能在 `unique_ids.py` 中生成；单控制 join 带信号空间前缀，组实体使用完整 join 集合升序拼接。发布后不得改变规则，也不得自动改写 registry 补救。
 7. **反馈路径用 `_schedule_write()`，命令路径用 `async_write_ha_state()`**——把命令路径也改成合并会让按钮出现可感知的延迟。
 8. **模拟/数字编号空间独立**，凡是把 join 号拼进标识符的地方都要带类型前缀。
 9. **回调集合迭代前必须快照**，回调异常必须就地隔离。

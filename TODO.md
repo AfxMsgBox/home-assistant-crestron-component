@@ -1,383 +1,143 @@
-# TODO — 代码待办
+# TODO — `dev` 工作区当前待办
 
-通读全量源码后整理的问题清单。标注 **[已复现]** 的条目附了可运行的复现步骤；标注 **[潜在]** 的是当前配置还碰不到、但规模变大后会踩的坑。
+基线：`dev` / `8bf40d2` 加当前未提交修改。本轮为全量通读代码后的复审结论。
 
-README 是按**代码现状**写的（不是按理想状态），所以修完下面的条目要回头同步 README 对应说明。
+## 已定型的决策（不要再改）
 
-> 编号沿用最初的清单，**不重新编号**，以免和历史讨论/提交信息对不上。所以数字是不连续的，看状态请以下面两张表为准。
+- **unique_id 规则在 0.4.0 正式发布后冻结**。
+- **集成不做 unique_id 迁移**，运行时不读取、修改或删除 HA 实体注册表。开发阶段
+  每次测试都是「删除集成 → 重新添加」，不存在遗留实体需要迁移；发布后规则不变，
+  也就不会再产生需要迁移的场景。
+- 组 ID（select / mode sensor）使用**完整 join 组升序拼接**，例如
+  `crestron_select_512_513_514`。
 
----
+## 上一轮已完成（已验证）
 
-## 📊 一览
+301 个测试通过、mypy 通过、转换器输出仍能通过新 schema、真实配置（264 实体 /
+750 join）零回归。
 
-### 🔴 待办（8 项）
-
-按建议动手顺序分批，同一批可以一起收拾。
-
-| 批次 | # | 问题 | 优先级 | 主要文件 |
-|---|---|---|---|---|
-| **② 静默失败** | [8](#8-_to_int-只认纯数字串join-号带小数点就被静默丢弃-潜在) | `_to_int` 吞掉带小数点的 join 号 **[潜在]** | P2 | `tools/xlsx_to_yaml.py` |
-| **④ 一致性收尾** | [14](#14-number--select-的恢复逻辑与-switch--light-不一致) | `number`/`select` 恢复逻辑与 `switch`/`light` 不一致 | P2 | `number.py` / `select.py` |
-| **④ 一致性收尾** | [15](#15-杂项各一两行可一起收拾) | 杂项 6 条（各一两行） | P2 | 多处 |
-| **⑤ 按需** | [13](#13-_write-没有背压) | `_write()` 没有背压 | P2 | `crestron.py` |
-| **⑤ 按需** | [16](#16-串行超长丢弃只记-info) | 串行超长丢弃只记 `info` | P2 | `crestron.py` |
-| **⑤ 按需** | [17](#17-set_serial-超长时截断-vs-丢弃的取舍) | `set_serial` 超长：截断 vs 丢弃 | P2 | `crestron.py` |
-| **⑤ 按需** | [18](#18-仓库地址不一致) | 仓库地址不一致 | P2 | `manifest.json` |
-| **⑤ 按需** | [19](#19-media_player-等平台缺少批量生成支持) | `media_player` 等平台缺批量生成 | P2 | `tools/xlsx_to_yaml.py` |
-
-### ✅ 已修复（11 项）
-
-| # | 问题 | 原优先级 | 验证方式 |
-|---|---|---|---|
-| [1](#1-climate-实体不归属-ha-设备) | `climate` 实体不归属 HA 设备 | P0 | 单测 ✅ / 真机 ⏳ |
-| [4](#4-settle-看门狗-typeerror) | settle 看门狗 `TypeError` | P1 | 单测 ✅（含回退验红） |
-| [5](#5-选项对话框不打勾提交会无限重弹) | 选项对话框不打勾提交会无限重弹 | P1 | 仅代码审查 / 真机 ⏳ |
-| [6](#6-连接建立时不下发-to_joins) | 连接建立时不下发 `to_joins` | P1 | 单测 ✅（4 例） |
-| [7](#7-unique_id-混用模拟数字编号空间) | `unique_id` 混用模拟/数字编号空间 | P2 | 单测 ✅（**无需实体迁移**） |
-| [2](#2-ci-每次-push-必红workflow-依赖两个已被删除的文件-已复现) | CI 每次 push 必红 | P0 | 四个文件均在工作区，本地 unittest + mypy 均通过 |
-| [3](#3-gitignore-被删pycache-会被误提交) | `.gitignore` 被删 | P0 | 文件已存在 |
-| [9](#9-重复的-join-键会静默覆盖) | 重复的 `join:` 键静默覆盖 | P2 | 单测 ✅（12 例）+ 真实 yaml 对照，无误报 |
-| [12](#12-诊断下载不脱敏串行-join) | 诊断下载不脱敏串行 join | P2 | 单测 ✅（脱敏后仍可判断 join 是否上报过） |
-| [10](#10-crestron-下的平台键写错不报错) | `crestron:` 下的平台键写错不报错 | P2 | 真实 yaml 对照，无误报 |
-| [11](#11-sensor--binary_sensor-上报前返回-0--false) | `sensor`/`binary_sensor` 上报前返回 0/False | P2 | 单测 ✅（11 例）⚠️ 行为变更 |
-
-⚠️ 提醒：**#11 是行为变更**，部署后留意；已修的这批在 CI 上**一次都没跑过**（因为 #2）。
+- reload 时未知顶层键会拒绝重载并保留旧配置；首次启动仍只 warning。
+- number 按 XSIG 能力限定为整数，真实零反馈不再丢失，恢复值受 min/max
+  约束，小数配置和命令不会再被静默截断。
+- media_player sources 只接受正整数或 ASCII 十进制字符串，整张 mapping
+  归一化后检查编号和显示名重复。
+- 连接接管测试已覆盖真实 TCP → FrameDecoder → FromJoinBridge → Script：
+  新连接首次高电平不触发，随后真实 `0→1` 只触发一次。
+- switch 的 `mode_joins` 状态与 `mode` 属性使用同一完整性判据：部分同步时不再
+  提前显示“关闭”，全部上报且全低后才判关闭。
+- README 与 ARCH 已同步上述行为。
 
 ---
 
-## 🔁 第二轮代码审查修复（无原编号）
+# 本轮新发现
 
-| 问题 | 影响 | 修复 |
-|---|---|---|
-| **上一轮的上升沿修复没闭环**：普通 TCP 重连不会调用 `stop()`，`available` 回调又被直接忽略 | 断线前记为 `0`、重连全量同步报 `1` → 仍被当成真实按键。**上一轮声称修好的 bug 实际只覆盖了首次连接** | `_join_change` 收到 `available` 即清空基线；补重连不误触、重连后真实按键仍生效两个用例 |
-| `start()` 失败泄漏 bridge | `listen()` 端口占用时模板追踪已注册且无人能停 —— 每次失败重载多留一套 | `start()` 自行清理并重新抛出 |
-| 平台转发失败不关 server | 端口一直被占，下次重载撞上自己的孤儿 | `async_forward_entry_setups` 包 try/except，失败即 `hub.stop()` |
-| `async_reload()` 抛异常不进回滚 / 回滚结果不检查 | 异常逃逸后新（坏）配置留在 `hass.data` | 两处都包 try/except；回滚后仍失败会明确报错 |
-| `light:` 不是列表时静默忽略 | 「重载成功」但灯全没了 | `_invalid_entities` 与 `setup_platform_entities` 都报错 |
-| unique_id 碰撞只警告 | HA 静默丢弃后注册的实体 | `setup_platform_entities` 显式跳过并指名两个配置；胜者变成 YAML 顺序而非注册顺序 |
-| 组 ID 迁移遗漏 | 升级同时调整了选项顺序 → 旧实体成孤儿 | 对组内**每一根** join 都登记一条迁移；注册表里不存在的自然跳过 |
-| YAML 裸标量改变类型 | `on`/`off`/`null`/`123`/`0x1F` 会被解析成 bool/None/int | 裸输出要求首字符为字母且不在 YAML 保留字表内 |
-| 分组注释未处理换行 | 楼层/房间带换行会破坏 YAML | 注释内空白统一折叠为空格 |
-| `to_joins` 只写 `join` | 运行时静默不发送 | schema 要求 `entity_id` 或 `value_template`；`attribute` 必须配 `entity_id` |
-| media_player 允许来源 `0` | 0 是本组件的关机值 → 该来源永远开不了机 | 来源编号要求 ≥ 1 |
-| `divisor` 允许 0/nan/inf | 0 被构造函数静默改成 1 | 要求有限且非零 |
-| number 的 min/max/step 允许 nan | nan 比较恒为 False，绕过顺序校验 | 显式 `isfinite` 校验 |
-| 同步耗时起点在 connect_callback 之后 | 「first frame after 0xFD」漏掉一次全量 to_joins 下发，可能显示 0.00s | `t_request` 移到 `0xFD` 写出之后立即取 |
-| 文档 | README 的 `to_joins` 示例用了不存在的 `value` 变量；转换器实际需 3.8+（海象）；ARCH 仍写串行未脱敏；`strings.json` 是中文导致未翻译语言回退中文；冲突日志措辞不准 | 逐条改正；`strings.json` 换成英文源，中文留在 `zh-Hans.json` |
+## P1：行为矛盾，建议合并前修复
 
----
+### 1. climate 没有跟上 number 刚立下的两条规则
 
-## 🔁 第一轮代码审查修复（无原编号）
+**文件**：`custom_components/crestron/climate.py`
 
-外部审查发现、已修复并补测试的问题。列在这里以免和上面的编号体系混淆。
+number 这一轮明确了两条语义，climate 作为温度的主要入口两条都还是旧行为，同一个
+值走两个平台结果相反。
 
-| 问题 | 影响 | 修复 |
-|---|---|---|
-| `from_joins` 不是真上升沿：只忽略 `"0"`，不记前值 | **每次连接/重连的 `0xFD` 全量上报会把所有当时为高的按键 join 当成按下**，重启即重放场景 | `bridge.py` 记录每根数字 join 的前值，只有 `0→1` 才触发；连接后首次上报仅建立基线。README 已说明取舍 |
-| `pulse_digital` 无 `finally` | 0.2 s 保持期内被取消（重载/停机）→ **join 永久留在高电平**，继电器一直吸合 | 释放移入 `finally`；4 个平台共用此函数 |
-| 平台 schema 无能力组合校验 | 手写 YAML 可生成无法控制的实体和 `crestron_light_onoff_None` | `light` 增加能力组合校验；`sensor`/`select`/`media_player` 拒绝空集合；`number` 校验 `min<max`、`step>0` |
-| `vol.All(int, ...)` 放行 `bool` | `on_join: true` 变成回调键 `"dTrue"`，永不匹配 | `schema.py` 显式拒绝 `bool` |
-| unique_id 迁移假定每项都是 dict | 一条格式错误的实体配置让**整个集成起不来**（迁移跑在平台校验之前） | 逐条跳过并告警；整体再包一层兜底 |
-| 组 unique_id 可能碰撞 | 两个只读 mode sensor 共用最小 join → HA 静默丢弃其中一个 | 新增 `duplicate_unique_ids()`，启动/重载时告警 |
-| reload 无回滚 | 新端口绑不上 → 配置项起不来，且旧配置已被覆盖 → **一个实体都不剩** | 先整体预校验并列出会被跳过的实体；加载失败自动回滚上一份配置 |
-| reload 任何人可调用 | 重载会重绑端口、重建所有实体 | 改用 `async_register_admin_service` |
-| 日志把帧数写成 join 数 | 「332 joins」实为 332 帧 | 改为「N frames covering M joins」 |
-| `state_join` / `is_closed_join` / media_player 未用 `has_*` | 首次同步前把「未知」显示成关/开/0 | 未上报一律返回 `None` |
-| mode sensor 过早判「关闭」 | 初始同步中第一根低电平 join 到达就报「关闭」 | 改为所有 mode join 都上报过才判定 |
-| 转换器不转义换行/控制字符 | Excel 单元格里的换行会生成折叠或损坏的 YAML | `_yaml_scalar` 转义 `\n\r\t` 及 C0 控制字符 |
-| 部署脚本直接重启 | 配置有错时 HA 起不来 | 重启前先跑 `ha core check`，不通过则中止 |
-
----
-
-# 🔴 待办详情
-
-## 批次 ① — P0，现在就是坏的
-
-### 2. CI 每次 push 必红：workflow 依赖两个已被删除的文件 **[已复现]**
-
-**文件**：`.github/workflows/tests.yml`（已提交）、`requirements-test.txt`、`mypy.ini`（**未提交**）
-
-workflow 里有两步：
-
-```yaml
-- name: Install test dependencies
-  run: pip install -r requirements-test.txt      # ← 文件不在仓库里
-- name: Type-check pure-logic modules
-  run: mypy --config-file mypy.ini               # ← 文件不在仓库里
-```
-
-但这两个文件被删过：
-
-```
-50dcf72 Delete mypy.ini
-20e4b18 Delete requirements-test.txt
-```
-
-它们现在只以**未跟踪文件**的形式躺在工作区（`git status` 里是 `??`），内容是完好的。CI 拉的是干净 checkout，所以第一步 `pip install -r requirements-test.txt` 直接失败，**后面的测试和类型检查根本没跑过**。
-
-**修复**：
-
-```bash
-git add requirements-test.txt mypy.ini
-```
-
-**顺带解决**：这同时是「缺 voluptuous 时本地测试报错」的正解——`requirements-test.txt` 里已经写了 `voluptuous` 和 `mypy`，本地照着装一次即可：
-
-```bash
-pip install -r requirements-test.txt
-```
-
-**验证**：`git ls-files | grep -E 'requirements-test|mypy.ini'` 应当有输出；然后在干净 clone 里跑一遍 workflow 的三步。
-
-> 注意 `.github/workflows/tests.yml` 工作区里还有一处**未提交的注释改动**（把「voluptuous 只有 test_schema.py 需要」改成「平台测试也要用真 voluptuous schema」）——那个新注释才是对的，一并提交。
-
-### 3. `.gitignore` 被删，`__pycache__` 会被误提交
-
-**文件**：仓库根（`469eb02 Delete .gitignore`）
-
-`git status` 现在有三个未跟踪的 `__pycache__/`（`custom_components/crestron/`、`tests/`、`tools/`）。任何人一次 `git add -A` 就会把编译产物提交进去。
-
-**修复**：恢复一个最小 `.gitignore`：
-
-```gitignore
-__pycache__/
-*.py[cod]
-.mypy_cache/
-```
-
----
-
-## 批次 ② — 配置类静默失败
-
-两条都只需加告警或放宽解析，改动都很小。
-
-### 8. `_to_int` 只认纯数字串，join 号带小数点就被静默丢弃 **[潜在]**
-
-**文件**：`tools/xlsx_to_yaml.py:100-102`
+**1a. 温度设定静默截断**（`climate.py:353`）
 
 ```python
-def _to_int(value):
-    value = (value or "").strip()
-    return int(value) if value.isdigit() else None
+self._hub.set_analog(self._set_temp_join, int(temp))
 ```
 
-实测：
+`int(25.5)` → `25`。number 现在会明确拒绝小数（"不能静默截断"），climate 仍然
+悄悄改值。
 
-| 输入 | 结果 |
-|---|---|
-| `'505'` | `505` ✅ |
-| `'505.0'` | `None` ❌ |
-| `'-1'` | `None` |
-| `'5e2'` | `None` |
-
-Excel 把单元格存成数值格式时，XML 里出现 `505.0` 是完全可能的（改过单元格格式、经第三方工具另存、公式缓存值）。一旦发生，**该 join 被静默当成「没填」**：灯少一个色温、空调少一档风速、整行被跳过——终端只会打一句 `skipped N placeholder/empty row(s)`，没有任何指向具体行的报错。
-
-你当前这份 xlsx 存的是整数，所以现在没事。
-
-**修复**：容忍小数与负号，并对「填了但解析不出来」的格子出声：
+**1b. 真实的 0 被当作「未上报」丢弃**（`climate.py:244`、`248`、`259`）
 
 ```python
-def _to_int(value):
-    value = (value or "").strip()
-    if not value or value == "//":
-        return None
-    try:
-        f = float(value)
-    except ValueError:
-        return None          # 真·占位符
-    if f != int(f):
-        return None          # 425.5 这种不是合法 join
-    return int(f)
+v = self._hub.get_analog(self._reg_temp_join)
+if v:                       # 0 在这里等于「没收到」
+    self._reported_temp = v
 ```
 
-再在 `generate()` 里把「非空但解析失败」的格子按 sheet+行号打印出来。
+实测：主控上报室温 `0` → `current_temperature` 保持 `None`；上报 `22` 才生效。
+车库、露台这类位置 0 °C 是真实读数，而 `has_analog()` 已经存在——number 正是用它
+修好的同一个问题。
 
-### 9. 重复的 `join:` 键会静默覆盖
+**建议**：
 
-**文件**：`custom_components/crestron/bridge.py:68`（`to_joins`）、`:133`（`from_joins`）
+- `async_set_temperature` 复用 number 的 `_whole_number()` 判定（建议提到共用
+  模块，避免出现第三份实现）；小数拒绝而不是截断。
+- 室温与设定值改用 `has_analog()` 判定是否上报过，上报过就接受 0。
+- 补测试：设定 25.5 被拒、室温 0 °C 能上报。
 
-```python
-self._join_to_template[join] = template      # 同一个 join 写两遍 → 后者胜
-self._scripts[entry[CONF_JOIN]] = Script(...)
-```
+### 2. reload 对未知顶层键收得过宽，形成单向死锁
 
-`to_joins` 里把 `d12` 写两遍（复制粘贴配置时很常见），前一条被无声丢掉。`from_joins` 同理，同一个面板按键绑两个脚本时只有最后一个生效。
+**文件**：`custom_components/crestron/__init__.py:101`、`:287`
 
-**修复**（已完成）：新增 `join_registry.py`，在 `async_setup` 与 `crestron.reload` 时检查整份配置的 join 归属，重复的 `to_joins`/`from_joins` 键会明确报「只有最后一条生效」。同一个检查还覆盖了原计划之外的一类问题：两个实体（或一个实体与一条 `to_joins`）写同一根 join。只读镜像（`sensor` 的 `mode_joins` 跟着空调模式走等）不算冲突，对本仓库 264 实体 / 750 join 的真实配置零误报。结果也进了诊断下载的 `join_usage`。
+拼错 `lights:` 会删光所有灯，这个方向是对的。但当前实现是「**存在任何**未知顶层
+键 → 拒绝 reload」，而 `async_setup()` 启动时只 warning。
 
-`bridge.py` 仍然是「后者胜」——检测到并报出来即可，改成一个 join 触发多个脚本属于功能增强，未做。
+实测：含未知键 `fan:` 的配置，HA 启动正常加载，`crestron.reload` **永远被拒绝**，
+错误信息还提示是"拼写错误"。结果是一份能跑的配置再也无法热重载。
+
+**建议**：判据从「存在未知键」收紧为「未知键导致某个**原本存在的平台段消失**」
+——对比新旧配置，只有当某个平台在旧配置里有实体、新配置里整段不见时才拒绝。其余
+未知键维持 warning，与启动保持一致。
 
 ---
 
-## 批次 ③ — 隐私
+## P2：测试与清理
 
-### 12. 诊断下载不脱敏串行 join
+### 4. 独立反馈 join 的测试覆盖仍不完整
 
-**文件**：`custom_components/crestron/crestron.py:280-300`、`custom_components/crestron/diagnostics.py`
+**文件**：`tests/test_switch_feedback.py`、`tests/test_onoff_light.py`、
+`tests/test_climate_filter.py`
 
-`diagnostics()` 原样导出 `serial` 缓存全部内容。串行 join 常用来推送天气、门禁姓名、日程等文本，而诊断包的用途就是**发给别人排障**。
+switch FakeHub 已补 `has_digital()`，`mode_joins` 的部分同步/高电平/全低路径也已
+覆盖；仍缺 switch 和 light 的 `state_join` / `switch_join` 用例。light FakeHub
+还没有 `has_digital()`，测试这些分支时会先抛 `AttributeError`。
 
-**修复**（已完成）：`diagnostics(redact=True)` 默认把串行正文换成 `<N chars redacted>`、把对端地址换成 `**REDACTED**`。join 号、字符数和 `cache_counts` 保留——判断「这根 join 报没报过」只需要这些。数字/模拟量是电平和数值，原样保留。README「下载诊断」一节已说明。
+climate 当前不需要 `has_digital()`；修复上面的温度零值问题时，应给它的 FakeHub
+补 `has_analog()`，并把现有“零值被丢弃”测试反转为“真实 0 °C 正常上报”。
 
----
+### 5. `join_uid()` 已是死代码，但仍被测试维护
 
-## 批次 ④ — 一致性与收尾
+**文件**：`custom_components/crestron/entity.py:35`、
+`tests/test_setup_platform_entities.py`（10 处引用）
 
-### 14. `number` / `select` 的恢复逻辑与 `switch` / `light` 不一致
+unique_id 现在全部由 `unique_ids.py` 生成，`join_uid()` 在 production 里**没有
+任何调用者**，只剩测试在测它。
 
-**文件**：`custom_components/crestron/number.py:59-75`、`custom_components/crestron/select.py:53-65`
+**建议**：删除 `join_uid()` 与对应的 `JoinUidTests`。它要防的「模拟/数字编号空间
+混用」问题，已由 `unique_ids.py` 各平台显式的 `d` 前缀和 `duplicate_unique_ids()`
+覆盖。
 
-这俩是 `if 已连接: 读实时反馈 / else: 恢复重启前的值`——**二选一**。于是「已连接、但这根 join 主控还没推过」时，既不读反馈（读到 0/None 被当作未知丢弃）也不恢复，实体显示「未知」。
+### 6. 未使用的导入
 
-`switch.py:103-113` 和 `light.py:198-209` 用的是更好的顺序：**先恢复兜底，再用确定的实时反馈覆盖**。
-
-**修复**：把 number/select 改成和 switch/light 一致的两段式。
-
-### 15. 杂项（各一两行，可一起收拾）
-
-- **`from_joins` 所有脚本共用一个 `Context`**（`bridge.py:130`）：`self.context = Context()` 建一次就反复用。HA 惯例是每次运行给一个新 Context，否则自动化追踪里所有面板按键触发看起来都是同一个来源，还可能干扰 HA 的循环检测。改成在 `_run_script` 里 `Context()`。
-- **卸载时 `hass.data` 残留**（`__init__.py:115-122`）：只 `pop(HUB_WRAPPER)`，`HUB` 和 `YAML_CONF` 留着。重载会被新值覆盖，不算泄漏，但 `HUB` 指向已停掉的 `CrestronXsig`，谁在这个窗口里读它会拿到僵尸对象。
-- **`remove_callback` 留空集合**（`crestron.py:93-96`）：遍历所有 join 的集合做 discard，空集合本身不删。实体反复增删会慢慢堆积空 set。量级极小。
-- **`encode_analog` 的 join 高位没掩码**（`xsig_protocol.py:74`）：`(join - 1) >> 7` 未与 `0b111` 相与，join > 1024 会溢出到 bit3（串行判别位）。调用方 `set_analog` 和 schema 都已挡住越界，属于纵深防御。
-- **`stop()` 绕过了 `_notify_available`**（`crestron.py:62-63`）：直接 `_available = False` + `_dispatch`，即使本来就是 False 也会广播一次。无害，但和「可用性去抖」的设计不一致。
-- **`strings.json` 是中文**：HA 约定 `strings.json` 为**英文源**、`translations/en.json` 由它生成。现在 `strings.json` 与 `zh-Hans.json` 内容相同（中文），意味着非中英语系用户回退到的是中文。把 `strings.json` 换成英文即可。
+- `custom_components/crestron/bridge.py:25` — `CONF_TO_HUB`、`CONF_FROM_HUB`
+- `custom_components/crestron/join_registry.py:25` — `Optional`
 
 ---
 
-## 批次 ⑤ — 按需
+## 记录：number 的读写范围不对称（暂不改，但应补进文档）
 
-### 13. `_write()` 没有背压
+`async_set_native_value()` 拒绝超出 `min`–`max` 的写入，恢复值也检查范围，但
+**实时反馈不检查**——主控上报 0 时 `min: 16` 的实体会显示 0。
 
-**文件**：`custom_components/crestron/crestron.py:327-334`
-
-```python
-def _write(self, data):
-    ...
-    self._writer.write(data)     # 从不 await writer.drain()
-```
-
-`set_*` 都是同步方法（被同步的实体属性/回调调用），没法 await。正常流量下无所谓，但 `sync_all()` 一次性下发上百个 join、或主控 TCP 接收窗口卡住时，asyncio 的发送缓冲会无上限增长。
-
-**部分处理**：`sync_all()` 现在包在 `CrestronXsig.batched_writes()` 里，整轮全量下发合并成**一次** `writer.write()`（几百次小写入 → 1 次）。这消掉了「一次性下发上百个 join」这条触发路径，但**没有**引入背压——主控接收窗口卡住时缓冲仍会增长。
-
-**剩余修复**：low 成本方案是加个 `writer.transport.set_write_buffer_limits()` + 在缓冲超限时打 warning；彻底方案是改成异步发送队列（改动大，收益不明确）。**当前规模下不急**，记一笔。
-
-### 16. 串行超长丢弃只记 `info`
-
-**文件**：`custom_components/crestron/crestron.py:365`
-
-默认 `logger: default: warning` 下这条完全不可见，用户会以为帧发出去了。旁边的 join 越界都是 `_LOGGER.warning`。**建议改成 `warning`**：数据被丢弃属于异常，不是常规信息。
-
-同一函数 `crestron.py:329` 的「没有连接，发不出去」保持 `info` 是合理的（主控没连时会疯狂刷屏）。
-
-### 17. `set_serial` 超长时「截断 vs 丢弃」的取舍
-
-**文件**：`custom_components/crestron/crestron.py:363-369`
-
-目前超 252 字节整帧丢弃。对「当前天气：…」这类 `to_joins` 串行推送，丢弃意味着面板一直显示旧值。可以考虑按 UTF-8 字符边界截断后发送（并打 warning），比整条丢掉更有用。**需要先确认主控侧对截断文本的容忍度**，属于行为变更，不要顺手改。
-
-### 18. 仓库地址不一致
-
-> ⚠️ 本地工作区**不是 git 仓库**，没有 remote 可比对，无法从这里确认哪个地址才是对的。需要你确认 `manifest.json` 里的 `documentation` / `codeowners` 是否为目标仓库。
-
-**文件**：`custom_components/crestron/manifest.json:5,7`
-
-```json
-"documentation": "https://github.com/zqyuan/home-assistant-crestron-component/blob/master/README.md",
-"codeowners": ["@zqyuan"],
-```
-
-但实际 remote 与 `tools/update.sh:6` 都是 `AfxMsgBox/home-assistant-crestron-component`。HA 前端「文档」链接会指到一个可能不存在/不同步的仓库。
-
-**修复**：三处统一。顺带：仓库没有 `hacs.json`，如果打算走 HACS 分发需要补。
-
-### 19. `media_player` 等平台缺少批量生成支持
-
-**文件**：`tools/xlsx_to_yaml.py:290-295`
-
-`SHEET_BUILDERS` 只有 `灯光 / 插座 / 窗帘 / 空调`。`media_player`、`binary_sensor`、`number`、`select` 只能手写。如果 join 表里以后加了对应 sheet，需要补 builder。目前不是问题，记一笔。
+方向应该是对的（反馈是事实，不该被夹断），但三条路径的严格程度不一致，README
+目前没有说明。建议在 Number 一节补一句：范围约束作用于写入与恢复，主控回传的
+真实值原样显示。
 
 ---
 
-# ✅ 已修复详情
+## 暂缓项
 
-> 这批改动都还在工作区**未提交**，且因为 #2，**在 CI 上一次都没跑过**。
+以下项目需要先确定运行语义或扩大产品范围，不在本轮直接改动：
 
-### 1. `climate` 实体不归属 HA 设备
-
-<sub>原 P0 · 验证：单测 ✅ / 真机 ⏳</sub>
-
-`climate.py` 曾是九个平台里唯一没有 `from .device import device_info`、也从未设置 `_attr_device_info` 的，而 `tools/xlsx_to_yaml.py:284-285` 确实给每台空调生成了 `device_id` / `device_name`。因为 climate 的 schema 是 `extra=vol.ALLOW_EXTRA`，这两个键被静默吞掉，不报错也不生效——空调在 HA「设备」列永远是 `—`。
-
-**改动**：
-
-- `climate.py:55` 加 `from .device import device_info`；`climate.py:152` 加 `self._attr_device_info = device_info(config)`（紧跟 `_attr_unique_id`，与其余平台顺序一致）。
-- `tests/test_climate_filter.py`：climate 现在会 import `.device` → 多 stub 一个 `homeassistant.helpers.entity`（`DeviceInfo=dict`，与 `test_switch_feedback.py:38` 等一致）；新增 `DeviceGroupingTests` 三例锁住行为。
-- `README.md`：去掉两处 ⚠️ 标注，「设备分组」改回「所有平台都支持」。
-
-**验证**：`python3 -m unittest test_climate_filter` → `Ran 12 tests ... OK`。**尚未在真实 HA 里跑过**——部署后请到 设置 → 设备与服务 → 设备 确认每台空调出现为独立设备。
-
-### 4. settle 看门狗 `TypeError`
-
-<sub>原 P1 · 验证：单测 ✅（含回退验红）</sub>
-
-看门狗的判断条件从 `stats["first"] is not None` 改成 `stats["last"] is not None`（`crestron.py:257`）——`last` 非 None 蕴含 `first` 非 None，且 `last` 正是那个会被读到 `None` 的字段。
-
-**验证**：新增 `tests/test_xsig.py::SettleWatchdogTests`，把 `SYNC_SETTLE_SECONDS` 临时压到 0.05s、注册一个 sleep 0.25s 的回调，用 loop exception handler 收集未处理异常。**把修复退回去跑过一遍，确认测试会红**（报出原始的 `TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'`），再恢复。
-
-### 5. 选项对话框不打勾提交会无限重弹
-
-<sub>原 P1 · 验证：仅代码审查 / 真机 ⏳</sub>
-
-`config_flow.py:51-63`：把「有没有提交」和「勾没勾」拆成两层判断，提交后无论如何都 `async_create_entry` 关掉对话框，只有勾选时才触发 `resync_to_joins()`。
-
-**验证**：仅代码审查。config_flow 需要 stub 掉 `homeassistant.config_entries`，为一个三行分支搭这套 stub 收益不高。**改动是纯控制流，建议在真实 HA 里点一次确认**：打开选项 → 不勾 → 提交 → 对话框应当关闭且不触发重发。
-
-### 6. 连接建立时不下发 `to_joins`
-
-<sub>原 P1 · 验证：单测 ✅（4 例）</sub>
-
-- `crestron.py`：新增 `register_connect_callback()`（与既有 `register_sync_all_joins_callback` 同构），在 `handle_connection` 发完 `0xFD`、置 available 之后调用；用 try/except 包住，一个坏模板不会拖垮本来正常的连接。
-- `__init__.py:167-173`：`CrestronHub` 把 `self._sync_all` 同时注册到连接回调上。重发一个没变的值在协议层是幂等的，所以和主控紧接着发来的 `0xFB` 撞车无害。
-
-**验证**：新增 `tests/test_xsig.py::ConnectCallbackTests` 四例——首次连接触发、**断开重连再次触发**、回调抛异常不影响连接（后续帧仍能解析、available 仍为真）、没注册回调也不出错。
-
-> 原 TODO 里「HA 重启后是否也有这个缺口」取决于 `async_track_template_result` 的语义，**那部分我仍未实证**（本机装不了 HA）。不过本次修复覆盖的是更确定、也更常见的那一半：**每次连接建立都会推**，HA 重启后主控重连同样会走到这条路径，所以两种场景实际上都被兜住了。
-
-### 7. `unique_id` 混用模拟/数字编号空间
-
-<sub>原 P2 · 验证：单测 ✅ · **无需实体迁移**</sub>
-
-**改法与原计划不同**，见下方说明。新增 `entity.py::join_uid(analog=(), digital=())`：模拟量候选保持**裸数字**，数字量候选加 `d` 前缀。两个空间就此不可能重叠，而**模拟量那一路的 id 与修复前完全一致**。
-
-- `cover.py:102-105`：`join_uid(analog=(pos_join,), digital=(open_join, close_join))`
-- `climate.py:150-156`：`join_uid(analog=(reg_temp_join, set_temp_join), digital=(on_join,))`
-
-**为什么不按原计划加 `a`/`d` 双前缀**：那会把 `crestron_cover_480` 变成 `crestron_cover_a480`，**你现有的每一个 cover 和 climate 实体都会变成不可用孤儿**（entity_id、历史数据、自动化与看板里的引用全断），而当前配置里**根本没有实际碰撞**——纯粹是拿真实损失换一个假想收益。非对称方案同样根治了碰撞，代价为零。
-
-**残留边界**（已接受）：两台空调若共用同一个模拟量 join（比如 A 的 `reg_temp_join` 和 B 的 `set_temp_join` 都是 415），仍会撞。但那本身就是配置错误——同一根模拟 join 不可能既是 A 的室温又是 B 的设定值。
-
-**验证**：`tests/test_setup_platform_entities.py::JoinUidTests`（纯函数 5 例）、`test_cover_position.py::UniqueIdTests`、`test_climate_filter.py::UniqueIdTests`——都显式断言了「带模拟 join 的实体 id 保持裸数字不变」，把「不迁移」这条性质锁住了。
-
-### 10. `crestron:` 下的平台键写错不报错
-
-<sub>原 P2 · 验证：真实 yaml 对照，无误报</sub>
-
-`__init__.py` 新增 `_KNOWN_CONFIG_KEYS`（`PLATFORMS` + `port`/`to_joins`/`from_joins`）与 `_warn_unknown_config_keys()`，在 `async_setup` 里对 `config[DOMAIN]` 的顶层键查一遍，不认识的打 warning 并列出合法键。**只警告不报错**，保留向前兼容余地。
-
-**验证**：拿真实 xlsx 生成的 `crestron.yaml` 对照，其产出的 5 个顶层键（`port`/`light`/`switch`/`cover`/`climate`）全在白名单内，**无误报**；`lights` 这类 typo 会被抓到。
-
-### 11. `sensor` / `binary_sensor` 上报前返回 0 / False
-
-<sub>原 P2 · 验证：单测 ✅（11 例）· ⚠️ **行为变更**</sub>
-
-改用 `CrestronXsig` 早就提供、但一直没人用的 `has_analog()` / `has_digital()` 谓词：
-
-- `sensor.py:83-98`：模拟量 join 没被推送过 → `None`；`mode_joins` 一根都没报过 → `None`（报过而全低才是 `关闭`）。
-- `binary_sensor.py:46-54`：join 没被推送过 → `None`。
-
-**关键是要区分「没上报过」和「真的是 0」**——真实推送来的 `0` / `False` 仍然照常上报，不能一起吞掉。
-
-**验证**：新增 `tests/test_sensor_unknown.py`（sensor / binary_sensor 此前**完全没有测试**），11 例覆盖三类：未上报→`None`、上报后正常读数、**真实的 0/False 不被误吞**。
-
-> ⚠️ **行为变更，部署后留意**：这些实体在主控首次推送该 join 之前会显示「未知」而不是 0/off。如果你有自动化写的是 `is_state('binary_sensor.x', 'off')`，在 HA 刚启动、主控还没连上的窗口里将不再成立（改用 `is_state(..., 'on')` 取反，或加 `not is_state(..., 'unknown')` 判断）。这是**更正确**的行为——之前那个 `off` 是集成凭空断言的。
+1. 出站 socket 写入没有有界队列和真正背压。需要先确定队列上限、满载时合并/
+   丢弃策略、重连后的重放规则，并处理 writer 生命周期与顺序保证。
+2. `from_joins` 后台脚本任务没有集中跟踪、取消和并发限制，并共用一个
+   `Context`。需要决定同一 join 是否串行、不同 join 的并发上限，以及 reload/
+   stop 时正在执行的 HA 脚本应取消还是允许完成。
+3. `set_serial` 超长时整帧丢弃。改为字节截断可能切断 UTF-8 字符或改变控制系统
+   语义，需先确认主控端期望。
+4. xlsx 转换器只生成灯光、插座、窗帘和空调。是否扩展 number/select/sensor/
+   binary_sensor/media_player，需要先定义 sheet、表头和示例工作簿格式。
