@@ -82,7 +82,12 @@ def _read_sheet(z, path, shared):
     ws = ET.fromstring(z.read(path))
     data = ws.find(_A + "sheetData")
     grid = []
+    excel_row = 0
     for row in data.findall(_A + "row"):
+        # Empty Excel rows may be omitted from sheet XML. Preserve the row's
+        # actual index instead of numbering only the rows that are present.
+        # The optional r attribute defaults to the next row after the last one.
+        excel_row = int(row.get("r", excel_row + 1))
         cells = {}
         maxc = -1
         for c in row.findall(_A + "c"):
@@ -100,12 +105,12 @@ def _read_sheet(z, path, shared):
                 if isv is not None:
                     val = "".join(tt.text or "" for tt in isv.iter(_A + "t"))
             cells[ci] = val.strip()
-        grid.append([cells.get(i, "") for i in range(maxc + 1)])
+        grid.append((excel_row, [cells.get(i, "") for i in range(maxc + 1)]))
     if not grid:
         return _SheetRows()
-    header = grid[0]
+    _, header = grid[0]
     rows = []
-    for excel_row, raw in enumerate(grid[1:], start=2):
+    for excel_row, raw in grid[1:]:
         parsed = {
             header[i]: (raw[i] if i < len(raw) else "")
             for i in range(len(header))
