@@ -278,26 +278,43 @@ crestron: !include custom_components/crestron/crestron.yaml
 检查数字 join 是否在 `1`–`4096`，模拟 join 是否在 `1`–`1024`。转换器负责读取
 表格，Home Assistant 集成会在加载 YAML 时执行最终范围校验。
 
-## 11. 上传组件到测试服务器
+## 11. 安装与更新到 HA 服务器
 
-`deploy_to_ha.sh` 使用 `scp` 上传本仓库的
-`custom_components/crestron` 到远端 `/homeassistant/custom_components/crestron`，
-可选择先从 Excel 生成并上传 `local/crestron.yaml`，最后执行
-`ha core restart`：
+统一使用 `deploy_to_ha.sh`。安装和更新都会从 GitHub 下载指定分支的最新完整源码，
+再通过 SSH/SCP 部署组件，通过 HA API 保存仪表盘。`--branch` 默认 `master`，
+与本地 Git 分支无关；组件、转换器及页面部署工具均使用下载版本。
 
-```bash
-tools/deploy_to_ha.sh
-```
-
-不带参数时会交互式询问服务器地址、用户名、密码、是否生成 YAML 和是否上传
-YAML。选择重新生成时，脚本会按文件名顺序使用 `local/` 中找到的第一个
-`.xlsx` 作为输入路径默认值；如果目录中没有 `.xlsx`，默认值为空，必须手工
-输入。密码留空即使用 SSH key。完整参数见：
+在仓库根目录运行：
 
 ```bash
-tools/deploy_to_ha.sh --help
+# 交互安装，默认使用 master
+bash tools/deploy_to_ha.sh
+
+# 更新已有集成，使用 dev，默认保留设备 YAML
+bash tools/deploy_to_ha.sh --update --branch dev --host HA地址 --user root --key
+
+# 仅更新页面，无需重启 Core
+bash tools/deploy_to_ha.sh --branch dev --host HA地址 --user root --key --dashboard-only
 ```
 
-密码登录依赖 `sshpass`；推荐使用 SSH key。组件目录中已有的 `crestron.yaml`、
-`__pycache__` 和 `.pyc` 不会随代码无条件上传，只有确认上传
-`local/crestron.yaml` 后才会覆盖远端运行配置。
+运行脚本的电脑需要 Bash、curl、Python 3、ssh、scp；部署页面另需 Node.js 22+，
+密码登录另需 sshpass。目标服务器须提供 `/homeassistant` 和 `ha` CLI。
+
+安装模式询问是否生成、上传 YAML，默认否；`--update` 默认跳过，可用
+`--generate-yaml --upload-yaml` 显式开启。`--xlsx FILE` 和 `--yaml FILE` 可指定
+本地输入及输出，默认使用本地 `local/`；上传的设备 YAML 固定放到远端组件目录，
+HA 的 include 需指向该位置。源码中的设备示例和 Python 缓存不会随组件代码部署。
+
+完整安装/更新保存源码到 `/homeassistant/crestron-source/<提交 SHA>/`，备份旧组件后
+部署到 `/homeassistant/custom_components/crestron/`，运行 `ha core check`，保存页面，
+最后执行 `ha core restart` 并等待 HTTP API 恢复。已有页面提供 `y`、`n`、
+`All yes`、`All no` 四种覆盖选择；`--skip-dashboard` 跳过页面。
+失败会停止后续步骤，已写入内容不会自动回滚。
+
+完整参数：
+
+```bash
+bash tools/deploy_to_ha.sh --help
+```
+
+页面认证、覆盖和备份规则见根目录 [README：部署组件和仪表盘](../README.md#部署组件和仪表盘)。
