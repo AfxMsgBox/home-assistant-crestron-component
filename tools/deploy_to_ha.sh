@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# Upload the Crestron custom component (and optionally generated YAML) to a
-# Home Assistant host, then restart Home Assistant Core.
+# Deploy the component, optional YAML, and repository dashboards to HA.
 
 set -Eeuo pipefail
 
@@ -10,6 +9,11 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 LOCAL_COMPONENT_DIR="${REPO_ROOT}/custom_components/crestron"
 LOCAL_DIR="${REPO_ROOT}/local"
 CONVERTER="${SCRIPT_DIR}/xlsx_to_yaml.py"
+DASHBOARD_DEPLOYER="${SCRIPT_DIR}/deploy_dashboards.mjs"
+DASHBOARD_DIR="${REPO_ROOT}/dashboard"
+DASHBOARD_ONLY=false
+SKIP_DASHBOARD=false
+HA_URL="${HA_URL:-}"
 
 DEFAULT_YAML="${LOCAL_DIR}/crestron.yaml"
 REMOTE_COMPONENT_PARENT="/homeassistant/custom_components"
@@ -50,14 +54,26 @@ YAML 选项：
   --upload-yaml               上传 YAML 到测试服务器
   --skip-upload-yaml          不上传 YAML
 
+Dashboard 选项：
+  --dashboard-only            仅部署页面，不上传组件/YAML、不检查或重启 Core
+  --skip-dashboard            跳过页面部署（仅部署组件/YAML）
+  --dashboard-dir DIR         页面 JSON 目录（默认仓库 dashboard/，递归扫描）
+  --ha-url URL                HA 网页地址（默认通过 ha core info 获取端口）
+
 其他：
   -h, --help                  显示帮助
 
 不带任何参数时，脚本会交互式询问服务器地址、用户名和密码。密码留空时只使用
 SSH key。未通过参数指定“是否生成/上传 YAML”时，也会交互式询问。
+默认部署 dashboard/ 下所有 JSON 页面。已有页面逐项询问 y、n、All yes、All no；
+回车默认为 n，输入结束时跳过所有剩余已有页面。新页面仍会创建。
+页面部署需要本机 Node.js 22+ 和可访问的 HA 网页地址。可用 HA_TOKEN 环境变量
+提供管理员令牌；否则经 SSH 读取目标 HA 现有所有者会话换取临时令牌。
 
 示例：
   tools/deploy_to_ha.sh
+
+  tools/deploy_to_ha.sh --host 10.68.40.254 --user root --key --dashboard-only
 
   tools/deploy_to_ha.sh \
     --host 10.68.40.254 \
@@ -161,6 +177,24 @@ while (( $# > 0 )); do
             UPLOAD_YAML=no
             shift
             ;;
+        --dashboard-only)
+            DASHBOARD_ONLY=true
+            shift
+            ;;
+        --skip-dashboard)
+            SKIP_DASHBOARD=true
+            shift
+            ;;
+        --dashboard-dir)
+            need_value "$1" "$#"
+            DASHBOARD_DIR=$2
+            shift 2
+            ;;
+        --ha-url)
+            need_value "$1" "$#"
+            HA_URL=$2
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -170,6 +204,14 @@ while (( $# > 0 )); do
             ;;
     esac
 done
+
+if [[ "${DASHBOARD_ONLY}" == true ]]; then
+    [[ "${SKIP_DASHBOARD}" == false ]] || die "--dashboard-only 不能与 --skip-dashboard 同用"
+    [[ "${GENERATE_YAML}" != yes && "${UPLOAD_YAML}" != yes ]] \
+        || die "--dashboard-only 不能与生成/上传 YAML 选项同用"
+    GENERATE_YAML=no
+    UPLOAD_YAML=no
+fi
 
 prompt_required() {
     local prompt=$1
@@ -268,7 +310,18 @@ fi
 [[ -f "${CONVERTER}" ]] \
     || die "找不到转换器：${CONVERTER}"
 command -v ssh >/dev/null 2>&1 || die "找不到 ssh 命令"
-command -v scp >/dev/null 2>&1 || die "找不到 scp 命令"
+if [[ "${DASHBOARD_ONLY}" == false ]]; then
+    command -v scp >/dev/null 2>&1 || die "找不到 scp 命令"
+fi
+
+# Validate every page before uploading any component or changing HA.
+if [[ "${SKIP_DASHBOARD}" == false ]]; then
+    [[ -d "${DASHBOARD_DIR}" ]] || die "dashboard 目录不存在：${DASHBOARD_DIR}（可用 --skip-dashboard 跳过）"
+    command -v node >/dev/null 2>&1 || die "页面部署需要 Node.js 22+（可用 --skip-dashboard 跳过）"
+    node -e 'if (Number(process.versions.node.split(".")[0]) < 22 || typeof WebSocket !== "function") process.exit(1)' \
+        || die "页面部署需要 Node.js 22 或更新版本"
+    node "${DASHBOARD_DEPLOYER}" --dir "${DASHBOARD_DIR}" --check
+fi
 
 if [[ -n "${PASSWORD}" ]] && ! command -v sshpass >/dev/null 2>&1; then
     die "密码登录需要 sshpass；请安装 sshpass，或把密码留空改用 SSH key"
@@ -353,8 +406,28 @@ run_authenticated() {
 
 REMOTE="${SSH_USER}@${HOST}"
 
+deploy_dashboards() {
+    if [[ "${SKIP_DASHBOARD}" == true ]]; then
+        printf '已跳过 dashboard 部署。\n'
+        return
+    fi
+    local connection=(ssh "${SSH_OPTIONS[@]}" "${REMOTE}")
+    local options=(--dir "${DASHBOARD_DIR}" --backup-dir "${LOCAL_DIR}/dashboard-backups" --host "${HOST}")
+    [[ -z "${HA_URL}" ]] || options+=(--ha-url "${HA_URL}")
+    if [[ -n "${PASSWORD}" ]]; then
+        connection=(sshpass -e "${connection[@]}")
+    fi
+    SSHPASS="${PASSWORD}" node "${DASHBOARD_DEPLOYER}" "${options[@]}" -- "${connection[@]}"
+}
+
 printf '正在测试 SSH 连接：%s（端口 %s）\n' "${REMOTE}" "${SSH_PORT}"
 run_authenticated ssh "${SSH_OPTIONS[@]}" "${REMOTE}" "test -d /homeassistant"
+
+if [[ "${DASHBOARD_ONLY}" == true ]]; then
+    deploy_dashboards
+    printf '页面部署完成，无需重启 Home Assistant。\n'
+    exit 0
+fi
 
 # Stage a clean component tree so runtime YAML and Python caches are never
 # uploaded accidentally as part of the code deployment.
@@ -389,6 +462,8 @@ printf '正在检查 Home Assistant 配置（ha core check）...\n'
 if ! run_authenticated ssh "${SSH_OPTIONS[@]}" "${REMOTE}" "ha core check"; then
     die "配置检查未通过，已跳过重启。远端文件已更新，请修正后重新运行本脚本，或手动执行 'ha core restart'。"
 fi
+
+deploy_dashboards
 
 printf '正在重启 Home Assistant Core...\n'
 run_authenticated ssh "${SSH_OPTIONS[@]}" "${REMOTE}" "ha core restart"

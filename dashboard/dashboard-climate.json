@@ -1,0 +1,804 @@
+{
+  "dashboard": {
+    "url_path": "dashboard-climate",
+    "title": "空调",
+    "icon": "mdi:air-conditioner",
+    "show_in_sidebar": true,
+    "require_admin": false
+  },
+  "config": {
+    "title": "空调",
+    "views": [
+      {
+        "title": "空调",
+        "path": "overview",
+        "type": "sections",
+        "max_columns": 4,
+        "sections": [
+          {
+            "type": "grid",
+            "cards": [
+              {
+                "type": "heading",
+                "heading": "B2",
+                "heading_style": "title",
+                "icon": "mdi:home-floor-b2"
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_cha_shi_kong_diao",
+                "name": "茶室 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_cha_shi_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_gong_ren_fang_kong_diao",
+                "name": "工人房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_gong_ren_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_ke_ting_kong_diao",
+                "name": "客厅 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_ke_ting_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_ke_ting_kong_diao_2",
+                "name": "客厅 空调 2",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_ke_ting_kong_diao_2"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_nan_zhu_wo_kong_diao",
+                "name": "男主卧 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_nan_zhu_wo_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_shu_fang_kong_diao",
+                "name": "书房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_shu_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_xi_yi_fang_kong_diao",
+                "name": "洗衣房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_xi_yi_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_xuan_guan_kong_diao",
+                "name": "玄关 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_xuan_guan_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b2_chang_bei_fang_kong_diao",
+                "name": "长辈房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b2_chang_bei_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              }
+            ]
+          },
+          {
+            "type": "grid",
+            "cards": [
+              {
+                "type": "heading",
+                "heading": "B1",
+                "heading_style": "title",
+                "icon": "mdi:home-floor-b1"
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b1_jia_ceng_ke_fang_kong_diao",
+                "name": "夹层客房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b1_jia_ceng_ke_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.b1_jian_shen_fang_kong_diao",
+                "name": "健身房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.b1_jian_shen_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              }
+            ]
+          },
+          {
+            "type": "grid",
+            "cards": [
+              {
+                "type": "heading",
+                "heading": "1F",
+                "heading_style": "title",
+                "icon": "mdi:home-floor-1"
+              },
+              {
+                "type": "tile",
+                "entity": "climate.1f_chu_fang_kong_diao",
+                "name": "厨房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.1f_chu_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.1f_er_zi_fang_kong_diao",
+                "name": "儿子房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.1f_er_zi_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.1f_ke_can_ting_kong_diao",
+                "name": "客餐厅 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.1f_ke_can_ting_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.1f_shu_fang_kong_diao",
+                "name": "书房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.1f_shu_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              }
+            ]
+          },
+          {
+            "type": "grid",
+            "cards": [
+              {
+                "type": "heading",
+                "heading": "2F",
+                "heading_style": "title",
+                "icon": "mdi:home-floor-2"
+              },
+              {
+                "type": "tile",
+                "entity": "climate.2f_nu_er_fang_kong_diao",
+                "name": "女儿房 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.2f_nu_er_fang_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.2f_nu_zhu_wo_kong_diao",
+                "name": "女主卧 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.2f_nu_zhu_wo_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              },
+              {
+                "type": "tile",
+                "entity": "climate.2f_xiu_xian_ting_kong_diao",
+                "name": "休闲厅 空调",
+                "icon": "mdi:power",
+                "vertical": false,
+                "state_content": [
+                  "state",
+                  "current_temperature"
+                ],
+                "tap_action": {
+                  "action": "more-info"
+                },
+                "icon_tap_action": {
+                  "action": "perform-action",
+                  "perform_action": "climate.toggle",
+                  "target": {
+                    "entity_id": "climate.2f_xiu_xian_ting_kong_diao"
+                  }
+                },
+                "features_position": "bottom",
+                "features": [
+                  {
+                    "type": "target-temperature"
+                  },
+                  {
+                    "type": "climate-fan-modes",
+                    "style": "icons",
+                    "fan_modes": [
+                      "low",
+                      "medium",
+                      "high",
+                      "auto"
+                    ]
+                  }
+                ],
+                "grid_options": {
+                  "columns": 6,
+                  "rows": 3
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

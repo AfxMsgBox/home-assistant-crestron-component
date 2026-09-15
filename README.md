@@ -210,6 +210,43 @@ media_player:
 - `binary_sensor` 读取一根数字 join，未上报时为未知。
 - `media_player` 必须填写静音、音量、音源 join 和非空音源表。音量 `0–1` 对应 `0–65535`；音源值 0 表示关闭，配置的音源编号应在 `1–65535` 内且名称不重复。开机使用最近一次有效音源反馈，否则使用配置中的第一个音源。
 
+### 在网页上直接开关、调温和调风速
+
+侧边栏“空调”仪表盘的完整配置保存在 [dashboard/dashboard-climate.json](dashboard/dashboard-climate.json)，18 台按 B2、B1、1F、2F 分组。每张卡片占 6 列、3 行，同一分区每排两张，名称省略重复的楼层前缀。点击电源图标直接开关，下方加减按钮调温，风速图标选择低、中、高或自动；点击名称打开详情，调整模式等其他设置。如果侧边栏没有出现新页面，刷新浏览器。
+
+其他安装可在仪表盘添加原生 Tile 卡片，用以下 YAML 替换实体 ID：
+
+```yaml
+type: tile
+entity: climate.1f_chu_fang_kong_diao
+icon: mdi:power
+state_content:
+  - state
+  - current_temperature
+tap_action:
+  action: more-info
+icon_tap_action:
+  action: perform-action
+  perform_action: climate.toggle
+  target:
+    entity_id: climate.1f_chu_fang_kong_diao
+features_position: bottom
+grid_options:
+  columns: 6
+  rows: 3
+features:
+  - type: target-temperature
+  - type: climate-fan-modes
+    style: icons
+    fan_modes:
+      - low
+      - medium
+      - high
+      - auto
+```
+
+仅为配置了设温和相应风速 join 的实体添加这些控件。电源按钮通过 `climate.toggle` 调用集成的独立开关接口，不发送模式选择命令；实际启动模式以主控保留的模式为准。页面配置不需要重启 HA，也不需要安装前端插件。更多设置见 [Tile 卡片](https://www.home-assistant.io/dashboards/tile/)和[卡片功能](https://www.home-assistant.io/dashboards/features/)。
+
 ## 4. 面板控制与状态同步
 
 ### 主控触发 HA 动作：from_joins
@@ -266,18 +303,57 @@ action: crestron.reload
 
 删除 YAML 中的实体不会自动清理 HA 实体注册表。确认实体确已从本集成配置移除后，再在 HA 中清理相应遗留条目。
 
-### 仓库提供的辅助脚本
+### 部署组件和仪表盘
 
-- `bash tools/deploy_to_ha.sh`：交互询问连接、生成和上传选项。适用于能通过 SSH 访问 `/homeassistant` 且提供 `ha` CLI 的环境。上传组件和可选 YAML 后执行 `ha core check`，成功才执行 `ha core restart`；检查失败时文件已经上传，脚本不自动回滚。
-- 仅部署代码的非交互示例：
+- `bash tools/deploy_to_ha.sh`：交互询问连接、生成和上传选项。适用于能通过 SSH 访问 `/homeassistant` 且提供 `ha` CLI 的环境。默认同时部署 `dashboard/` 下的页面：先校验所有页面文件，再上传组件和可选 YAML，运行 `ha core check`，部署页面，最后重启 Core。任何一步失败就停止；组件文件一旦上传不会自动回滚。
+- 仅部署组件代码，跳过页面和设备 YAML：
 
   ```bash
   bash tools/deploy_to_ha.sh --host HA地址 --user root --key \
-    --skip-generate-yaml --skip-upload-yaml
+    --skip-generate-yaml --skip-upload-yaml --skip-dashboard
   ```
 
 - 上传 YAML 时，脚本固定放到 `/homeassistant/custom_components/crestron/crestron.yaml`，需让 HA 的 include 指向该位置。更多参数用 `bash tools/deploy_to_ha.sh --help` 查看。
-- `bash tools/update.sh dev`：从 GitHub 下载指定分支，覆盖**当前工作目录**的 `custom_components/crestron` 和 `tools`。请在预期的 HA 配置目录执行；不传分支时默认为 `master`。脚本不删除上游已移除的文件，也不自动重启 HA。
+
+仅更新仪表盘，不上传组件或设备 YAML，不重启 HA：
+
+```bash
+bash tools/deploy_to_ha.sh --host 10.68.40.254 --user root --key --dashboard-only
+```
+
+部署页面需要**运行脚本的电脑安装 Node.js 22+**，无需 npm 依赖，HA 服务器不需要安装 Node.js。本机须能访问 HA 的 HTTP(S) 地址；默认从 `ha core info` 获取端口和 SSL 设置，也可用 `--ha-url https://HA地址` 或 `HA_URL` 环境变量指定。
+
+认证优先使用 `HA_TOKEN` 环境变量中的管理员令牌；未设置时，通过 SSH 只读获取 `/homeassistant/.storage/auth` 中已有的有效所有者浏览器会话，换取临时访问令牌。这需要相应读取权限及远端 `jq`；没有可用会话时请提供 `HA_TOKEN`。令牌不会写入页面文件、备份或日志。
+
+#### dashboard 文件与覆盖规则
+
+`dashboard/` 纳入 Git；每个 `.json` 文件代表**一个完整仪表盘及其中的卡片**。部署会递归扫描目录，按文件路径排序。可以复制现有文件后修改：
+
+- `dashboard`：新建页面的 `url_path`、`title`、可选 `icon`、`show_in_sidebar`、`require_admin`。
+- `config`：HA 原始配置编辑器中的整个配置对象，包含非空 `views` 列表。
+
+`url_path` 必须是含连字符的小写地址，例如 `dashboard-climate`；它是判断已有页面的唯一依据，标题相同不会被当成同一个页面。单张卡片不能单独作为部署文件，须放在 `config.views` 下的卡片列表中。复制到其他安装前请替换实际实体 ID；脚本不自动创建实体。
+
+已有页面会逐项询问：
+
+| 输入 | 行为 |
+|---|---|
+| `y` | 覆盖当前页面的整份 `config` |
+| `n` 或直接回车 | 跳过当前页面 |
+| `All yes` | 覆盖当前及本次部署后续所有已有页面 |
+| `All no` | 跳过当前及本次部署后续所有已有页面 |
+
+输入不区分大小写；`All` 的选择只在本次运行中生效。输入结束时，跳过所有剩余已有页面；不存在的页面仍会创建。已有页面的侧边栏标题、图标和权限等元信息保留，覆盖范围是页面内部布局与卡片。内置页面（包括 `/climate`）和 YAML 模式页面不能被此流程覆盖。
+
+写入前在本地 `local/dashboard-backups/<时间与随机后缀>/` 保存原页面元信息和配置，备份失败则不写入；新页面的备份记录原先不存在。写入后回读核对。页面在确认期间被修改会中止部署；保存失败或连接中断时请先核对远端状态，脚本不会自动重试写入或回滚。恢复已有页面时，可将备份中的 `config` 粘贴到 HA 的原始配置编辑器；备份文件不要放入 `dashboard/` 参与部署。
+
+可用 `--dashboard-dir DIR` 指定另一目录，`--skip-dashboard` 完全跳过页面。只检查文件、不连接服务器：
+
+```bash
+node tools/deploy_dashboards.mjs --dir dashboard --check
+```
+
+`bash tools/update.sh dev` 是另一个旧更新入口：从 GitHub 下载分支，覆盖**当前工作目录**的 `custom_components/crestron` 和 `tools`，不导入仪表盘。请在预期的 HA 配置目录执行；不传分支时默认为 `master`。它不清理旧文件，也不自动重启 HA。需要页面部署时使用上面的 `deploy_to_ha.sh`。
 
 ## 6. 排查问题
 
