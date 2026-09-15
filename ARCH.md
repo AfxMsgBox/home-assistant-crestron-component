@@ -25,10 +25,12 @@ custom_components/crestron/
   number.py / select.py / sensor.py / binary_sensor.py / media_player.py
 tools/
   xlsx_to_yaml.py   标准库 Excel 解析、校验、YAML 生成
-  deploy_to_ha.sh   SSH 上传、HA 配置检查、重启
+  deploy_to_ha.sh   SSH 上传、页面部署编排、HA 配置检查、重启
+  deploy_dashboards.mjs  JSON 校验、覆盖交互、HA WebSocket 页面部署
   update.sh        下载分支压缩包并覆盖当前目录
   git-pull.sh      稀疏拉取指定仓库目录的辅助脚本
 tests/             unittest；HA 替身和本地 TCP 测试
+dashboard/         受 Git 管理的完整仪表盘 JSON（元信息与 config）
 sample.xlsx        四类设备示例
 local/             被 Git 忽略的现场表格及生成配置
 ```
@@ -205,7 +207,19 @@ builder 单独调用时可能返回 None；用户入口先汇总错误，存在�
 
 `join_registry` 为读写关系生成元数据，发现重复写入、桥接冲突；只读镜像允许共享。帧日志独立使用 `custom_components.crestron.crestron.frames`，用于把原始 join 对应回实体/字段。
 
-部署脚本先上传再检查 `ha core check`，检查通过才重启；没有远端文件事务和失败回滚。更新脚本按调用者工作目录覆盖文件，不清理旧文件，不重启。运行环境要求以目标 HA 版本为准；转换器的独立 Python 要求不能替代 HA Core 的 Python 要求。
+部署脚本先校验所有 dashboard 文件，再上传组件及可选 YAML，检查 `ha core check`，通过后部署页面，最后重启。页面阶段失败也会阻止后续重启，此时组件文件已上传；整个部署没有跨组件、页面的事务和自动回滚。`--dashboard-only` 提前分支，只部署页面，不生成/上传设备 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。旧 `update.sh` 按调用者工作目录覆盖组件与工具，不导入 dashboard，不清理旧文件，不重启。运行环境要求以目标 HA 版本为准；转换器的独立 Python 要求不能替代 HA Core 的 Python 要求。
+
+### 空调仪表盘
+
+`dashboard/dashboard-climate.json` 保存通用示例页面，包含 dashboard 元信息和 config 原生 Lovelace 配置；示例实体 ID 和位置须在部署前替换。Tile 卡片保持紧凑布局，不新增辅助实体。
+
+电源图标使用 `perform-action` 显式调用 `climate.toggle`，HA 根据 off 状态分派到组件已有的 `async_turn_on/async_turn_off`；这条路径不调用模式选择接口。卡片正文使用 `more-info`，两个 feature 分别为 `target-temperature` 和 `climate-fan-modes`（icons）。使用 bottom 布局：现场前端 20260729.7 的 inline 模式只显示第一个 feature，会隐藏风速。页面不包含模式快捷按钮。HA 内置 `/climate` 属于前端自动生成视图，没有可保存的普通 Lovelace 配置。
+
+`deploy_dashboards.mjs` 使用 Node.js 22+ 内置 fetch/WebSocket，无第三方依赖。所有 JSON 文件在连接前做结构与重复 url_path 检查，不包含完整前端卡片 schema 校验。认证优先用 HA_TOKEN；否则通过沿用 SSH 认证参数的子进程读取现有所有者会话，经 `/auth/token` 换取临时令牌。端口/SSL 通过 `ha core info --raw-json` 获取，HA_URL 可覆盖地址；凭据只在环境或进程内存中流转。
+
+部署流程：读取 `lovelace/dashboards/list` 与 `get_panels` → 拒绝内置/YAML 地址冲突 → 读取旧配置 → 收集全部覆盖决定 → 每项写入前再次确认元信息及配置未变化 → 写本地备份 → 必要时创建页面 → `lovelace/config/save` → 回读比对。按 url_path 匹配，不按标题匹配；覆盖保留旧页面元信息。确认与写入之间的复核不是服务端原子比较更新，仍存在很短的并发窗口。All yes/no 只影响本次已有项，新项继续创建；EOF 按 All no 处理。
+
+备份在 `local/dashboard-backups/` 的独立时间目录，包含 `{dashboard, config}`；新页面备份两字段为 null。备份成功才写入，失败立即终止，不自动重试写入或回滚；创建成功但保存失败可能留下空页面，需要核对远端后处理。整个过程通过 HA API 保存，不直接修改运行中的 `.storage`，不调用设备控制服务。后续 UI 编辑不会自动同步到仓库 JSON；本地旧 `local/dashboard-climate.json` 仅为历史快照。
 
 ## 验证方法
 
@@ -216,6 +230,9 @@ python3 -m pip install -r requirements-test.txt
 python3 -B -m unittest discover -s tests
 python3 -B -m mypy --config-file mypy.ini --cache-dir=/dev/null
 python3 -B tools/xlsx_to_yaml.py --check sample.xlsx
+node tools/deploy_dashboards.mjs --dir dashboard --check
+node --test tests/test_deploy_dashboards.mjs
+bash -n tools/deploy_to_ha.sh
 ```
 
 `requirements-test.txt` 提供 voluptuous 和 mypy；部分 YAML 回读测试在缺少 PyYAML 时跳过。mypy 只检查 value_coercion、xsig_protocol、join_commands、join_registry 四个无 HA 依赖模块。
@@ -223,3 +240,5 @@ python3 -B tools/xlsx_to_yaml.py --check sample.xlsx
 测试使用最小 HA 替身，覆盖实体转换、边界、恢复、重载、桥接、编码及部分真实本地 TCP 场景。Excel 回归测试构造真实 ZIP/XML 工作簿，覆盖跳行、r 缺省回退、错误行号和失败时保留输出；空调回归覆盖真实零值、严格设温、历史恢复、跨字段旧缓存隔离、矛盾/乱序反馈、功率定时校正、连续命令次序、取消和移除，以及不同实体并发。
 
 这些测试不能证明真实 HA 的完整实体生命周期、服务分发以及现场主控反馈协议正确。涉及这些边界的改动，需要补目标 HA 环境测试和现场收发验证。
+
+页面部署的 Node 测试覆盖四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用替身命令验证完整部署、仅页面和跳过页面三条路径及失败时禁止重启。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。
