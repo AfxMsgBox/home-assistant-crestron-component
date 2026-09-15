@@ -25,10 +25,8 @@ custom_components/crestron/
   number.py / select.py / sensor.py / binary_sensor.py / media_player.py
 tools/
   xlsx_to_yaml.py   标准库 Excel 解析、校验、YAML 生成
-  deploy_to_ha.sh   SSH 上传、页面部署编排、HA 配置检查、重启
+  deploy_to_ha.sh   GitHub 分支下载、SSH 安装/更新、页面部署、Core 检查及重启
   deploy_dashboards.mjs  JSON 校验、覆盖交互、HA WebSocket 页面部署
-  update.sh        下载分支压缩包并覆盖当前目录
-  git-pull.sh      稀疏拉取指定仓库目录的辅助脚本
 tests/             unittest；HA 替身和本地 TCP 测试
 dashboard/         受 Git 管理的完整仪表盘 JSON（元信息与 config）
 sample.xlsx        四类设备示例
@@ -207,7 +205,19 @@ builder 单独调用时可能返回 None；用户入口先汇总错误，存在�
 
 `join_registry` 为读写关系生成元数据，发现重复写入、桥接冲突；只读镜像允许共享。帧日志独立使用 `custom_components.crestron.crestron.frames`，用于把原始 join 对应回实体/字段。
 
-部署脚本先校验所有 dashboard 文件，再上传组件及可选 YAML，检查 `ha core check`，通过后部署页面，最后重启。页面阶段失败也会阻止后续重启，此时组件文件已上传；整个部署没有跨组件、页面的事务和自动回滚。`--dashboard-only` 提前分支，只部署页面，不生成/上传设备 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。旧 `update.sh` 按调用者工作目录覆盖组件与工具，不导入 dashboard，不清理旧文件，不重启。运行环境要求以目标 HA 版本为准；转换器的独立 Python 要求不能替代 HA Core 的 Python 要求。
+### GitHub 安装与更新
+
+`deploy_to_ha.sh` 由本地 Bash 编排，`--install` 为默认模式，`--update` 要求远端组件已有 manifest，并默认不生成/上传设备 YAML；显式 YAML 选项可覆盖默认值。`--branch` 默认 master，不读取本地 Git 分支。运行端通过 curl 调用 GitHub Git refs API，将分支解析为 40 位提交 SHA，再从 codeload 下载该 SHA 的完整 tar.gz，防止部署期间分支变化造成文件版本混用。Python 校验 ref、压缩包单一根目录和必要文件，只提取普通文件与目录，拒绝越界路径、链接和特殊文件；下载/校验失败时尚未访问 HA。
+
+组件、Excel 转换器、dashboard 默认目录及 Node 部署工具均指向下载源码；本地执行的 shell 自身负责本次流程，不再次执行下载的同名脚本。用户 Excel、生成 YAML 及页面备份仍定位到本地脚本上一级的 `local/`；`--dashboard-dir` 可显式使用本地页面。全部模式均需 curl/Python，页面模式另需 Node 22+。源码不存在 dashboard 时，完整部署提示跳过；仅页面模式报错。
+
+完整部署顺序：下载并校验源码 → 校验页面 → 按选项生成/检查本地 YAML → SSH 连接与更新前置检查 → 确定恢复探测地址 → 上传完整源码到 `/homeassistant/crestron-source/<SHA>/` → 备份旧组件到 `/homeassistant/crestron-backups/deploy.<随机后缀>/crestron/` → 上传清除 crestron.yaml/pyc 缓存后的组件与可选设备 YAML → `ha core check` → 页面部署 → `ha core restart` → HTTP API 恢复探测。完整源码保留工具、文档、页面和示例，独立存放，不将示例 configuration.yaml 写入 HA 配置根目录。
+
+只重启 Core 服务，不执行主机重启。使用 `ha core info --raw-json` 的端口/SSL 或 HA_URL/`--ha-url` 得到 `/api/` 地址；每轮 curl 限时 5 秒、间隔 2 秒，200/401 视为 HTTP API 恢复。默认等待 120 秒，`--restart-timeout` 可调，实际退出可能多一个探测周期。该检查不证明 HA 完全启动、Crestron 连接成功或实体可用。
+
+失败会阻止后续步骤，包括重启；组件上传后检查/页面失败时文件已改变。组件采用覆盖复制，不清理上游已删除文件。已有组件备份与页面逐项备份，但没有跨组件/页面事务或自动回滚；源码与备份目录也不自动清理。`--dashboard-only` 下载后提前分支，只部署页面，不存档源码、生成/上传 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。
+
+安装与更新统一由 `deploy_to_ha.sh` 编排。运行环境要求以目标 HA 版本为准；转换器的独立 Python 要求不能替代 HA Core 的 Python 要求。
 
 ### 空调仪表盘
 
@@ -241,4 +251,4 @@ bash -n tools/deploy_to_ha.sh
 
 这些测试不能证明真实 HA 的完整实体生命周期、服务分发以及现场主控反馈协议正确。涉及这些边界的改动，需要补目标 HA 环境测试和现场收发验证。
 
-页面部署的 Node 测试覆盖四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用替身命令验证完整部署、仅页面和跳过页面三条路径及失败时禁止重启。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。
+页面部署的 Node 测试覆盖四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用 GitHub、SSH/SCP、Node 替身，验证安装/更新/仅页面路径、默认及指定分支、固定提交下载、完整源码上传、下载转换器、配置保留、压缩包校验、备份失败、配置/页面失败阻止重启及恢复超时。替身测试不访问 GitHub 或现场服务器。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。

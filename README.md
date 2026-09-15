@@ -305,21 +305,39 @@ action: crestron.reload
 
 ### 部署组件和仪表盘
 
-- `bash tools/deploy_to_ha.sh`：交互询问连接、生成和上传选项。适用于能通过 SSH 访问 `/homeassistant` 且提供 `ha` CLI 的环境。默认同时部署 `dashboard/` 下的页面：先校验所有页面文件，再上传组件和可选 YAML，运行 `ha core check`，部署页面，最后重启 Core。任何一步失败就停止；组件文件一旦上传不会自动回滚。
-- 仅部署组件代码，跳过页面和设备 YAML：
+`tools/deploy_to_ha.sh` 适用于能通过 SSH 访问 `/homeassistant` 且提供 `ha` CLI 的 HA 环境。运行脚本的电脑需要 Bash、curl、Python 3、ssh、scp，并能访问 GitHub 和 HA 网页；密码登录另需 sshpass。
 
-  ```bash
-  bash tools/deploy_to_ha.sh --host HA地址 --user root --key \
-    --skip-generate-yaml --skip-upload-yaml --skip-dashboard
-  ```
+安装和更新都会从 GitHub 下载**指定分支的最新完整源码**，组件、转换器和页面部署工具使用这份源码。`--branch 分支名` 默认是 **master**，与本地当前 Git 分支无关；下载不会覆盖本地工作区。需要 dev 分支上的更改时，必须加 `--branch dev`。
 
-- 上传 YAML 时，脚本固定放到 `/homeassistant/custom_components/crestron/crestron.yaml`，需让 HA 的 include 指向该位置。更多参数用 `bash tools/deploy_to_ha.sh --help` 查看。
+```bash
+# 安装 master 最新版（默认模式，也可明确写 --install）
+bash tools/deploy_to_ha.sh --host 10.68.40.254 --user root --key
+
+# 更新已有集成，使用 dev 最新版
+bash tools/deploy_to_ha.sh --update --branch dev --host 10.68.40.254 --user root --key
+```
+
+不带参数时会询问服务器地址、用户名及密码。安装模式还会询问是否生成、上传设备 YAML，默认否；`--update` 默认跳过这两步，保留现场设备配置，并检查目标已安装集成。需要更新设备配置时显式加 `--generate-yaml --upload-yaml`，也可用 `--xlsx FILE --yaml FILE` 指定本地输入和输出。默认路径仍是本地 `local/`，不会使用下载源码里的设备示例覆盖现场配置。
+
+完整安装/更新会保存全部源码到服务器 `/homeassistant/crestron-source/<提交 SHA>/`，另将组件部署到 `/homeassistant/custom_components/crestron/`，并部署源码 `dashboard/` 中的页面。覆盖组件前会备份到服务器 `/homeassistant/crestron-backups/deploy.<随机后缀>/crestron/`。源码中的示例 `configuration.yaml` 只存档，不覆盖 HA 配置；首次安装仍需按第 1 节配置 include。显式上传的设备 YAML 固定放到组件目录内的 `crestron.yaml`，include 应指向该位置。
+
+部署后先运行 `ha core check`，通过后保存页面，最后执行 **`ha core restart` 重启 Home Assistant 服务**使代码和配置生效，无需重启整台主机。脚本默认等待 HTTP API 恢复最多 120 秒，可用 `--restart-timeout 240` 调整；这仅确认 API 可访问，实体可用性及主控连接仍需在 HA 中检查。任何一步失败会停止后续步骤；已上传或保存的内容不会自动回滚。服务器上的源码和备份目录不会自动清理。
+
+只更新组件、跳过页面及设备 YAML：
+
+```bash
+bash tools/deploy_to_ha.sh --update --branch dev --host HA地址 --user root --key --skip-dashboard
+```
+
+更多参数见 `bash tools/deploy_to_ha.sh --help`。
 
 仅更新仪表盘，不上传组件或设备 YAML，不重启 HA：
 
 ```bash
-bash tools/deploy_to_ha.sh --host 10.68.40.254 --user root --key --dashboard-only
+bash tools/deploy_to_ha.sh --branch dev --host 10.68.40.254 --user root --key --dashboard-only
 ```
+
+仅页面模式同样下载指定分支，但不向服务器存档源码。若所选分支没有 `dashboard/`，完整安装/更新提示跳过页面，仅页面模式则报错。
 
 部署页面需要**运行脚本的电脑安装 Node.js 22+**，无需 npm 依赖，HA 服务器不需要安装 Node.js。本机须能访问 HA 的 HTTP(S) 地址；默认从 `ha core info` 获取端口和 SSL 设置，也可用 `--ha-url https://HA地址` 或 `HA_URL` 环境变量指定。
 
@@ -347,13 +365,11 @@ bash tools/deploy_to_ha.sh --host 10.68.40.254 --user root --key --dashboard-onl
 
 写入前在本地 `local/dashboard-backups/<时间与随机后缀>/` 保存原页面元信息和配置，备份失败则不写入；新页面的备份记录原先不存在。写入后回读核对。页面在确认期间被修改会中止部署；保存失败或连接中断时请先核对远端状态，脚本不会自动重试写入或回滚。恢复已有页面时，可将备份中的 `config` 粘贴到 HA 的原始配置编辑器；备份文件不要放入 `dashboard/` 参与部署。
 
-可用 `--dashboard-dir DIR` 指定另一目录，`--skip-dashboard` 完全跳过页面。只检查文件、不连接服务器：
+可用 `--dashboard-dir DIR` 改用本地页面目录，部署工具仍来自指定 GitHub 分支；`--skip-dashboard` 完全跳过页面。修改本地页面后，可先使用下面命令检查，再通过 `--dashboard-dir dashboard` 部署预览；正常安装/更新使用 GitHub 中已发布的页面。只检查文件、不连接服务器：
 
 ```bash
 node tools/deploy_dashboards.mjs --dir dashboard --check
 ```
-
-`bash tools/update.sh dev` 是另一个旧更新入口：从 GitHub 下载分支，覆盖**当前工作目录**的 `custom_components/crestron` 和 `tools`，不导入仪表盘。请在预期的 HA 配置目录执行；不传分支时默认为 `master`。它不清理旧文件，也不自动重启 HA。需要页面部署时使用上面的 `deploy_to_ha.sh`。
 
 ## 6. 排查问题
 
