@@ -1,7 +1,6 @@
 """Tests for the xlsx -> YAML row mapping (tools/xlsx_to_yaml.py).
 
-Only the pure row->entity builders and name de-duplication are tested; they
-need no real workbook.
+Includes minimal ZIP/XML workbooks to test physical Excel row diagnostics.
 """
 
 import contextlib
@@ -10,10 +9,77 @@ import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import xlsx_to_yaml as g  # noqa: E402
+
+
+class WorkbookRowNumberTests(unittest.TestCase):
+    def _workbook(self, path, row_numbers):
+        sheet = g.ET.Element(g._A + "worksheet")
+        data = g.ET.SubElement(sheet, g._A + "sheetData")
+        values = [
+            ["楼层", "房间", "名称", "功能", "亮度", "色温", "开", "关"],
+            ["B2", "车库", "错误灯", "", "", "", "1", ""],
+            ["B2", "车库", "灯", "", "2", "", "", ""],
+        ]
+        previous = 0
+        for row_number, cells in zip(row_numbers, values):
+            physical = row_number if row_number is not None else previous + 1
+            attrs = {} if row_number is None else {"r": str(row_number)}
+            row = g.ET.SubElement(data, g._A + "row", attrs)
+            for column, value in enumerate(cells):
+                cell = g.ET.SubElement(row, g._A + "c", {
+                    "r": f"{chr(65 + column)}{physical}", "t": "inlineStr",
+                })
+                inline = g.ET.SubElement(cell, g._A + "is")
+                g.ET.SubElement(inline, g._A + "t").text = value
+            previous = physical
+        with zipfile.ZipFile(path, "w") as workbook:
+            workbook.writestr("xl/workbook.xml", f'''
+                <workbook xmlns="{g._A[1:-1]}"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                  <sheets><sheet name="灯光" r:id="rId1"/></sheets>
+                </workbook>''')
+            workbook.writestr("xl/_rels/workbook.xml.rels", '''
+                <Relationships><Relationship Id="rId1"
+                  Target="worksheets/sheet1.xml"/></Relationships>''')
+            workbook.writestr("xl/worksheets/sheet1.xml", g.ET.tostring(sheet))
+
+    def test_sparse_rows_keep_physical_indices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sparse.xlsx")
+            self._workbook(path, [1, 10, 25])
+            rows = g.parse_xlsx(path)["灯光"]
+            self.assertEqual([row["_xlsx_row"] for row in rows], [10, 25])
+            self.assertEqual(rows[1]["亮度"], "2")
+
+    def test_missing_index_follows_previous_physical_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "optional.xlsx")
+            self._workbook(path, [None, 10, None])
+            self.assertEqual(
+                [row["_xlsx_row"] for row in g.parse_xlsx(path)["灯光"]],
+                [10, 11],
+            )
+
+    def test_error_reports_physical_row_and_preserves_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "invalid.xlsx")
+            output = os.path.join(directory, "crestron.yaml")
+            self._workbook(path, [1, 10, 25])
+            with open(output, "w", encoding="utf-8") as stream:
+                stream.write("existing configuration\n")
+            report = io.StringIO()
+            with contextlib.redirect_stdout(report):
+                self.assertEqual(g.check(path), 1)
+                with self.assertRaises(g.WorkbookValidationError):
+                    g.generate(path, output)
+            self.assertIn("灯光!10", report.getvalue())
+            with open(output, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "existing configuration\n")
 
 
 def light_row(**kw):

@@ -1,6 +1,5 @@
 """Platform for Crestron Number (e.g. AC temperature setpoint) integration."""
 
-from decimal import Decimal, InvalidOperation
 import logging
 
 import voluptuous as vol
@@ -15,25 +14,12 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_VALUE_JOIN, CONF_MIN, CONF_MAX, CONF_STEP
-from .schema import analog_join
+from .schema import analog_join, whole_number
 from .device import device_info
 from .entity import CrestronEntity, setup_platform_entities
 from .unique_ids import number_unique_id
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _whole_number(value):
-    """Return an integer without silently truncating a fractional value."""
-    if isinstance(value, bool):
-        raise vol.Invalid(f"value must be a whole number; got {value!r}")
-    try:
-        number = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError) as err:
-        raise vol.Invalid(f"value must be a whole number; got {value!r}") from err
-    if not number.is_finite() or number != number.to_integral_value():
-        raise vol.Invalid(f"value must be a whole number; got {value!r}")
-    return int(number)
 
 
 def _require_usable_range(config):
@@ -52,9 +38,9 @@ PLATFORM_SCHEMA = vol.All(
         {
             vol.Required(CONF_NAME): cv.string,
             vol.Required(CONF_VALUE_JOIN): analog_join,
-            vol.Optional(CONF_MIN, default=16): _whole_number,
-            vol.Optional(CONF_MAX, default=30): _whole_number,
-            vol.Optional(CONF_STEP, default=1): _whole_number,
+            vol.Optional(CONF_MIN, default=16): whole_number,
+            vol.Optional(CONF_MAX, default=30): whole_number,
+            vol.Optional(CONF_STEP, default=1): whole_number,
             vol.Optional(CONF_DEVICE_CLASS): cv.string,
             vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
         },
@@ -97,7 +83,7 @@ class CrestronNumber(CrestronEntity, NumberEntity, RestoreEntity):
         last = await self.async_get_last_state()
         if last is not None:
             try:
-                restored = _whole_number(last.state)
+                restored = whole_number(last.state)
                 if (
                     self._attr_native_min_value
                     <= restored
@@ -123,7 +109,7 @@ class CrestronNumber(CrestronEntity, NumberEntity, RestoreEntity):
 
     async def async_set_native_value(self, value):
         try:
-            value = _whole_number(value)
+            value = whole_number(value)
         except vol.Invalid as err:
             raise ValueError(
                 f"Crestron analog joins only support whole numbers; got {value!r}"

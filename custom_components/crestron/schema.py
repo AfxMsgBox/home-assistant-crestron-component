@@ -1,4 +1,5 @@
-"""Reusable XSIG join-number validators."""
+"""Reusable XSIG join-number and whole-value validators."""
+from decimal import Decimal, InvalidOperation
 import re
 
 import voluptuous as vol
@@ -6,6 +7,20 @@ import voluptuous as vol
 # Import straight from the codec: config validation must not depend on the
 # transport layer (crestron.py owns the socket and used to re-export these).
 from .xsig_protocol import ANALOG_JOIN_MAX, DIGITAL_JOIN_MAX, SERIAL_JOIN_MAX
+
+
+def whole_number(value):
+    """Return an integer without silently truncating a fractional value."""
+    if isinstance(value, bool):
+        raise vol.Invalid(f"value must be a whole number; got {value!r}")
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as err:
+        raise vol.Invalid(f"value must be a whole number; got {value!r}") from err
+    if not number.is_finite() or number != number.to_integral_value():
+        raise vol.Invalid(f"value must be a whole number; got {value!r}")
+    return int(number)
+
 
 def _join_number(kind: str, maximum: int):
     """Build a validator for a bare join number.
