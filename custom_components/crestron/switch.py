@@ -5,7 +5,7 @@ import voluptuous as vol
 import logging
 
 import homeassistant.helpers.config_validation as cv
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.const import CONF_NAME, CONF_DEVICE_CLASS
 from homeassistant.helpers.restore_state import RestoreEntity
 from .const import (
@@ -18,9 +18,15 @@ from .const import (
 from .schema import digital_join
 from .device import device_info
 from .entity import CrestronEntity, setup_platform_entities
-from .join_commands import pulse_digital
+from .join_commands import paired_feedback, pulse_digital
+from .unique_ids import switch_unique_id
 
 _LOGGER = logging.getLogger(__name__)
+
+_SWITCH_DEVICE_CLASSES = {
+    "outlet": SwitchDeviceClass.OUTLET,
+    "switch": SwitchDeviceClass.SWITCH,
+}
 
 
 def _require_writable_join(config):
@@ -49,7 +55,9 @@ PLATFORM_SCHEMA = vol.All(
     vol.Schema(
         {
             vol.Required(CONF_NAME): cv.string,
-            vol.Optional(CONF_DEVICE_CLASS): cv.string,
+            vol.Optional(CONF_DEVICE_CLASS): vol.All(
+                cv.string, vol.In(_SWITCH_DEVICE_CLASSES)
+            ),
             vol.Optional(CONF_SWITCH_JOIN): digital_join,
             vol.Optional(CONF_ON_JOIN): digital_join,
             vol.Optional(CONF_OFF_JOIN): digital_join,
@@ -79,11 +87,13 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
         # {label: digital_join}: on if any join is asserted; active label is
         # surfaced as a read-only "mode" attribute (e.g. AC running mode).
         self._mode_joins = config.get(CONF_MODE_JOINS) or {}
-        self._attr_device_class = config.get(CONF_DEVICE_CLASS)
+        device_class = config.get(CONF_DEVICE_CLASS)
+        self._attr_device_class = (
+            _SWITCH_DEVICE_CLASSES[device_class] if device_class else None
+        )
         self._optimistic_state = False
         self._pulse_lock = asyncio.Lock()
-        uid = self._switch_join or self._state_join or self._on_join
-        self._attr_unique_id = f"crestron_switch_{uid}_{self._attr_name}"
+        self._attr_unique_id = switch_unique_id(config)
         self._attr_device_info = device_info(config)
 
     def _callback_joins(self):
@@ -119,31 +129,42 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
         (制冷/制热/…): the unit is on iff one of them is asserted.
         """
         if self._mode_joins:
-            return any(
-                self._hub.get_digital(j) for j in self._mode_joins.values()
-            )
+            is_on, _mode = self._mode_feedback()
+            return is_on
         if self._state_join is not None:
+            # Unreported = unknown, so the restored/optimistic state stands.
+            if not self._hub.has_digital(self._state_join):
+                return None
             return self._hub.get_digital(self._state_join)
         if self._switch_join is not None:
+            if not self._hub.has_digital(self._switch_join):
+                return None
             return self._hub.get_digital(self._switch_join)
         # Pulse mode can still carry feedback on the command joins themselves.
-        # Exactly one asserted is definitive; both low/high is transitional or
-        # not-yet-reported, so keep the current optimistic state.
-        on = self._on_join is not None and self._hub.get_digital(self._on_join)
-        off = self._off_join is not None and self._hub.get_digital(self._off_join)
-        if on != off:
-            return on
-        return None
+        return paired_feedback(self._hub, self._on_join, self._off_join)
+
+    def _mode_feedback(self):
+        """Return ``(is_on, label)`` from mode joins.
+
+        A high join is definitive even while the rest of the initial sync is
+        still arriving. All-low is definitive only after every configured join
+        has been reported; before that both the switch state and its ``mode``
+        attribute must remain unknown/restored rather than claiming "关闭".
+        """
+        for label, join in self._mode_joins.items():
+            if self._hub.get_digital(join):
+                return True, label
+        if all(self._hub.has_digital(j) for j in self._mode_joins.values()):
+            return False, "关闭"
+        return None, None
 
     async def process_callback(self, cbtype, value):
-        # Reconcile with real feedback. Only genuine feedback joins are
-        # registered (never the momentary on/off command joins), so this fires
-        # on real state transitions — including changes made outside HA — and
-        # never spuriously bounces the toggle right after a command.
+        # Reconcile with CP4N feedback, including feedback returned on the same
+        # joins that are pulsed for on/off commands.
         fb = self._feedback_is_on()
         if fb is not None:
             self._optimistic_state = fb
-        self.async_write_ha_state()
+        self._schedule_write()
 
     @property
     def is_on(self):
@@ -156,10 +177,10 @@ class CrestronSwitch(CrestronEntity, SwitchEntity, RestoreEntity):
     def extra_state_attributes(self):
         if not self._mode_joins:
             return None
-        for label, join in self._mode_joins.items():
-            if self._hub.get_digital(join):
-                return {"mode": label}
-        return {"mode": "关闭"}
+        is_on, mode = self._mode_feedback()
+        if is_on is None:
+            return None
+        return {"mode": mode}
 
     async def _pulse(self, join):
         await pulse_digital(self._hub, self._pulse_lock, join)

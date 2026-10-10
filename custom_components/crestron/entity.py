@@ -32,6 +32,32 @@ from .const import HUB, DOMAIN, YAML_CONF
 _LOGGER = logging.getLogger(__name__)
 
 
+def join_uid(analog=(), digital=()):
+    """Build the join-derived part of a ``unique_id``, namespace-safe.
+
+    Analog and digital joins are *independent* numbering spaces in XSIG
+    (a1..a1024 and d1..d4096 are unrelated signals), so a platform that picks
+    "the first join that happens to be configured" out of a mixed list can hand
+    two different entities the same id — at which point Home Assistant drops
+    whichever one is registered second, with only a "does not generate unique
+    IDs" warning to show for it.
+
+    ``analog`` and ``digital`` are the candidate joins in preference order.
+    Analog candidates keep the bare number, digital ones get a ``d`` prefix;
+    that is enough to separate the two spaces.
+
+    Returns ``None`` if no candidate is configured — callers should not let
+    that happen (their schemas require at least one join).
+    """
+    for join in analog:
+        if join is not None:
+            return str(join)
+    for join in digital:
+        if join is not None:
+            return f"d{join}"
+    return None
+
+
 def setup_platform_entities(hass, platform_key, schema, factory):
     """Build entities for one platform from YAML, isolating per-entity errors.
 
@@ -47,10 +73,20 @@ def setup_platform_entities(hass, platform_key, schema, factory):
     """
     hub = hass.data[DOMAIN][HUB]
     items = hass.data[DOMAIN][YAML_CONF].get(platform_key, [])
+    if not isinstance(items, list):
+        _LOGGER.error(
+            "`%s:` under `crestron:` must be a list of entities, got %s — no "
+            "%s entities were created",
+            platform_key,
+            type(items).__name__,
+            platform_key,
+        )
+        return []
     entities = []
+    claimed = {}  # unique_id -> name of the entity that got it
     for index, item in enumerate(items):
         try:
-            entities.append(factory(hub, schema(item)))
+            entity = factory(hub, schema(item))
         except Exception:
             name = item.get("name") if isinstance(item, dict) else None
             _LOGGER.exception(
@@ -59,11 +95,38 @@ def setup_platform_entities(hass, platform_key, schema, factory):
                 index,
                 name or "unnamed",
             )
+            continue
+        # Home Assistant drops a colliding entity itself, but only says "does
+        # not generate unique IDs" — naming both configs is the difference
+        # between a two-minute fix and a hunt. Skipping here also keeps the
+        # winner deterministic (first in YAML) instead of registration-order.
+        unique_id = getattr(entity, "unique_id", None)
+        if unique_id is not None and unique_id in claimed:
+            _LOGGER.error(
+                "Skipping %s entity #%d (%s): unique ID %r is already used by "
+                "%r. Two entities deriving an ID from the same join collide; "
+                "give one of them a different control join.",
+                platform_key,
+                index,
+                (item.get("name") if isinstance(item, dict) else None)
+                or "unnamed",
+                unique_id,
+                claimed[unique_id],
+            )
+            continue
+        if unique_id is not None:
+            claimed[unique_id] = (
+                item.get("name") if isinstance(item, dict) else None
+            ) or f"#{index}"
+        entities.append(entity)
     return entities
 
 
 class CrestronEntity:
     _attr_should_poll = False
+    # Set while a coalesced state write is pending on the event loop.
+    _write_scheduled = False
+    _removed = False
 
     @property
     def available(self):
@@ -78,16 +141,55 @@ class CrestronEntity:
         return []
 
     async def async_added_to_hass(self):
+        # Home Assistant builds fresh entities on reload, but clear the flag
+        # anyway so a re-added instance isn't left permanently unable to write.
+        self._removed = False
         self._hub.register_callback(
             self.process_callback, joins=self._callback_joins()
         )
 
     async def async_will_remove_from_hass(self):
         self._hub.remove_callback(self.process_callback)
+        # Drop any pending flush: writing state after removal raises.
+        self._removed = True
+        self._write_scheduled = False
+
+    def _schedule_write(self):
+        """Write HA state once per event-loop iteration, not once per join.
+
+        The control system pushes each join as its own frame, so an entity
+        watching several joins is called back several times for what is really
+        one update — a climate subscribing to 12 joins writes state 12 times
+        during the cold-start full sync, and every write builds a State object,
+        fires an event and hits the recorder. Reconciling is cheap; writing is
+        not. Callbacks therefore do their decision work eagerly (so the cached
+        values are always current) and mark the entity dirty; the actual write
+        happens once, after the current burst of frames has been processed.
+
+        Only *feedback-driven* writes are coalesced. Command paths
+        (``async_turn_on`` and friends) keep calling ``async_write_ha_state``
+        directly, because there the whole point is to show the optimistic state
+        with no delay.
+        """
+        if self._write_scheduled:
+            return
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            # Not attached to Home Assistant (nothing to coalesce against).
+            self.async_write_ha_state()
+            return
+        self._write_scheduled = True
+        hass.loop.call_soon(self._flush_write)
+
+    def _flush_write(self):
+        if not self._write_scheduled or self._removed:
+            return
+        self._write_scheduled = False
+        self.async_write_ha_state()
 
     async def process_callback(self, cbtype, value):
         """Default: a subscribed join changed, re-render from the cache.
 
         Entities with optimistic/feedback reconciliation override this.
         """
-        self.async_write_ha_state()
+        self._schedule_write()

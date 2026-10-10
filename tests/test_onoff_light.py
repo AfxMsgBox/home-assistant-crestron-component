@@ -147,6 +147,26 @@ class OnOffFeedbackTests(unittest.TestCase):
         self.assertIn((10, True), self.hub.sent_digital)
         self.assertIn((10, False), self.hub.sent_digital)  # pulse released
 
+    def test_unique_id_is_stable_across_rename(self):
+        renamed = light_mod.CrestronOnOffLight(
+            self.hub,
+            {"name": "Renamed", "on_join": 10, "off_join": 11},
+        )
+        self.assertEqual(self.light._attr_unique_id, "crestron_light_onoff_d10")
+        self.assertEqual(renamed._attr_unique_id, self.light._attr_unique_id)
+
+    def test_optional_state_join_does_not_change_id(self):
+        with_feedback = light_mod.CrestronOnOffLight(
+            self.hub,
+            {
+                "name": "Garage",
+                "on_join": 10,
+                "off_join": 11,
+                "state_join": 12,
+            },
+        )
+        self.assertEqual(with_feedback._attr_unique_id, self.light._attr_unique_id)
+
 
 if __name__ == "__main__":
     unittest.main()

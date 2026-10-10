@@ -5,6 +5,19 @@ on:
   pull_request:
 
 jobs:
+  dashboards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check dashboard files and deploy logic
+        run: |
+          node tools/deploy_dashboards.mjs --dir dashboard --check
+          node --test tests/test_deploy_dashboards.mjs
+          bash -n tools/deploy_to_ha.sh
+
   unittest:
     runs-on: ubuntu-latest
     strategy:
@@ -20,8 +33,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
-        # voluptuous is only needed by tests/test_schema.py (otherwise skipped);
-        # the XSIG and value-coercion modules are pure stdlib.
+        # Platform tests stub Home Assistant, but still use real voluptuous
+        # schemas. mypy checks the HA-independent modules listed in mypy.ini.
         run: pip install -r requirements-test.txt
 
       - name: Run unittest suite

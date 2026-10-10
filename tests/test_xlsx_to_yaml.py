@@ -1,15 +1,85 @@
 """Tests for the xlsx -> YAML row mapping (tools/xlsx_to_yaml.py).
 
-Only the pure row->entity builders and name de-duplication are tested; they
-need no real workbook.
+Includes minimal ZIP/XML workbooks to test physical Excel row diagnostics.
 """
 
+import contextlib
+import io
 import os
 import sys
+import tempfile
 import unittest
+import zipfile
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 import xlsx_to_yaml as g  # noqa: E402
+
+
+class WorkbookRowNumberTests(unittest.TestCase):
+    def _workbook(self, path, row_numbers):
+        sheet = g.ET.Element(g._A + "worksheet")
+        data = g.ET.SubElement(sheet, g._A + "sheetData")
+        values = [
+            ["楼层", "房间", "名称", "功能", "亮度", "色温", "开", "关"],
+            ["B2", "车库", "错误灯", "", "", "", "1", ""],
+            ["B2", "车库", "灯", "", "2", "", "", ""],
+        ]
+        previous = 0
+        for row_number, cells in zip(row_numbers, values):
+            physical = row_number if row_number is not None else previous + 1
+            attrs = {} if row_number is None else {"r": str(row_number)}
+            row = g.ET.SubElement(data, g._A + "row", attrs)
+            for column, value in enumerate(cells):
+                cell = g.ET.SubElement(row, g._A + "c", {
+                    "r": f"{chr(65 + column)}{physical}", "t": "inlineStr",
+                })
+                inline = g.ET.SubElement(cell, g._A + "is")
+                g.ET.SubElement(inline, g._A + "t").text = value
+            previous = physical
+        with zipfile.ZipFile(path, "w") as workbook:
+            workbook.writestr("xl/workbook.xml", f'''
+                <workbook xmlns="{g._A[1:-1]}"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                  <sheets><sheet name="灯光" r:id="rId1"/></sheets>
+                </workbook>''')
+            workbook.writestr("xl/_rels/workbook.xml.rels", '''
+                <Relationships><Relationship Id="rId1"
+                  Target="worksheets/sheet1.xml"/></Relationships>''')
+            workbook.writestr("xl/worksheets/sheet1.xml", g.ET.tostring(sheet))
+
+    def test_sparse_rows_keep_physical_indices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sparse.xlsx")
+            self._workbook(path, [1, 10, 25])
+            rows = g.parse_xlsx(path)["灯光"]
+            self.assertEqual([row["_xlsx_row"] for row in rows], [10, 25])
+            self.assertEqual(rows[1]["亮度"], "2")
+
+    def test_missing_index_follows_previous_physical_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "optional.xlsx")
+            self._workbook(path, [None, 10, None])
+            self.assertEqual(
+                [row["_xlsx_row"] for row in g.parse_xlsx(path)["灯光"]],
+                [10, 11],
+            )
+
+    def test_error_reports_physical_row_and_preserves_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "invalid.xlsx")
+            output = os.path.join(directory, "crestron.yaml")
+            self._workbook(path, [1, 10, 25])
+            with open(output, "w", encoding="utf-8") as stream:
+                stream.write("existing configuration\n")
+            report = io.StringIO()
+            with contextlib.redirect_stdout(report):
+                self.assertEqual(g.check(path), 1)
+                with self.assertRaises(g.WorkbookValidationError):
+                    g.generate(path, output)
+            self.assertIn("灯光!10", report.getvalue())
+            with open(output, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "existing configuration\n")
 
 
 def light_row(**kw):
@@ -33,15 +103,17 @@ class LightTests(unittest.TestCase):
         )
         self.assertEqual(plat, "light")
         self.assertEqual(ent["name"], "B2.车库 天花灯带")
-        self.assertEqual(ent["type"], "brightness")
+        self.assertEqual(ent["type"], "color_temp")
         self.assertEqual(ent["brightness_join"], 1)
         self.assertEqual(ent["color_temp_join"], 201)
+        self.assertEqual(ent["suggested_area"], "B2.车库")
 
     def test_brightness_only_light(self):
         plat, ent = g.build_light(
             light_row(名称="吊灯", 功能="单色温", 亮度="4")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "brightness")
         self.assertNotIn("color_temp_join", ent)
 
     def test_single_label_but_has_color_temp(self):
@@ -51,6 +123,7 @@ class LightTests(unittest.TestCase):
             light_row(名称="壁灯", 功能="单色温", 亮度="24", 色温="224")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "color_temp")
         self.assertEqual(ent["color_temp_join"], 224)
 
     def test_relay_is_onoff_light(self):
@@ -59,11 +132,28 @@ class LightTests(unittest.TestCase):
             light_row(名称="柜灯", 功能="Relay", 开="1", 关="2")
         )
         self.assertEqual(plat, "light")
+        self.assertEqual(ent["type"], "onoff")
         self.assertEqual(ent["on_join"], 1)
         self.assertEqual(ent["off_join"], 2)
-        self.assertNotIn("type", ent)
         self.assertNotIn("brightness_join", ent)
         self.assertEqual(ent["device_id"], "light_onoff_1")
+
+    def test_color_temp_without_brightness_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(light_row(名称="错误灯", 色温="201"))
+        )
+
+    def test_incomplete_onoff_pair_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(light_row(名称="错误灯", 开="1"))
+        )
+
+    def test_mixed_analog_and_digital_control_is_skipped(self):
+        self.assertIsNone(
+            g.build_light(
+                light_row(名称="歧义灯", 亮度="1", 开="1", 关="2")
+            )
+        )
 
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
@@ -81,6 +171,7 @@ class OutletTests(unittest.TestCase):
         self.assertEqual(ent["device_class"], "outlet")
         self.assertEqual(ent["device_id"], "outlet_147")
         self.assertEqual(ent["device_name"], "B2.会客厅 落地灯")
+        self.assertEqual(ent["suggested_area"], "B2.会客厅")
 
     def test_missing_outlet_join_skipped(self):
         self.assertIsNone(g.build_outlet(outlet_row(名称="落地灯", 开="147")))
@@ -93,7 +184,8 @@ class CoverTests(unittest.TestCase):
     def test_curtain_with_position(self):
         plat, ent = g.build_cover(
             {"楼层": "B2", "房间": "会客厅", "名称": "纱帘1",
-             "开": "700", "关": "701", "停止": "702", "位置": "480"}
+             "类型": "curtain", "开": "700", "关": "701",
+             "停止": "702", "位置": "480"}
         )
         self.assertEqual(plat, "cover")
         self.assertEqual(ent["type"], "curtain")
@@ -115,13 +207,34 @@ class CoverTests(unittest.TestCase):
         )
         self.assertNotIn("pos_join", ent2)
 
-    def test_roller_is_shade(self):
+    def test_all_supported_cover_types(self):
+        for cover_type in sorted(g.SUPPORTED_COVER_TYPES):
+            with self.subTest(cover_type=cover_type):
+                _, ent = g.build_cover(
+                    {"楼层": "1F", "房间": "书房", "名称": "窗帘",
+                     "类型": cover_type, "开": "800", "关": "801",
+                     "停止": "802", "位置": "490"}
+                )
+                self.assertEqual(ent["type"], cover_type)
+
+    def test_cover_type_is_trimmed_and_case_insensitive(self):
         _, ent = g.build_cover(
-            {"楼层": "1F", "房间": "书房", "名称": "卷1",
-             "开": "800", "关": "801", "停止": "802", "位置": "490"}
+            {"楼层": "1F", "房间": "书房", "名称": "窗帘",
+             "类型": " Shade ", "开": "800", "关": "801", "停止": "802"}
         )
         self.assertEqual(ent["type"], "shade")
-        self.assertEqual(ent["pos_join"], 490)
+
+    def test_blank_or_unknown_cover_type_defaults_to_curtain(self):
+        for cover_type in ("", None, "unsupported"):
+            with self.subTest(cover_type=cover_type):
+                _, ent = g.build_cover(
+                    {"楼层": "1F", "房间": "书房", "名称": "卷1",
+                     "类型": cover_type, "开": "800", "关": "801",
+                     "停止": "802"}
+                )
+                # The name no longer guesses the type: even 卷1 defaults to
+                # curtain when 类型 is blank or unsupported.
+                self.assertEqual(ent["type"], "curtain")
 
     def test_missing_join_skipped(self):
         # Position present but a required drive join missing -> still skipped.
@@ -192,12 +305,127 @@ class AcTests(unittest.TestCase):
 
 class DedupTests(unittest.TestCase):
     def test_duplicate_names_suffixed(self):
-        ents = [{"name": "B2.车库 柜灯"}, {"name": "B2.车库 柜灯"},
-                {"name": "B2.车库 柜灯"}, {"name": "B2.车库 吊灯"}]
+        ents = [
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
+            {"name": "B2.车库 吊灯", "device_name": "B2.车库 吊灯"},
+        ]
         g.dedup_names(ents)
         self.assertEqual([e["name"] for e in ents],
                          ["B2.车库 柜灯", "B2.车库 柜灯 2",
                           "B2.车库 柜灯 3", "B2.车库 吊灯"])
+        self.assertEqual(
+            [e["device_name"] for e in ents],
+            [
+                "B2.车库 柜灯",
+                "B2.车库 柜灯 2",
+                "B2.车库 柜灯 3",
+                "B2.车库 吊灯",
+            ],
+        )
+
+
+class ValidationTests(unittest.TestCase):
+    def test_invalid_join_format_and_range_reported(self):
+        row = light_row(名称="错误灯", 亮度="a20")
+        self.assertIn("亮度: 必须只填写十进制数字", g._row_errors("灯光", row))
+        row["亮度"] = "1025"
+        self.assertIn("亮度: 必须在 1–1024 范围内", g._row_errors("灯光", row))
+
+    def test_mixed_light_controls_have_specific_error(self):
+        errors = g._row_errors(
+            "灯光",
+            light_row(名称="歧义灯", 亮度="20", 开="10", 关="11"),
+        )
+        self.assertIn(
+            "模拟量控制（亮度/色温）不能与数字量控制（开/关）混填",
+            errors,
+        )
+
+    def test_required_cover_joins_reported(self):
+        errors = g._row_errors(
+            "窗帘",
+            {
+                "楼层": "2F",
+                "房间": "主卧",
+                "名称": "窗帘",
+                "开": "700",
+                "关": "",
+                "停止": "",
+            },
+        )
+        self.assertEqual(errors, ["缺少必填 Join: 关, 停止"])
+
+    def test_build_report_has_exact_ignored_rows_and_all_errors(self):
+        sheets = {
+            "说明": [],
+            "灯光": [
+                {
+                    "楼层": "", "房间": "", "名称": "", "功能": "",
+                    "亮度": "", "色温": "", "开": "", "关": "",
+                    "_xlsx_row": 2,
+                },
+                light_row(_xlsx_row=3, 功能="//", 名称="示例"),
+                light_row(_xlsx_row=4, 名称="坏 Join", 亮度="a20"),
+                light_row(_xlsx_row=5, 名称="好灯", 亮度="20"),
+            ],
+        }
+        with patch.object(g, "parse_xlsx", return_value=sheets):
+            by_platform, errors, warnings, messages = (
+                g._build_from_workbook("input.xlsx")
+            )
+        self.assertEqual(errors, 1)
+        self.assertEqual(warnings, 0)
+        self.assertEqual(len(by_platform["light"]), 1)
+        report = "\n".join(messages)
+        self.assertIn("[error] 灯光!4: 亮度: 必须只填写十进制数字", report)
+        self.assertIn("ignored 2 empty/template row(s)", report)
+        self.assertIn("2 (empty row)", report)
+        self.assertIn("3 (template row", report)
+        self.assertIn("灯光: converted 1 entity row(s)", report)
+
+    def test_duplicate_name_rename_is_reported_with_source_row(self):
+        sheets = {
+            "灯光": [
+                light_row(_xlsx_row=8, 名称="灯", 亮度="20"),
+                light_row(_xlsx_row=9, 名称="灯", 亮度="21"),
+            ],
+        }
+        with patch.object(g, "parse_xlsx", return_value=sheets):
+            _entities, errors, warnings, messages = (
+                g._build_from_workbook("input.xlsx")
+            )
+        self.assertEqual(errors, 0)
+        self.assertEqual(warnings, 1)
+        self.assertIn(
+            "[warning] 灯光!9: duplicate entity name 'B2.车库 灯'; "
+            "renamed to 'B2.车库 灯 2'",
+            messages,
+        )
+
+    def test_header_anomalies_are_all_reported(self):
+        rows = g._SheetRows(
+            [],
+            headers=(
+                "序号", "楼层", "房间", "名称", "类型",
+                "开", "开", "位置", "", "停上",
+            ),
+        )
+        issues = g._header_issues("窗帘", rows)
+        text = "\n".join(f"{level}: {message}" for level, message in issues)
+        self.assertIn("error: duplicate column header(s): 开", text)
+        self.assertIn("error: missing required column header(s): 停止, 关", text)
+        self.assertIn("warning: blank column header(s) at column position(s): 9", text)
+        self.assertIn("warning: unknown column header(s) will be ignored: 停上", text)
+
+    def test_light_headers_must_support_at_least_one_control_layout(self):
+        rows = g._SheetRows([], headers=("序号", "楼层", "房间", "名称"))
+        issues = g._header_issues("灯光", rows)
+        self.assertTrue(any(
+            level == "error" and "cannot express a light control" in message
+            for level, message in issues
+        ))
 
 
 class EmitDomainTests(unittest.TestCase):
@@ -227,6 +455,145 @@ class EmitDomainTests(unittest.TestCase):
         # nested dict (mode_joins) renders as a block
         self.assertIn("\n    mode_joins:\n", out)
         self.assertIn('\n      "制冷": 507', out)
+
+    def test_conversion_report_is_emitted_as_safe_yaml_comments(self):
+        report = [
+            "[info] 灯光: converted 1 entity row(s)",
+            "[warning] 窗帘!9: first line\nsecond line",
+        ]
+        out = g.emit_domain(
+            {"light": [{"name": "灯", "brightness_join": 1}]},
+            "x.xlsx",
+            report,
+        )
+        self.assertIn("# [info] 灯光: converted 1 entity row(s)", out)
+        self.assertIn("# [warning] 窗帘!9: first line", out)
+        self.assertIn("# second line", out)
+        try:
+            import yaml
+        except ImportError:
+            return
+        parsed = yaml.safe_load(out)
+        self.assertEqual(parsed["light"][0]["brightness_join"], 1)
+
+    def test_generate_prints_and_embeds_the_same_report(self):
+        built = (
+            {"light": [{"name": "灯", "brightness_join": 1}]},
+            0,
+            1,
+            ["[warning] 灯光!7: example warning"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "crestron.yaml")
+            stdout = io.StringIO()
+            with patch.object(g, "_build_from_workbook", return_value=built):
+                with contextlib.redirect_stdout(stdout):
+                    g.generate("input.xlsx", output)
+            with open(output, encoding="utf-8") as stream:
+                generated = stream.read()
+        self.assertIn("[warning] 灯光!7: example warning", stdout.getvalue())
+        self.assertIn("# [warning] 灯光!7: example warning", generated)
+        self.assertIn("# wrote ", generated)
+        self.assertIn("errors:0, warnings:1", generated)
+        self.assertIn("# 下一步（如何使用这个配置文件）：", generated)
+        self.assertIn(
+            "#   1. 把生成的 crestron.yaml 复制到 Home Assistant 配置目录",
+            generated,
+        )
+
+
+class ScalarEscapingTests(unittest.TestCase):
+    """A raw newline in a double-quoted scalar folds or breaks the document.
+
+    Excel cells can contain alt-enter line breaks and stray control characters,
+    which used to be written straight through into the generated YAML.
+    """
+
+    def test_newline_and_tab_escaped(self):
+        self.assertEqual(g._yaml_scalar("a\nb"), '"a\\nb"')
+        self.assertEqual(g._yaml_scalar("a\tb"), '"a\\tb"')
+        self.assertEqual(g._yaml_scalar("a\rb"), '"a\\rb"')
+
+    def test_other_control_chars_escaped(self):
+        self.assertEqual(g._yaml_scalar("a\x00b"), '"a\\x00b"')
+        self.assertEqual(g._yaml_scalar("a\x7fb"), '"a\\x7fb"')
+
+    def test_quotes_and_backslashes_still_escaped(self):
+        self.assertEqual(g._yaml_scalar('a"b'), '"a\\"b"')
+        self.assertEqual(g._yaml_scalar("a\\b"), '"a\\\\b"')
+
+    def test_yaml_reserved_words_quoted(self):
+        """Bare `on`/`off`/`no`/`null` load as booleans or None, not strings."""
+        for word in ("on", "off", "true", "false", "yes", "no", "null",
+                     "Yes", "OFF", "Null", "y", "n"):
+            self.assertEqual(g._yaml_scalar(word), f'"{word}"', word)
+
+    def test_numeric_looking_strings_quoted(self):
+        """`123` would load as an int and `0x1F` as 31, retyping a name."""
+        for text in ("123", "0x1F", "0o17", "007"):
+            self.assertEqual(g._yaml_scalar(text), f'"{text}"', text)
+
+    def test_reserved_and_numeric_round_trip_as_strings(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for text in ("on", "off", "null", "no", "123", "0x1F"):
+            parsed = yaml.safe_load("name: " + g._yaml_scalar(text))
+            self.assertEqual(parsed["name"], text, text)
+
+    def test_group_comment_strips_newlines(self):
+        entities = [{"name": "灯", "on_join": 1, "_group": "1F\n客厅"}]
+        out = g.emit_domain({"light": entities}, "x.xlsx")
+        self.assertIn("# 1F 客厅", out)
+        self.assertNotIn("# 1F\n", out)
+
+    def test_group_comment_newline_does_not_break_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        entities = [{"name": "灯", "on_join": 1, "_group": "1F\n客厅: 坏"}]
+        parsed = yaml.safe_load(g.emit_domain({"light": entities}, "x.xlsx"))
+        self.assertEqual(len(parsed["light"]), 1)
+
+    def test_ordinary_values_unchanged(self):
+        self.assertEqual(g._yaml_scalar("curtain"), "curtain")
+        self.assertEqual(g._yaml_scalar("1F.客厅 灯带"), '"1F.客厅 灯带"')
+        self.assertEqual(g._yaml_scalar(42), "42")
+
+    def test_escaped_output_round_trips(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        raw = "客厅\n灯带\t2"
+        parsed = yaml.safe_load("name: " + g._yaml_scalar(raw))
+        self.assertEqual(parsed["name"], raw)
+
+
+class OutputPathTests(unittest.TestCase):
+    def test_output_directory_appends_default_filename(self):
+        self.assertEqual(
+            g._resolve_output_path("../custom_components/crestron"),
+            ("../custom_components/crestron",
+             "../custom_components/crestron/crestron.yaml"),
+        )
+
+    def test_explicit_yaml_path_is_used_verbatim(self):
+        self.assertEqual(
+            g._resolve_output_path(
+                "../custom_components/crestron/crestron.yaml"
+            ),
+            ("../custom_components/crestron",
+             "../custom_components/crestron/crestron.yaml"),
+        )
+
+    def test_filename_in_current_directory(self):
+        self.assertEqual(
+            g._resolve_output_path("crestron.yml"),
+            (".", "crestron.yml"),
+        )
 
 
 if __name__ == "__main__":
