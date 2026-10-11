@@ -1,0 +1,281 @@
+# 全屋自动化生成模板：灯光、插座、空调与关联开关双向同步。
+# 仓库版本含占位标记，不能直接导入 HA；替换全部标记后才是成品。
+# 使用 tools/xlsx_to_automations.py，根据 Excel 和 HA 注册表生成成品。
+# 成品命名 automations_manual.yaml，与 crestron.yaml 放在同一输出目录。
+# 成品是单条自动化，可粘贴到 HA 单条自动化 YAML 编辑器，最前面不加「-」。
+#
+# 生成约定（详见 ARCH.md）：
+# 三个标记各占一行；用 YAML 列表/映射替换整行，并沿用该行的基础缩进。
+# 无触发器填 []，无映射填 {}；不要对整份文件执行 Jinja 渲染。
+# switch_map：开关实体 → light_entity_ids / switch_entity_ids / climate_entity_ids 列表。
+# occupancy_map：人在实体 → light_entity_ids / switch_entity_ids 列表；不控制空调。
+# 所有列表均为去重后的真实 HA 实体 ID，不使用 device_id 或名称猜测实体 ID。
+# 开关源与被控插座实体必须分开，不能自关联或形成控制循环。
+#
+# 触发器约定：
+# switch_changed：所有关联开关，state 触发，to: null（忽略单纯属性变化）。
+# crestron_changed：所有需要反向同步的灯/插座/空调，state 触发，to: null。
+# occupancy_on：所有关联人在传感器，state 触发，to: "on"。
+# occupancy_off：同一批人在传感器，to: "off"，for: "00:00:30"。
+# 没有对应实体时省略该触发器，不生成空 entity_id。
+#
+# 行为与边界：
+# 任意设备开启算组开；全部明确 off 才算组关；未知或不可用不视为关闭。
+# 为避免反馈回写连带开整组，组内已有设备开启时，开关 ON 不再群发开机。
+# 因此短暂失同步时主动按 ON 也可能保留部分开启，无法用状态区分按键与反馈。
+# 空调只发开关命令，不修改模式/温度/风速；开启模式由集成和主控保留。
+# 多人在传感器：任意有人开灯/插座，全部持续无人 30 秒才关，执行前重新判断。
+# 不做手动保持；开关与人在控制没有优先级。
+# 共用队列；关机后最多等待反馈 8 秒，其他区域也会等待；超时仍可能争用。
+# 关联开关必须允许远程写入开关状态；无线模式本身不保证可写。
+# HA 重启/重载不主动对齐状态，尚未结束的无人计时不会保留。
+
+# 部署工具通过这个固定 ID 确认加载结果，请保留；名称 alias 可自行修改。
+id: crestron_manual_associations
+alias: "全屋｜关联开关与快思聪双向同步"
+description: >-
+  灯光、插座和空调统一按任一开启算开、全部关闭算关；
+  多人在传感器合并控制灯光和插座。
+
+# 手工填写方法：删除下一行标记，取消下面示例的注释并换成自己的实体 ID。
+# 四类监听各有用途；新增关联时，映射表和监听列表都要更新。
+# 没有某一类设备就删掉对应触发器，全部没有时写 triggers: []。
+triggers:
+  @@TRIGGERS@@
+  # - trigger: state
+  #   entity_id: [switch.wall_button]  # 控制端开关，品牌不限，必须支持远程开关
+  #   to: null                         # 只监听主状态，忽略亮度等属性变化
+  #   id: switch_changed
+  # - trigger: state
+  #   entity_id: [light.ceiling, switch.socket, climate.room_ac]  # 被控设备反馈
+  #   to: null
+  #   id: crestron_changed
+  # - trigger: state
+  #   entity_id: [binary_sensor.room_presence]  # 人在实体需要报告 on/off
+  #   to: "on"
+  #   id: occupancy_on
+  # - trigger: state
+  #   entity_id: [binary_sensor.room_presence]  # 与上面的传感器列表一致
+  #   to: "off"
+  #   for: "00:00:30"                   # 此值与下面动作中的 30 秒判断保持一致
+  #   id: occupancy_off
+
+conditions: []
+
+actions:
+  - variables:
+      # 手工填写：删除标记，按示例增加控制开关；一个开关可关联多台、多个类型。
+      # 同一设备也可出现在不同开关下，反馈会同步这些开关。
+      switch_map:
+        @@SWITCH_MAP@@
+        # switch.wall_button:
+        #   light_entity_ids: [light.ceiling]      # 灯光，可填多项，无则 []
+        #   switch_entity_ids: [switch.socket]    # 被控插座，不是控制端开关
+        #   climate_entity_ids: [climate.room_ac] # 空调只控制开关
+
+      # 手工填写：删除标记，按示例增加传感器；无需另外维护反向表。
+      # 一盏灯若关联两个传感器，就将它同时写到两个传感器的列表中。
+      # 任意传感器有人会开启它，所有关联传感器持续无人 30 秒才会关闭。
+      occupancy_map:
+        @@OCCUPANCY_MAP@@
+        # binary_sensor.room_presence:
+        #   light_entity_ids: [light.ceiling]
+        #   switch_entity_ids: [switch.socket]
+        # binary_sensor.door_presence:
+        #   light_entity_ids: [light.ceiling]
+        #   switch_entity_ids: []
+
+      # 判断空调主状态，不使用 hvac_action（待机不等于关机）。
+      active_climate_states: [heat, cool, heat_cool, auto, dry, fan_only]
+
+  - choose:
+      # 开关 → 全组设备；排队期间已被新状态取代的旧事件不再执行。
+      - conditions:
+          - condition: trigger
+            id: switch_changed
+          - condition: template
+            value_template: >-
+              {{ trigger.from_state is not none
+                 and trigger.to_state is not none
+                 and trigger.from_state.state in ['on', 'off']
+                 and trigger.to_state.state in ['on', 'off']
+                 and trigger.from_state.state != trigger.to_state.state
+                 and states(trigger.entity_id) == trigger.to_state.state }}
+        sequence:
+          - variables:
+              cfg: "{{ switch_map.get(trigger.entity_id, {}) }}"
+              want_on: "{{ trigger.to_state.state == 'on' }}"
+          - variables:
+              light_entities: "{{ cfg.get('light_entity_ids', []) }}"
+              outlet_entities: "{{ cfg.get('switch_entity_ids', []) }}"
+              ac_entities: "{{ cfg.get('climate_entity_ids', []) }}"
+          - variables:
+              group_entities: "{{ (light_entities + outlet_entities + ac_entities) | unique | list }}"
+          - variables:
+              group_any_on: >-
+                {% set ns = namespace(on=false) %}
+                {% for entity in group_entities %}
+                  {% set value = states(entity) %}
+                  {% if (entity.startswith('climate.') and value in active_climate_states)
+                        or (not entity.startswith('climate.') and value == 'on') %}
+                    {% set ns.on = true %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.on }}
+              group_all_off: >-
+                {% set ns = namespace(off=group_entities | count > 0) %}
+                {% for entity in group_entities %}
+                  {% if states(entity) != 'off' %}{% set ns.off = false %}{% endif %}
+                {% endfor %}
+                {{ ns.off }}
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ group_entities | count > 0
+                     and ((want_on and not group_any_on)
+                          or (not want_on and not group_all_off)) }}
+            then:
+              # 某类动作失败时继续尝试其他类型；错误仍记录在 HA 日志/追踪中。
+              - if:
+                  - condition: template
+                    value_template: "{{ light_entities | count > 0 }}"
+                then:
+                  - action: "{{ 'light.turn_on' if want_on else 'light.turn_off' }}"
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ light_entities }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ outlet_entities | count > 0 }}"
+                then:
+                  - action: "{{ 'switch.turn_on' if want_on else 'switch.turn_off' }}"
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ outlet_entities }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ ac_entities | count > 0 }}"
+                then:
+                  - action: "{{ 'climate.turn_on' if want_on else 'climate.turn_off' }}"
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ ac_entities }}"
+              # 全部类型的关机命令发出后，再统一等待状态反馈。
+              - if:
+                  - condition: template
+                    value_template: "{{ not want_on }}"
+                then:
+                  - wait_template: >-
+                      {% set ns = namespace(off=true) %}
+                      {% for entity in group_entities %}
+                        {% if states(entity) != 'off' %}{% set ns.off = false %}{% endif %}
+                      {% endfor %}
+                      {{ ns.off }}
+                    timeout: "00:00:08"
+                    continue_on_timeout: true
+
+      # 任意设备反馈 → 所有关联开关；包含空调的混合组也参与反向同步。
+      - conditions:
+          - condition: trigger
+            id: crestron_changed
+        sequence:
+          - variables:
+              matched_switches: >-
+                {% set ns = namespace(items=[]) %}
+                {% for sw, cfg in switch_map.items() %}
+                  {% set entities = cfg.get('light_entity_ids', [])
+                     + cfg.get('switch_entity_ids', []) + cfg.get('climate_entity_ids', []) %}
+                  {% if trigger.entity_id in entities %}
+                    {% set ns.items = ns.items + [sw] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - repeat:
+              for_each: "{{ matched_switches }}"
+              sequence:
+                - variables:
+                    control_switch: "{{ repeat.item }}"
+                    cfg: "{{ switch_map.get(repeat.item, {}) }}"
+                - variables:
+                    group_entities: >-
+                      {{ (cfg.get('light_entity_ids', []) + cfg.get('switch_entity_ids', [])
+                          + cfg.get('climate_entity_ids', [])) | unique | list }}
+                - variables:
+                    group_state: >-
+                      {% set ns = namespace(on=false, off=group_entities | count > 0) %}
+                      {% for entity in group_entities %}
+                        {% set value = states(entity) %}
+                        {% if (entity.startswith('climate.') and value in active_climate_states)
+                              or (not entity.startswith('climate.') and value == 'on') %}
+                          {% set ns.on = true %}
+                        {% endif %}
+                        {% if value != 'off' %}{% set ns.off = false %}{% endif %}
+                      {% endfor %}
+                      {{ 'on' if ns.on else ('off' if ns.off else 'unknown') }}
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ group_state in ['on', 'off']
+                           and states(control_switch) in ['on', 'off']
+                           and states(control_switch) != group_state }}
+                  then:
+                    - action: "{{ 'switch.turn_on' if group_state == 'on' else 'switch.turn_off' }}"
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ control_switch }}"
+
+      # 人在传感器 → 灯/插座：按每台设备反查所有关联传感器。
+      - conditions:
+          - condition: trigger
+            id: [occupancy_on, occupancy_off]
+        sequence:
+          - variables:
+              cfg: "{{ occupancy_map.get(trigger.entity_id, {}) }}"
+          - repeat:
+              for_each: >-
+                {{ (cfg.get('light_entity_ids', []) + cfg.get('switch_entity_ids', []))
+                   | unique | list }}
+              sequence:
+                - variables:
+                    target_entity: "{{ repeat.item }}"
+                - variables:
+                    related_sensors: >-
+                      {% set ns = namespace(items=[]) %}
+                      {% for sensor, targets in occupancy_map.items() %}
+                        {% if target_entity in (targets.get('light_entity_ids', [])
+                                                + targets.get('switch_entity_ids', [])) %}
+                          {% set ns.items = ns.items + [sensor] %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ ns.items }}
+                # 每个目标动作前重新读取状态和 last_changed，不能只看触发时的快照。
+                # 最后变为无人者的 off+30秒触发负责最终关机，不在队列里等待30秒。
+                - variables:
+                    occupancy_command: >-
+                      {% set ns = namespace(on=false, off=related_sensors | count > 0) %}
+                      {% set checked_at = as_timestamp(now()) %}
+                      {% for sensor in related_sensors %}
+                        {% set current = expand(sensor) | list %}
+                        {% if states(sensor) == 'on' %}{% set ns.on = true %}{% endif %}
+                        {% if states(sensor) != 'off' or current | count != 1 %}
+                          {% set ns.off = false %}
+                        {% elif checked_at - as_timestamp(current[0].last_changed) < 30 %}
+                          {% set ns.off = false %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ 'on' if trigger.id == 'occupancy_on' and ns.on
+                         else ('off' if trigger.id == 'occupancy_off' and ns.off else 'skip') }}
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ occupancy_command in ['on', 'off']
+                           and target_entity.split('.')[0] in ['light', 'switch']
+                           and states(target_entity) != occupancy_command }}
+                  then:
+                    - action: "{{ target_entity.split('.')[0] ~ '.turn_' ~ occupancy_command }}"
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ target_entity }}"
+
+mode: queued
+max: 100

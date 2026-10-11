@@ -341,6 +341,15 @@ class DeviceGroupingTests(unittest.TestCase):
             ac._attr_device_info["suggested_area"], "B2.洗衣房"
         )
 
+    def test_excel_name_keeps_identity_and_avoids_automatic_area_creation(self):
+        ac = self._ac(name="风盘机", device_id="ac_505", device_name="风盘机",
+                      floor="B2", room="洗衣房", suggested_area="B2.洗衣房")
+        self.assertEqual(ac._attr_name, "风盘机")
+        self.assertEqual(ac._attr_device_info["name"], "风盘机")
+        self.assertEqual(ac._attr_device_info["identifiers"], {("crestron", "ac_505")})
+        self.assertEqual(ac._attr_unique_id, "crestron_climate_d505")
+        self.assertIsNone(ac._attr_device_info["suggested_area"])
+
     def test_device_name_defaults_to_id(self):
         ac = self._ac(device_id="ac_505")
         self.assertEqual(ac._attr_device_info["name"], "ac_505")

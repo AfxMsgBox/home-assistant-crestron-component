@@ -1,10 +1,60 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl } from '../tools/deploy_dashboards.mjs';
+import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup } from '../tools/deploy_dashboards.mjs';
+
+// 用本地临时目录模拟 SSH 服务器，执行真实的远端备份 shell，不连接现场。
+function remoteFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'crestron-backup-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ssh = join(root, 'ssh.cjs');
+  writeFileSync(ssh, `const {execFileSync} = require('node:child_process');
+const {readFileSync} = require('node:fs');
+execFileSync('sh', ['-c', process.argv[3].replaceAll('/homeassistant', process.argv[2])],
+  {input: readFileSync(0), stdio: ['pipe', 'pipe', 'pipe']});
+`);
+  const directory = '/homeassistant/crestron-backups/2026-10-10/153000-ABC123/dashboard';
+  return { root, ssh, directory, backup: remoteBackup([process.execPath, ssh, root], directory),
+    local: directory.replace('/homeassistant', root) };
+}
+
+test('dashboard backup is written on the server before save with exact JSON and private permissions', async t => {
+  const remote = remoteFixture(t), f = fixture(['page-one']);
+  f.configs.set('page-one', { views: [{ title: "中文 '$HOME' $(touch unwanted)\n第二行" }] });
+  const previous = structuredClone(f.configs.get('page-one'));
+  await deployDashboards([item('page-one')], f.api, async () => true, remote.backup, () => {});
+  const file = join(remote.local, 'page-one.json');
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { dashboard: f.dashboards[0], config: previous });
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(remote.local), ['page-one.json']);
+  assert.deepEqual(f.configs.get('page-one'), item('page-one').config);
+});
+
+test('server backup never overwrites an existing backup and cleans temporary files', async t => {
+  const remote = remoteFixture(t);
+  await remote.backup('page-one', { config: oldConfig });
+  await assert.rejects(remote.backup('page-one', { config: 'changed' }), /无法保存服务器备份/);
+  assert.deepEqual(JSON.parse(readFileSync(join(remote.local, 'page-one.json'), 'utf8')), { config: oldConfig });
+  assert.deepEqual(readdirSync(remote.local), ['page-one.json']);
+});
+
+test('failed remote backup stops dashboard writes', async t => {
+  const remote = remoteFixture(t), f = fixture(['page-one']);
+  writeFileSync(remote.ssh, 'process.exit(1);');
+  await assert.rejects(deployDashboards([item('page-one')], f.api, async () => true,
+    remote.backup, () => {}), /无法保存服务器备份/);
+  assert.equal(writes(f).length, 0);
+});
+
+test('server backup validates destination and name before executing SSH', async t => {
+  const remote = remoteFixture(t);
+  assert.throws(() => remoteBackup([], remote.directory), /SSH/);
+  assert.throws(() => remoteBackup(['ssh'], '/tmp/backup'), /目录无效/);
+  await assert.rejects(remote.backup('../escape', {}), /名称无效/);
+});
 
 const item = (url, config = { views: [{ title: 'new' }] }) => ({ dashboard: { url_path: url, title: '页面', show_in_sidebar: true, require_admin: false }, config });
 const oldConfig = { views: [{ title: 'old' }] };

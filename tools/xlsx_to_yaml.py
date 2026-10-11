@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""Generate the Crestron `crestron:` domain YAML from a multi-sheet xlsx table.
+"""将多工作表 Excel 转换为 Crestron 设备 YAML。
 
-Usage:
-    python3 tools/xlsx_to_yaml.py <input.xlsx> <output_dir_or_yaml_file>
-    python3 tools/xlsx_to_yaml.py --check <input.xlsx>
+用法：
+    python3 tools/xlsx_to_yaml.py 输入.xlsx 输出目录或文件.yaml
+    python3 tools/xlsx_to_yaml.py --check 输入.xlsx
 
-Writes a single `crestron.yaml` holding the port plus all entities grouped by
-platform key (light:/switch:/number:/select:/sensor:/cover:). The integration
-imports this into a config entry, which lets Home Assistant group an AC's
-several entities into one device (device_id/device_name).
-
-The second argument may be either a directory (the file will be named
-`crestron.yaml`) or an explicit `.yaml`/`.yml` output path.
-
-Include it in configuration.yaml with:
+每行生成一台设备，支持灯光、插座、窗帘和空调，保留设备标识及楼层、房间。
+输出路径为目录时，文件名固定为 crestron.yaml；也可指定 .yaml/.yml 文件。
+在 configuration.yaml 中引入：
     crestron: !include crestron.yaml
 
-Pure standard library — no openpyxl/pandas/PyYAML required.
+仅使用 Python 标准库，无需安装额外依赖。
 """
 
+from collections import Counter
 import sys
 import os
 import argparse
@@ -29,11 +24,11 @@ _A = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
 class WorkbookValidationError(ValueError):
-    """Raised when validation errors make partial YAML unsafe to write."""
+    """工作簿校验失败时中止生成，避免写出不完整配置。"""
 
 
 class _SheetRows(list):
-    """Rows plus the original header cells needed for typo diagnostics."""
+    """保存设备行和原始表头，用于检查缺列、重名及拼写错误。"""
 
     def __init__(self, rows=(), headers=()):
         super().__init__(rows)
@@ -41,10 +36,10 @@ class _SheetRows(list):
 
 
 # --------------------------------------------------------------------------- #
-# xlsx parsing (stdlib only)
+# 读取 Excel（仅使用标准库）
 # --------------------------------------------------------------------------- #
 def _col_index(ref):
-    """'B7' -> 1 (zero-based column index)."""
+    """把单元格引用转换为从 0 开始的列号，例如 B7 对应 1。"""
     letters = "".join(c for c in ref if c.isalpha())
     n = 0
     for ch in letters:
@@ -53,8 +48,7 @@ def _col_index(ref):
 
 
 def parse_xlsx(path):
-    """Return {sheet_name: list_of_row_dicts}. Row dicts are keyed by the
-    header (first row) cell text; values are stripped strings."""
+    """返回“工作表名 → 行字典列表”。第一行作表头，单元格文字去除首尾空格。"""
     z = zipfile.ZipFile(path)
 
     shared = []
@@ -84,9 +78,8 @@ def _read_sheet(z, path, shared):
     grid = []
     excel_row = 0
     for row in data.findall(_A + "row"):
-        # Empty Excel rows may be omitted from sheet XML. Preserve the row's
-        # actual index instead of numbering only the rows that are present.
-        # The optional r attribute defaults to the next row after the last one.
+        # XML 可能省略空行，需保留实际 Excel 行号，避免错误位置提前。
+        # 缺少 r 属性时，按上一行号加 1 处理。
         excel_row = int(row.get("r", excel_row + 1))
         cells = {}
         maxc = -1
@@ -121,7 +114,7 @@ def _read_sheet(z, path, shared):
 
 
 # --------------------------------------------------------------------------- #
-# helpers
+# 通用辅助函数
 # --------------------------------------------------------------------------- #
 def _to_int(value):
     value = (value or "").strip()
@@ -129,11 +122,8 @@ def _to_int(value):
 
 
 def _name(row, name_col):
-    floor = row.get("楼层", "").strip()
-    room = row.get("房间", "").strip()
     label = row.get(name_col, "").strip() if name_col else ""
-    prefix = ".".join(p for p in (floor, room) if p)
-    return f"{prefix} {label}".strip() if label else prefix
+    return label
 
 
 def _group(row):
@@ -143,18 +133,16 @@ def _group(row):
 
 
 def _add_device_metadata(entity, row, device_id, device_name):
-    """Attach stable device identity and a non-authoritative HA area hint."""
+    """附加稳定的设备标识及 Excel 原始楼层、房间。"""
     entity["device_id"] = device_id
     entity["device_name"] = device_name
-    group = _group(row)
-    if group:
-        entity["suggested_area"] = group
-    entity["_group"] = group
+    entity["floor"] = row.get("楼层", "").strip()
+    entity["room"] = row.get("房间", "").strip()
+    entity["_group"] = _group(row)
 
 
-# Home Assistant CoverDeviceClass values supported by cover.py. Keep this list
-# in sync with _COVER_DEVICE_CLASSES there; the generator deliberately falls
-# back to curtain instead of emitting a value the runtime cannot represent.
+# 与 cover.py 的 _COVER_DEVICE_CLASSES 保持一致。
+# 无法识别的类型回退为 curtain，避免生成运行时不支持的配置。
 SUPPORTED_COVER_TYPES = frozenset({
     "awning",
     "blind",
@@ -170,24 +158,24 @@ SUPPORTED_COVER_TYPES = frozenset({
 
 
 def _cover_type(value):
-    """Normalize an xlsx 类型 cell; blank/unknown values become curtain."""
+    """规范化“类型”列；空白或未知值使用 curtain（布帘）。"""
     normalized = str(value or "").strip().lower()
     return normalized if normalized in SUPPORTED_COVER_TYPES else "curtain"
 
 
 # --------------------------------------------------------------------------- #
-# row -> (platform, entity) builders  (pure, unit-tested)
+# 将设备行转换为平台和实体配置（纯函数）
 # --------------------------------------------------------------------------- #
 def build_light(row):
-    """灯光 sheet row -> ('light', entity) or None.
+    """将灯光行转换为 light 配置；能力组合无效时返回 None。
 
-    灯光 sheet 永远只产出 light（绝不产出 switch）。类型严格由 join 能力决定，
+    灯光工作表生成 light 实体，类型由信号能力决定，
     而非「功能」标签：
       - 亮度 + 色温 -> color_temp（双色温）
       - 仅亮度      -> brightness（单色温）
       - 仅开 + 关   -> onoff（只开关）
 
-    混合模拟量与数字量控制、只有色温、开/关不成对或没有任何能力的行都跳过。
+    混合控制、只有色温、开关不成对或无控制能力时返回 None；完整转换入口会报错并中止生成。
     """
     bri = _to_int(row.get("亮度"))
     cct = _to_int(row.get("色温"))
@@ -226,7 +214,7 @@ def build_light(row):
 
 
 def build_outlet(row):
-    """插座 sheet row -> ('switch', entity) or None.
+    """将插座行转换为 switch 配置；缺少开关编号时返回 None。
 
     插座用两根数字量 join：开/关。快思聪侧会把状态也回传到这两根
     join 上（开=1/关=0 表示通电，开=0/关=1 表示断电），switch 平台负责
@@ -249,12 +237,11 @@ def build_outlet(row):
 
 
 def build_cover(row):
-    """窗帘 sheet row -> ('cover', entity) or None.
+    """将窗帘行转换为 cover 配置；缺少开、关、停止编号时返回 None。
 
     开/关/停止为必填的数字量控制 join。「位置」是可选的模拟量 join（0-100，
-    0=全关/100=全开）：有则作为 pos_join 输出，让 HA 显示真实百分比；无则
-    cover.py 退回假定状态（开/关/停按钮常驻可按，不受反馈影响——符合说明页
-    「开和关的控制不能因为反馈状态影响」）。
+    0=全关/100=全开）：有则输出 pos_join，收到反馈后显示真实百分比；
+    未收到位置反馈时使用假定状态。开、关、停止按钮不受当前反馈状态限制。
 
     「类型」使用 Home Assistant CoverDeviceClass 的英文值；合法值原样输出
     （忽略大小写和首尾空格），空白或未知值一律按 curtain 处理。
@@ -286,7 +273,7 @@ _AC_FAN_COLS = ("低速", "中速", "高速", "自动")
 
 
 def _join_map(row, cols):
-    """{col_label: join} for the columns that carry a join."""
+    """将已填写编号的列整理成“列名 → 信号编号”字典。"""
     out = {}
     for col in cols:
         v = _to_int(row.get(col))
@@ -312,24 +299,16 @@ _AC_MODE_JOIN_KEYS = {
 
 
 def build_ac(row):
-    """空调 sheet row -> ('climate', entity) or None.
+    """将空调行转换为 climate 配置；缺少开关编号时返回 None。
 
-    One climate entity per AC = one device, one thermostat card, and it shows
-    up in HA's "空调"(climate) category. Power is a real on/off button (pulsed
-    on/off joins); temperature setpoint and fan speed are settable; the running
-    mode (制冷/制热/通风/除湿) is a real selectable mode that tracks the control
-    system's feedback joins. Needs power joins; without them the AC can't be a
-    climate.
-
-    「风速值」列（模拟量风速 -1/10/50/100）暂不使用：数字量风速（低/中/高/自动）
-    已能完整表达风速，两路并存会让状态互相打架。故此处只读数字量风速列，
-    模拟量「风速值」有意忽略。
+    每台空调对应一个实体，设温、模式和风速能力由已填写的信号编号决定。
+    风速只使用低速、中速、高速、自动四列的数字量编号，暂不读取模拟量“风速值”。
     """
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
     if on is None or off is None:
         return None
-    base = _name(row, None) + " 空调"
+    base = _name(row, "名称")
     set_temp = _to_int(row.get("温度"))
     room_temp = _to_int(row.get("室温"))
     modes = _join_map(row, _AC_MODE_COLS)
@@ -357,29 +336,42 @@ SHEET_BUILDERS = {
 
 
 # --------------------------------------------------------------------------- #
-# name de-duplication  (pure)
+# 同房间名称去重（纯函数）
 # --------------------------------------------------------------------------- #
 def dedup_names(entities, on_rename=None):
-    """In-place: the 2nd, 3rd... entity sharing a name get ' 2', ' 3' suffixes
-    (matches the hand-written configuration.yaml convention)."""
-    seen = {}
+    """跨平台为同房间的重名设备编号。
+
+    先保留“吊灯1”等原始唯一名称，自动编号避开冲突；相同位置的设备共用房间。
+    """
+    def key(ent):
+        return (ent.get("floor", "").casefold().replace(" ", ""),
+                ent.get("room", "").casefold().replace(" ", ""))
+
+    counts = Counter((key(ent), ent["name"].casefold()) for ent in entities)
+    used = {}
     for ent in entities:
-        base = ent["name"]
-        seen[base] = seen.get(base, 0) + 1
-        if seen[base] > 1:
-            renamed = f"{base} {seen[base]}"
-            ent["name"] = renamed
-            # A one-entity device should receive the same suffix; otherwise HA
-            # still shows several devices with an identical device name.
-            if ent.get("device_name") == base:
-                ent["device_name"] = renamed
-            if on_rename is not None:
-                on_rename(ent, base, renamed)
+        group, name = key(ent), ent["name"].casefold()
+        if counts[group, name] == 1:
+            used.setdefault(group, set()).add(name)
+    for ent in entities:
+        group, base = key(ent), ent["name"]
+        if counts[group, base.casefold()] == 1:
+            continue
+        occupied = used.setdefault(group, set())
+        number = 1
+        while (renamed := f"{base}{number}").casefold() in occupied:
+            number += 1
+        occupied.add(renamed.casefold())
+        ent["name"] = renamed
+        if ent.get("device_name") == base:
+            ent["device_name"] = renamed
+        if on_rename is not None:
+            on_rename(ent, base, renamed)
     return entities
 
 
 # --------------------------------------------------------------------------- #
-# workbook validation / diagnostics
+# 工作簿校验与提示
 # --------------------------------------------------------------------------- #
 _INSTRUCTION_SHEETS = frozenset({"说明"})
 _DIGITAL_COLUMNS = {
@@ -408,7 +400,7 @@ _EXPECTED_COLUMNS = {
         "开", "关", "停止", "位置",
     ),
     "空调": (
-        "序号", "楼层", "房间",
+        "序号", "楼层", "房间", "名称",
         "开", "关", "制冷", "制热", "通风", "除湿",
         "低速", "中速", "高速", "自动", "温度", "室温", "风速值",
     ),
@@ -422,18 +414,16 @@ _REQUIRED_COLUMNS = {
 
 
 def _header_issues(sheet_name, rows):
-    """Return ``(severity, message)`` for every detectable header anomaly.
+    """返回表头问题的“级别、说明”列表。
 
-    Tests and callers may pass an ordinary list of row dictionaries; only rows
-    produced by parse_xlsx carry the original headers, so those legacy/pure
-    inputs intentionally skip this workbook-level check.
+    仅 parse_xlsx 的结果含原始表头；直接传入普通行列表时跳过表头检查。
     """
     original = getattr(rows, "headers", None)
     if original is None:
         return []
     headers = [str(value or "").strip() for value in original]
     if not headers:
-        return [("error", "sheet is empty or has no header row")]
+        return [("error", "工作表为空或缺少表头，请在第一行填写列名")]
 
     issues = []
     nonblank = [header for header in headers if header]
@@ -442,7 +432,7 @@ def _header_issues(sheet_name, rows):
     })
     if duplicates:
         issues.append(
-            ("error", f"duplicate column header(s): {', '.join(duplicates)}")
+            ("error", f"表头重名，请修改重复列名：{', '.join(duplicates)}")
         )
     if "" in headers:
         positions = [
@@ -451,20 +441,20 @@ def _header_issues(sheet_name, rows):
         issues.append(
             (
                 "warning",
-                "blank column header(s) at column position(s): "
+                "以下列的表头为空，请检查列名："
                 + ", ".join(positions),
             )
         )
 
     present = set(nonblank)
     expected = set(_EXPECTED_COLUMNS[sheet_name])
-    required = set(_REQUIRED_COLUMNS[sheet_name])
+    required = set(_REQUIRED_COLUMNS[sheet_name]) | {"楼层", "房间", "名称"}
     missing_required = sorted(required - present)
     if missing_required:
         issues.append(
             (
                 "error",
-                "missing required column header(s): "
+                "缺少必填表头："
                 + ", ".join(missing_required),
             )
         )
@@ -473,37 +463,35 @@ def _header_issues(sheet_name, rows):
         issues.append(
             (
                 "warning",
-                "missing recognized column header(s); those fields will not "
-                "be converted: " + ", ".join(missing_optional),
+                "缺少以下可选表头，对应字段不转换：" + ", ".join(missing_optional),
             )
         )
-    unknown = sorted(present - expected)
+    # 关联列由独立的自动化生成器处理，不写入设备配置。
+    unknown = sorted(present - expected - {"HA关联开关实体ID", "HA关联人在实体ID"})
     if unknown:
         issues.append(
             (
                 "warning",
-                "unknown column header(s) will be ignored: "
+                "以下表头无法识别，对应列已忽略："
                 + ", ".join(unknown),
             )
         )
 
-    # A light has two alternative control layouts rather than globally
-    # required columns. Reject a sheet whose headers cannot express either.
+    # 灯光支持亮度控制或成对开关控制，表头至少需满足其中一种。
     if sheet_name == "灯光" and (
         "亮度" not in present and not {"开", "关"} <= present
     ):
         issues.append(
             (
                 "error",
-                "headers cannot express a light control: provide 亮度, "
-                "or both 开 and 关",
+                "缺少灯光控制表头：请提供亮度列，或同时提供开、关两列",
             )
         )
     return issues
 
 
 def _join_cell_error(value, maximum):
-    """Explain a non-empty invalid join cell; return None when valid/blank."""
+    """说明非空信号编号的格式或范围错误；合法值和空白返回 None。"""
     text = str(value or "").strip()
     if not text:
         return None
@@ -516,7 +504,8 @@ def _join_cell_error(value, maximum):
 
 
 def _row_errors(sheet_name, row):
-    errors = []
+    errors = [f"{column}: 必填，不能为空" for column in ("楼层", "房间", "名称")
+              if not str(row.get(column) or "").strip()]
     for column in _DIGITAL_COLUMNS[sheet_name]:
         if error := _join_cell_error(row.get(column), 4096):
             errors.append(f"{column}: {error}")
@@ -540,10 +529,10 @@ def _row_errors(sheet_name, row):
         elif (on is None) != (off is None):
             errors.append("开和关必须成对填写")
         elif brightness is None and on is None:
-            errors.append("缺少亮度，或完整的开/关 Join")
+            errors.append("缺少亮度编号，或完整的开/关编号")
     elif sheet_name == "插座":
         if _to_int(row.get("开")) is None or _to_int(row.get("关")) is None:
-            errors.append("开和关都是必填 Join")
+            errors.append("开和关的信号编号均须填写")
     elif sheet_name == "窗帘":
         missing = [
             column
@@ -551,36 +540,36 @@ def _row_errors(sheet_name, row):
             if _to_int(row.get(column)) is None
         ]
         if missing:
-            errors.append(f"缺少必填 Join: {', '.join(missing)}")
+            errors.append(f"缺少必填信号编号: {', '.join(missing)}")
     elif sheet_name == "空调":
         if _to_int(row.get("开")) is None or _to_int(row.get("关")) is None:
-            errors.append("开和关都是必填 Join")
+            errors.append("开和关的信号编号均须填写")
     return errors
 
 
 def _placeholder_reason(sheet_name, row):
-    """Why a row is intentionally ignored, or None when it needs conversion."""
+    """返回空行或模板行的忽略原因；需要转换的设备行返回 None。"""
     relevant = set(_DIGITAL_COLUMNS[sheet_name]) | set(_ANALOG_COLUMNS[sheet_name])
     relevant |= {"楼层", "房间", "名称"}
     values = [str(row.get(column) or "").strip() for column in relevant]
     if not any(values):
-        return "empty row"
+        return "空行"
     if str(row.get("功能") or "").strip() == "//" and not any(
         str(row.get(column) or "").strip()
         for column in set(_DIGITAL_COLUMNS[sheet_name])
         | set(_ANALOG_COLUMNS[sheet_name])
     ):
-        return "template row (功能='//' and all Join cells are blank)"
+        return "模板行（功能为 //，所有信号编号为空）"
     return None
 
 
 def _is_placeholder_row(sheet_name, row):
-    """Compatibility wrapper used by pure row tests."""
+    """兼容直接测试设备行的调用方式。"""
     return _placeholder_reason(sheet_name, row) is not None
 
 
 def _entity_joins(entity):
-    """Yield (signal space, join, field) for duplicate-join warnings."""
+    """依次返回信号类型、编号、字段名，用于检查重复信号编号。"""
     analog_fields = {
         "brightness_join",
         "color_temp_join",
@@ -595,7 +584,7 @@ def _entity_joins(entity):
 
 
 def _build_from_workbook(xlsx_path):
-    """Parse and validate a workbook, returning entities, counts and messages."""
+    """解析并校验工作簿，返回实体、错误数、警告数及提示。"""
     sheets = parse_xlsx(xlsx_path)
     by_platform = {}
     errors = 0
@@ -609,12 +598,12 @@ def _build_from_workbook(xlsx_path):
 
     for sheet_name, rows in sheets.items():
         if sheet_name in _INSTRUCTION_SHEETS:
-            report(f"[info] ignored instruction sheet {sheet_name!r}")
+            report(f"[信息] 已忽略说明工作表：{sheet_name}")
             continue
         builder = SHEET_BUILDERS.get(sheet_name)
         if builder is None:
             warnings += 1
-            report(f"[warning] ignored unknown sheet {sheet_name!r}")
+            report(f"[警告] 工作表“{sheet_name}”无法识别，已忽略；支持灯光、插座、窗帘、空调")
             continue
 
         for severity, message in _header_issues(sheet_name, rows):
@@ -622,7 +611,8 @@ def _build_from_workbook(xlsx_path):
                 errors += 1
             else:
                 warnings += 1
-            report(f"[{severity}] {sheet_name}: {message}")
+            level = "错误" if severity == "error" else "警告"
+            report(f"[{level}] {sheet_name}表：{message}")
 
         placeholders = []
         converted = 0
@@ -636,8 +626,8 @@ def _build_from_workbook(xlsx_path):
             if row_errors:
                 errors += 1
                 report(
-                    f"[error] {sheet_name}!{row_number}: "
-                    + "; ".join(row_errors)
+                    f"[错误] {sheet_name}表第{row_number}行："
+                    + "；".join(row_errors)
                 )
                 continue
 
@@ -646,24 +636,25 @@ def _build_from_workbook(xlsx_path):
                 if raw_type and raw_type.lower() not in SUPPORTED_COVER_TYPES:
                     warnings += 1
                     report(
-                        f"[warning] {sheet_name}!{row_number}: unknown type "
-                        f"{raw_type!r}; using curtain"
+                        f"[警告] {sheet_name}表第{row_number}行：类型“{raw_type}”无法识别，"
+                        "已使用 curtain（布帘）"
                     )
             if sheet_name == "空调":
                 fan_value = str(row.get("风速值") or "").strip()
                 if fan_value:
-                    report(
-                        f"[info] {sheet_name}!{row_number}: 风速值 "
-                        f"{fan_value!r} is intentionally ignored; digital "
-                        "低速/中速/高速/自动 Join columns are used"
+                    message = (
+                        f"[信息] {sheet_name}表第{row_number}行：“风速值”编号{fan_value}未使用，"
+                        "风速改用低速/中速/高速/自动列的编号。"
                     )
+                    if not _join_map(row, _AC_FAN_COLS):
+                        message += "这些列均为空，未配置风速调节。"
+                    report(message)
 
             result = builder(row)
             if not result:
                 errors += 1
                 report(
-                    f"[error] {sheet_name}!{row_number}: "
-                    "row could not be converted"
+                    f"[错误] {sheet_name}表第{row_number}行：无法转换，请检查必填项和控制信号"
                 )
                 continue
             if isinstance(result, tuple):
@@ -675,12 +666,12 @@ def _build_from_workbook(xlsx_path):
                 for space, join, field in _entity_joins(entity):
                     key = (space, join)
                     owner = seen_joins.get(key)
-                    current = f"{sheet_name}!{row_number} {entity['name']} ({field})"
+                    current = f"{sheet_name}表第{row_number}行 {entity['name']} ({field})"
                     if owner is not None:
                         warnings += 1
                         report(
-                            f"[warning] duplicate {space} join {join}: "
-                            f"{owner}; {current}"
+                            f"[警告] {'模拟量' if space == 'analog' else '数字量'}信号编号{join}重复："
+                            f"{owner}；{current}。请核对是否共用信号"
                         )
                     else:
                         seen_joins[key] = current
@@ -690,11 +681,10 @@ def _build_from_workbook(xlsx_path):
                 for row_number, reason in placeholders
             )
             report(
-                f"[info] {sheet_name}: ignored {len(placeholders)} "
-                f"empty/template row(s): {details}"
+                f"[信息] {sheet_name}表：已忽略{len(placeholders)}个空行或模板行，行号：{details}"
             )
         report(
-            f"[info] {sheet_name}: converted {converted} entity row(s)"
+            f"[信息] {sheet_name}表：已转换{converted}条设备配置"
         )
 
     def renamed(entity, old_name, new_name):
@@ -702,26 +692,28 @@ def _build_from_workbook(xlsx_path):
         warnings += 1
         source_sheet, source_row = entity_sources.get(id(entity), ("?", "?"))
         report(
-            f"[warning] {source_sheet}!{source_row}: "
-            f"duplicate entity name {old_name!r}; "
-            f"renamed to {new_name!r}"
+            f"[警告] {source_sheet}表第{source_row}行：同房间设备名“{old_name}”重复，"
+            f"已改名为“{new_name}”"
         )
 
-    for entities in by_platform.values():
-        dedup_names(entities, renamed)
+    dedup_names([entity for entities in by_platform.values() for entity in entities], renamed)
     return by_platform, errors, warnings, messages
 
 
 # --------------------------------------------------------------------------- #
-# YAML emitting (hand-rolled) — one `crestron.yaml` domain config file
+# 生成单个 crestron.yaml 配置文件
 # --------------------------------------------------------------------------- #
-# Stable, readable order for the platform sections under `crestron:`.
+# 固定平台输出顺序，便于阅读和比较配置。
 _PLATFORM_ORDER = ["light", "switch", "cover", "number", "select",
                    "sensor", "binary_sensor", "media_player", "climate"]
+_PLATFORM_LABELS = {
+    "light": "灯光", "switch": "开关", "cover": "窗帘", "number": "数值设置",
+    "select": "选项", "sensor": "传感器", "binary_sensor": "二值传感器",
+    "media_player": "媒体播放器", "climate": "空调",
+}
 
 
-# Control characters that have a YAML double-quoted escape. Anything else in
-# the C0 range is emitted as \xNN.
+# 双引号字符串中的常用转义；其他 C0 控制字符输出为 \xNN。
 _YAML_ESCAPES = {
     "\\": "\\\\",
     '"': '\\"',
@@ -731,18 +723,16 @@ _YAML_ESCAPES = {
 }
 
 
-# YAML 1.1 reads these bare words as booleans or null, so a string that happens
-# to equal one has to be quoted or it changes type on load.
+# YAML 1.1 会将这些裸词解析成布尔值或空值，作为名称时必须加引号。
 _YAML_RESERVED = frozenset(
     "y yes n no true false on off null none ~".split()
 )
 
 
 def _is_safe_bare(s):
-    """True when ``s`` survives a YAML round-trip unquoted, as a string.
+    """判断字符串不加引号时，能否在 YAML 回读后保持字符串类型。
 
-    Requiring a leading letter (or underscore) is what keeps numbers out:
-    ``123`` would load as an int and ``0x1F`` as 31, silently retyping a name.
+    仅接受字母或下划线开头的标识，避免 123、0x1F 等名称被解析成数字。
     """
     if not s or not s.isascii():
         return False
@@ -759,12 +749,10 @@ def _yaml_scalar(value):
     if isinstance(value, int):
         return str(value)
     s = str(value)
-    # Leave plain ASCII identifiers bare (brightness/curtain/...), double-quote
-    # anything else (names with spaces, dots, Chinese, reserved words, digits).
+    # 普通 ASCII 标识可不加引号；中文、空格、点号、保留词和数字名称使用双引号。
     if _is_safe_bare(s):
         return s
-    # A raw newline inside a double-quoted scalar folds into a space (or breaks
-    # the document); an Excel cell with alt-enter in it produced exactly that.
+    # 转义单元格内换行，避免 YAML 将其折叠为空格或破坏配置结构。
     out = []
     for ch in s:
         escape = _YAML_ESCAPES.get(ch)
@@ -778,7 +766,7 @@ def _yaml_scalar(value):
 
 
 def _emit_entity(ent, indent, skip=("_group",)):
-    """Render one entity as YAML list-item lines; '- ' bullet at `indent` cols."""
+    """把单个实体转换为 YAML 列表项，按 indent 缩进。"""
     pad = " " * indent
     lines = []
     first = True
@@ -797,17 +785,16 @@ def _emit_entity(ent, indent, skip=("_group",)):
 
 
 def emit_domain(by_platform, source, report_lines=()):
-    """by_platform: {platform: [entities]} -> the `crestron:` domain config.
+    """把按平台分组的实体写成 crestron 域配置。
 
-    Entities live under their platform key (light:/switch:/number:/...) so they
-    are set up via the integration's config entry and grouped into HA devices.
+    实体放在 light、switch 等平台键下，由集成加载并关联到 HA 设备。
     """
     lines = [
-        f"# Generated from {source} by tools/xlsx_to_yaml.py",
-        "# Include in configuration.yaml as:  crestron: !include crestron.yaml",
+        f"# 来源：{source}；由 tools/xlsx_to_yaml.py 生成",
+        "# 在 configuration.yaml 中引入：crestron: !include crestron.yaml",
     ]
     if report_lines:
-        lines.extend(["#", "# Conversion report (same messages printed by the tool):"])
+        lines.extend(["#", "# 转换报告（与终端提示一致）："])
         for message in report_lines:
             physical_lines = str(message).replace("\r", "\n").split("\n")
             lines.extend(f"# {line}" if line else "#" for line in physical_lines)
@@ -829,22 +816,20 @@ def emit_domain(by_platform, source, report_lines=()):
         for ent in by_platform[platform]:
             group = ent.get("_group")
             if group and group != last_group:
-                # A newline in a 楼层/房间 cell would end the comment and let
-                # the rest of the text land in the document as YAML.
+                # 合并楼层/房间中的换行，避免注释后的文字变成有效 YAML。
                 lines.append("  # " + " ".join(str(group).split()))
                 last_group = group
-            # Drop the legacy `platform:` key — under the domain config the
-            # platform is implied by the section key.
+            # 平台已由外层键确定，不再写入旧式 platform 字段。
             lines.extend(_emit_entity(ent, 2, skip=("_group", "platform")))
         lines.append("")
     return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #
-# main
+# 命令行入口
 # --------------------------------------------------------------------------- #
 def _resolve_output_path(output):
-    """Return (parent_directory, yaml_path) for either supported CLI form."""
+    """将输出目录或文件参数统一解析为父目录和 YAML 文件路径。"""
     if output.lower().endswith((".yaml", ".yml")):
         return os.path.dirname(output) or ".", output
     return output, os.path.join(output, "crestron.yaml")
@@ -857,13 +842,13 @@ def generate(xlsx_path, output):
     source = os.path.basename(xlsx_path)
     if errors:
         raise WorkbookValidationError(
-            f"refusing to write partial YAML: {errors} workbook error(s)"
+            f"工作簿有{errors}项错误，已中止生成，原 YAML 文件保持不变"
         )
 
     out_dir, path = _resolve_output_path(output)
-    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
+    counts = "，".join(f"{_PLATFORM_LABELS.get(p, p)}：{len(e)}" for p, e in by_platform.items())
     summary = (
-        f"wrote {path} ({counts}; errors:{errors}, warnings:{warnings})"
+        f"已生成 {path}（{counts}；错误：{errors}，警告：{warnings}）"
     )
     usage = _usage_text(path)
     os.makedirs(out_dir, exist_ok=True)
@@ -881,60 +866,80 @@ def generate(xlsx_path, output):
 
 
 def check(xlsx_path):
-    """Validate without writing YAML; return a process exit status."""
+    """只检查、不写 YAML；返回进程退出码。"""
     by_platform, errors, warnings, messages = _build_from_workbook(xlsx_path)
     for message in messages:
         print("  " + message)
-    counts = ", ".join(f"{p}:{len(e)}" for p, e in by_platform.items())
+    counts = "，".join(f"{_PLATFORM_LABELS.get(p, p)}：{len(e)}" for p, e in by_platform.items())
     print(
-        f"  check complete ({counts}; errors:{errors}, warnings:{warnings})"
+        f"  检查完成（{counts}；错误：{errors}，警告：{warnings}）；未写入文件"
     )
     return 1 if errors else 0
 
 
 def _usage_text(path):
-    """Return the post-generation instructions printed and embedded in YAML."""
+    """生成终端与 YAML 注释中共用的后续操作说明。"""
     filename = os.path.basename(path)
     return (
         "下一步（如何使用这个配置文件）：\n"
         f"  1. 把生成的 {filename} 复制到 Home Assistant 配置目录\n"
         "     （与 configuration.yaml 同一个文件夹）。\n"
-        "  2. 在 configuration.yaml 里加一行（include 这个文件）：\n"
+        "  2. 在 configuration.yaml 中引入（只保留一个 crestron 配置项）：\n"
         f"         crestron: !include {filename}\n"
-        "     注意：整个 configuration.yaml 只能有一个 `crestron:` 键。端口写在\n"
-        f"     {filename} 顶部的 `port:`，不要在 configuration.yaml 里再写一个\n"
-        "     `crestron:`（会冲突）。\n"
         f"  3. 打开 {filename}，把顶部的 `port:` 改成你的快思聪 XSIG 端口。\n"
-        "  4. 重启 Home Assistant。\n"
-        "  5. 若实体类型变过（如旧的开关灯变成灯、空调合并成一个 climate），重启后到\n"
-        "     设置 → 设备与服务 → 实体，筛选「不可用」，把旧实体批量删除即可。\n"
+        "  4. 仅修改 YAML 可执行 crestron.reload；首次安装或更新组件代码需重启 HA。\n"
+        "  5. 如需清理旧实体，请先筛选 Crestron 集成，确认实体已从配置移除且不再使用。\n"
     )
+
+
+class _ChineseArgumentParser(argparse.ArgumentParser):
+    """将帮助标题及本工具会触发的参数错误改为中文。"""
+
+    def format_usage(self):
+        return super().format_usage().replace("usage: ", "用法：", 1)
+
+    def format_help(self):
+        return super().format_help().replace("usage: ", "用法：", 1)
+
+    def error(self, message):
+        message = message.replace("the following arguments are required: ", "缺少必填参数：")
+        message = message.replace("unrecognized arguments: ", "无法识别的参数：")
+        message = message.replace("ignored explicit argument", "此选项不接受附加值")
+        message = message.replace("argument ", "参数 ")
+        self.print_usage(sys.stderr)
+        self.exit(2, f"错误：{message}\n")
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _ChineseArgumentParser(
+        description=__doc__, add_help=False, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser._positionals.title = "位置参数"
+    parser._optionals.title = "可选参数"
+    parser.add_argument("-h", "--help", action="help", help="显示帮助并退出")
     parser.add_argument(
         "--check",
         action="store_true",
-        help="validate the xlsx and print diagnostics without writing YAML",
+        help="只检查 Excel 并显示结果，不生成 YAML",
     )
-    parser.add_argument("xlsx", help="input .xlsx workbook")
+    parser.add_argument("xlsx", metavar="输入.xlsx", help="输入的 .xlsx 设备表")
     parser.add_argument(
         "output",
         nargs="?",
-        help="output directory or .yaml file (not used with --check)",
+        metavar="输出路径",
+        help="输出目录或 .yaml 文件；使用 --check 时省略",
     )
     args = parser.parse_args(argv[1:])
     if args.check:
         if args.output is not None:
-            parser.error("output must be omitted with --check")
+            parser.error("使用 --check 时不能指定输出路径")
         return check(args.xlsx)
     if args.output is None:
-        parser.error("output is required unless --check is used")
+        parser.error("请指定输出路径，或使用 --check 仅检查")
     try:
         generate(args.xlsx, args.output)
     except WorkbookValidationError as error:
-        print(f"  [aborted] {error}")
+        print(f"  [中止] {error}")
         return 1
     return 0
 

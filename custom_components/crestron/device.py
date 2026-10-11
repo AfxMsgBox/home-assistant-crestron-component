@@ -1,9 +1,8 @@
 """Shared helper to group related entities under one HA device.
 
 Any entity whose config carries `device_id` is attached to a device with that
-identifier; entities sharing the same `device_id` (e.g. an AC's power switch,
-temperature number, fan select and room-temp/mode sensors) appear together as
-one device in Home Assistant.
+identifier; entities sharing the same `device_id` appear together as one device
+in Home Assistant. Each generated Excel device row has its own device ID.
 """
 
 from __future__ import annotations
@@ -28,5 +27,7 @@ def device_info(config: dict[str, Any]) -> Optional[DeviceInfo]:
     return DeviceInfo(
         identifiers={(DOMAIN, device_id)},
         name=config.get(CONF_DEVICE_NAME) or device_id,
-        suggested_area=config.get(CONF_SUGGESTED_AREA),
+        # Explicit locations are assigned in one batch after registration.
+        suggested_area=None if "floor" in config or "room" in config
+        else config.get(CONF_SUGGESTED_AREA),
     )

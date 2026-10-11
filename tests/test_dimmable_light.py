@@ -11,6 +11,7 @@ reliably turns the bulb off on a single press.
 
 import asyncio
 import enum
+import json
 import sys
 import types
 import unittest
@@ -41,7 +42,7 @@ class LightEntity:
 
 class RestoreEntity:
     async def async_get_last_state(self):
-        return None
+        return getattr(self, "_last_state", None)
 
 
 def _install_stubs():
@@ -74,6 +75,9 @@ class FakeHub:
 
     def get_analog(self, join):
         return self.analog.get(join, 0)
+
+    def has_analog(self, join):
+        return join in self.analog
 
     def set_analog(self, join, value):
         # Mirror the real hub: writing the wire does NOT touch the read cache.
@@ -157,6 +161,171 @@ class TurnOffSequenceTests(unittest.TestCase):
             [(20, 65535), (20, round(128 / 255 * 65535))],
         )
         self.assertNotIn((20, 0), self.hub.sent_analog)
+
+
+class BrightnessMemoryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hub = FakeHub()
+        self.light = make_light(self.hub)
+        await self.light.async_added_to_hass()
+
+    async def feedback(self, value, light=None, hub=None):
+        light = light or self.light
+        hub = hub or self.hub
+        hub.analog[20] = value
+        await light.process_callback("a20", str(value))
+
+    async def test_set_half_off_on_restores_requested_brightness(self):
+        level = round(128 / 255 * 65535)
+        await self.light.async_turn_on(brightness=128)
+        await self.feedback(level)
+        await self.light.async_turn_off()
+        await self.feedback(0)
+        self.assertFalse(self.light.is_on)
+        self.assertEqual(self.light.brightness, 0)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, level))
+
+    async def test_external_feedback_keeps_exact_raw_level_through_off_and_on(self):
+        for level in (1, 12345, 32768, 65535):
+            with self.subTest(level=level):
+                await self.feedback(level)
+                await self.feedback(0)
+                await self.light.async_turn_on()
+                self.assertEqual(self.hub.sent_analog[-1], (20, level))
+
+    async def test_new_feedback_replaces_requested_level(self):
+        await self.light.async_turn_on(brightness=128)
+        await self.feedback(20000)
+        await self.feedback(0)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, 20000))
+
+    async def test_command_without_feedback_is_remembered_and_stale_cache_cannot_replace_it(self):
+        await self.feedback(65535)
+        await self.light.async_turn_on(brightness=128)
+        await self.light.async_turn_off()
+        level = round(128 / 255 * 65535)
+        # 关灯重发最新设定值，不重发旧反馈中的 100%。
+        self.assertEqual(self.hub.sent_analog[-2:], [(20, level), (20, 0)])
+        await self.feedback(0)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, level))
+
+    async def test_zero_command_does_not_erase_memory(self):
+        await self.light.async_turn_on(brightness=80)
+        await self.light.async_turn_on(brightness=0)
+        await self.feedback(0)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, round(80 / 255 * 65535)))
+
+    async def test_no_record_defaults_to_full_brightness(self):
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [(20, 65535)])
+
+    async def test_restart_while_off_restores_memory_without_turning_light_on(self):
+        await self.feedback(23456)
+        await self.feedback(0)
+        # 标准亮度在关灯时可以为 None，记忆通过独立属性保存。
+        saved = json.loads(json.dumps({**self.light.extra_state_attributes, "brightness": None}))
+        hub = FakeHub()
+        restored = make_light(hub)
+        restored._last_state = types.SimpleNamespace(state="off", attributes=saved)
+        await restored.async_added_to_hass()
+        self.assertFalse(restored.is_on)
+        self.assertEqual(hub.sent_analog, [])
+        await restored.async_turn_on()
+        self.assertEqual(hub.sent_analog, [(20, 23456)])
+
+    async def test_initial_live_nonzero_feedback_takes_priority_over_saved_memory(self):
+        hub = FakeHub()
+        hub.analog[20] = 45678
+        restored = make_light(hub)
+        restored._last_state = types.SimpleNamespace(
+            state="off", attributes={"last_nonzero_brightness": 20000})
+        await restored.async_added_to_hass()
+        await self.feedback(0, restored, hub)
+        await restored.async_turn_on()
+        self.assertEqual(hub.sent_analog[-1], (20, 45678))
+
+    async def test_initial_zero_does_not_erase_saved_memory(self):
+        hub = FakeHub()
+        hub.analog[20] = 0
+        restored = make_light(hub)
+        restored._last_state = types.SimpleNamespace(
+            state="off", attributes={"last_nonzero_brightness": 20000})
+        await restored.async_added_to_hass()
+        await restored.async_turn_on()
+        self.assertEqual(hub.sent_analog[-1], (20, 20000))
+
+    async def test_legacy_on_state_can_seed_memory(self):
+        restored = make_light(self.hub)
+        restored._last_state = types.SimpleNamespace(state="on", attributes={"brightness": 64})
+        await restored.async_added_to_hass()
+        await restored.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, round(64 / 255 * 65535)))
+
+    async def test_invalid_restored_memory_is_ignored(self):
+        for value in (None, True, 0, -1, 65536, 20.5, "25000", float("nan")):
+            with self.subTest(value=value):
+                restored = make_light(self.hub)
+                restored._last_state = types.SimpleNamespace(
+                    state="off", attributes={"last_nonzero_brightness": value})
+                await restored.async_added_to_hass()
+                await restored.async_turn_on()
+                self.assertEqual(self.hub.sent_analog[-1], (20, 65535))
+
+    async def test_feedback_during_restore_wins_over_history(self):
+        restored = make_light(self.hub)
+
+        async def load_state():
+            await self.feedback(22222, restored)
+            return types.SimpleNamespace(state="off", attributes={"last_nonzero_brightness": 11111})
+
+        restored.async_get_last_state = load_state
+        await restored.async_added_to_hass()
+        await self.feedback(0, restored)
+        await restored.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, 22222))
+
+    async def test_unrelated_feedback_does_not_revive_old_brightness(self):
+        self.hub.analog[20] = 65535
+        await self.light.async_turn_on(brightness=50)
+        await self.light.process_callback("a21", "4000")
+        await self.light.process_callback("available", "True")
+        await self.feedback(0)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, round(50 / 255 * 65535)))
+
+    async def test_each_light_has_its_own_memory(self):
+        other_hub = FakeHub()
+        other = make_light(other_hub)
+        await self.light.async_turn_on(brightness=40)
+        await other.async_turn_on(brightness=90)
+        await self.light.async_turn_on()
+        await other.async_turn_on()
+        self.assertEqual(self.hub.sent_analog[-1], (20, round(40 / 255 * 65535)))
+        self.assertEqual(other_hub.sent_analog[-1], (20, round(90 / 255 * 65535)))
+
+    async def test_color_temperature_preserves_on_level_and_restores_off_level(self):
+        light = light_mod.CrestronLight(self.hub, {
+            "name": "双色温", "brightness_join": 20, "color_temp_join": 21})
+        await light.async_added_to_hass()
+        await self.feedback(30000, light)
+        await light.async_turn_on(color_temp_kelvin=4000)
+        self.assertEqual(self.hub.sent_analog, [(21, 4000)])
+        await self.feedback(0, light)
+        await light.async_turn_on(color_temp_kelvin=4500)
+        self.assertEqual(self.hub.sent_analog[-2:], [(20, 30000), (21, 4500)])
+
+    async def test_removed_light_ignores_feedback_and_commands(self):
+        await self.feedback(20000)
+        await self.light.async_will_remove_from_hass()
+        await self.feedback(65535)
+        await self.light.async_turn_on(brightness=255)
+        await self.light.async_turn_off()
+        self.assertEqual(self.hub.sent_analog, [])
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 20000)
 
 
 if __name__ == "__main__":

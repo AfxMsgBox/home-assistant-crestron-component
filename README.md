@@ -1,407 +1,272 @@
 # Home Assistant Crestron XSIG 集成
 
-通过 Crestron XSIG，把灯光、空调、窗帘、插座等设备接入 Home Assistant（HA），也可以让 Crestron 面板触发 HA 动作、接收 HA 状态。
+把快思聪的灯光、空调、窗帘、插座等设备接入 Home Assistant（HA）。使用 YAML 配置，通过 Excel 生成设备列表；HA 监听 TCP，快思聪主控主动连接。
 
-当前集成版本为 `0.4.0`，支持 `light`、`climate`、`cover`、`switch`、`number`、`select`、`sensor`、`binary_sensor`、`media_player`。实体和连接参数使用 YAML 配置；UI 负责显示集成、设备、诊断和重新同步入口。
+使用方法见下文，技术架构见 [ARCH.md](ARCH.md)，未完成事项见 [TODO.md](TODO.md)。
 
-本文介绍使用方法；开发细节见 [ARCH.md](ARCH.md)，未完成事项见 [TODO.md](TODO.md)。
+## 1. 脚本安装与更新（推荐）
 
-## 1. 安装与连接
+目标 HA 服务器需支持 SSH、`ha`、`curl`、`tar`/`gzip` 命令，配置目录为 `/homeassistant`。
 
-### Home Assistant 侧
+**从 GitHub 安装只需下载一个文件**，其余工具、组件和模板会自动下载：
 
-1. 把仓库的 `custom_components/crestron/` 复制到 **HA 配置目录**下的 `custom_components/crestron/`。
-2. 在 HA 配置目录创建 `crestron.yaml`，最小内容如下：
+```bash
+curl -fL https://raw.githubusercontent.com/AfxMsgBox/home-assistant-crestron-component/master/tools/deploy_to_ha.sh -o deploy_to_ha.sh
+bash deploy_to_ha.sh
+```
 
-   ```yaml
-   port: 10200
-   light:
-     - name: 客厅灯带
-       brightness_join: 1
-   ```
+没有本地项目时自动进入 GitHub 分支选择；有项目时显示 `1. 本地目录（默认）`、`2. GitHub`。GitHub 会列出全部分支，有 `master` 时默认选它，否则第一项。下载所选分支完整源码、检查所需文件后才开始部署。分支必须已包含新版部署工具；未发布的本地修改请使用本地来源。
 
-3. 在现有 `configuration.yaml` 加入：
+在本地项目根目录运行：
+
+```bash
+# 交互选择来源和 GitHub 分支
+bash tools/deploy_to_ha.sh
+
+# 安装：从 GitHub 下载 master 最新版
+bash tools/deploy_to_ha.sh --source github --host HA_HOST --user root --key
+
+# 更新：从指定分支下载最新版，默认保留现场设备 YAML
+bash tools/deploy_to_ha.sh --update --source github --branch dev --host HA_HOST --user root --key
+
+# 更新：使用本地开发代码，包含未提交修改和新增源码
+bash tools/deploy_to_ha.sh --update --source local --host HA_HOST --user root --key
+```
+
+- 默认来源为 `local`；没有本地项目且未指定来源时自动使用 GitHub。`--source github` 默认分支为 `master`；单独指定 `--branch` 也表示选择 GitHub。带参数运行直接使用该分支，不显示菜单。
+- `--source local` 从脚本所在 `tools/` 的上一级推断项目根目录，与启动命令时所在目录无关；不能与 `--branch` 同用。
+- 本地模式先复制源码到临时目录，再从副本部署组件、转换器和仪表盘。排除 `.git`、`local/`、虚拟环境、缓存、`.env` 文件及 `crestron.yaml`；设备 YAML 仍须单独选择上传。源码中的符号链接或特殊文件会报错停止。
+- 不带参数运行会询问连接信息；`--key` 使用 SSH 密钥，密码登录另需 `sshpass`。
+- 运行脚本的电脑需要 Bash、curl、Python 3、ssh、scp；部署仪表盘另需 **Node.js 22+**，可用 `--skip-dashboard` 跳过页面。
+- 安装和更新分别询问“是否重新生成设备文件”“是否重新生成自动化关联”，默认否。设备上传另行确认；更新默认保留服务器设备 YAML。可用 `--generate-yaml --upload-yaml`、`--generate-automations` 明确选择，或用对应的 `--skip-*` 参数跳过。
+- 生成会覆盖指定的本地 YAML，不保留手写内容。上传的 YAML 放在 `/homeassistant/custom_components/crestron/crestron.yaml`。首次安装需在 HA 的 `configuration.yaml` 加入：
+
+  ```yaml
+  crestron: !include custom_components/crestron/crestron.yaml
+  ```
+
+部署分两步：
+
+1. **设备配置**：从 Excel 生成 `crestron.yaml`，按选择上传；备份组件、检查配置、部署页面，重启 Home Assistant 服务并等待 HTTP 恢复。
+2. **自动化关联（可选）**：读取 Excel 和 HA 注册信息，等待涉及的实体注册并加载，按模板生成 `automations_manual.yaml`。列出双方的楼层、房间、名称和实体 ID，确认上传后备份旧文件、检查配置并重载自动化，无需再次重启。
+
+入口脚本依次调用 `deploy_devices.py` 和 `deploy_automations.py`，也可分别运行，方便调试；两个 Python 入口使用相同的来源、连接参数，并复用 Shell 下载流程。第二步依赖设备已导入 HA。默认等待 120 秒，可用 `--restart-timeout 240` 调整。HTTP 和自动化接口均通过 SSH 在服务器执行，避免本机代理影响；实体存在不代表主控已在线。
+
+```bash
+# 完整两步：从本地源码部署，生成/上传设备，随后生成自动化并询问是否上传
+bash tools/deploy_to_ha.sh --source local --host HA_HOST --user root --key \
+  --xlsx local/HA设备接口配置表.xlsx --generate-yaml --upload-yaml --generate-automations
+
+# 单独第一步：部署设备及仪表盘，检查并重启 HA
+python3 tools/deploy_devices.py --host HA_HOST --user root --key \
+  --xlsx local/HA设备接口配置表.xlsx --upload-yaml
+
+# 单独第二步：设备已导入，只更新自动化关联，不重启 HA
+python3 tools/deploy_automations.py --host HA_HOST --user root --key \
+  --xlsx local/HA设备接口配置表.xlsx
+```
+
+Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某一步。自动化默认输出到设备 YAML 同目录，可用 `--automation-yaml FILE` 指定。生成报告也保存在成品顶部注释中。`--skip-upload-automations` 只生成本地文件；`--upload-automations` 表示已确认上传并覆盖服务器文件，省略该参数则生成后询问，默认不上传。自动化阶段需服务器 `jq`，认证使用管理员 `HA_TOKEN` 或已有的有效所有者浏览器会话。
+
+默认输入和输出使用项目的 `local/`；单文件启动时使用 Shell 所在目录的 `local/`，不会保存到临时下载目录。Excel 文件仍由你提供。
+
+服务器只接收运行所需组件、选定的设备/自动化 YAML 和通过接口保存的仪表盘，不再保存整份源码、文档或测试。下载、解压和打包准备在本机临时目录进行，退出时自动清理。
+
+**备份统一保存在 HA 服务器**，按服务器日期、时间分目录，同秒多次部署也不会覆盖：
+
+```text
+/homeassistant/crestron-backups/2026-10-10/153000-随机编号/
+  crestron.tar.gz          旧组件及其中的设备 YAML（首次安装无此文件）
+  dashboard/页面地址.json   页面修改前的配置
+  automation/             第二步修改前的自动化文件和 configuration.yaml
+```
+
+组件压缩备份校验通过后才上传新组件；页面备份成功后才保存该页面。失败会停止后续步骤；第一步已写入的组件和页面不会自动回滚，第二步文件替换或配置检查失败会恢复该步原文件。历史源码存档和旧备份不会自动删除。
+
+### 仪表盘
+
+[dashboard/dashboard-climate.json](dashboard/dashboard-climate.json) 提供紧凑空调页面：每排两张卡片，电源图标直接开关，下方调温和风速，点击名称进入详情。文件中的实体 ID 为虚构示例，部署前需替换。
+
+`dashboard/` 中每个 JSON 代表一个完整仪表盘，包含 `dashboard` 元信息与 `config` 页面配置。部署递归扫描所有 JSON，按 `url_path` 判断是否已存在；覆盖已有页面会替换整个页面配置，保留原页面元信息。
+
+| 选择 | 含义 |
+|---|---|
+| `y` | 覆盖当前页面 |
+| `n` | 跳过当前页面 |
+| `All yes` | 覆盖本次所有已有页面 |
+| `All no` | 跳过本次所有已有页面 |
+
+新页面仍会创建，并备份其原先不存在的记录。页面备份保存到服务器本次部署目录的 `dashboard/` 下；仅部署页面时也创建独立的日期备份目录。网页中的修改不会自动同步回仓库文件。
+
+```bash
+# 仅部署仪表盘，不重启 HA
+bash tools/deploy_to_ha.sh --branch dev --host HA_HOST --user root --key --dashboard-only
+
+# 查看完整参数
+bash tools/deploy_to_ha.sh --help
+```
+
+本机需能访问 HA 网页。可用 `--ha-url https://HA地址` 指定访问地址；完整部署时服务器端也需能访问该地址，用于重启后的检查。页面认证优先使用 `HA_TOKEN` 环境变量中的管理员令牌；未设置时，通过 SSH 读取已有的有效所有者浏览器会话并换取临时令牌，需要远端 `jq`。没有可用会话时需提供令牌。
+
+## 2. 手动安装与连接
+
+1. 将 `custom_components/crestron/` 复制到 HA 配置目录下的同名目录。
+2. 创建设备 YAML（见下一节），在 `configuration.yaml` 引入，例如：
 
    ```yaml
    crestron: !include crestron.yaml
    ```
 
-4. 检查配置并重启 Home Assistant。集成会根据 YAML 自动创建一个配置项；在“设置 → 设备与服务”查看 Crestron XSIG。
+3. 检查配置并重启 HA，在“设置 → 设备与服务”查看 Crestron XSIG。
+4. 在快思聪程序中配置 TCP/IP Client，连接 **HA 地址与 YAML 中的端口**，并接好 XSIG 收发通道，启用断线重连。
 
-`!include` 的路径相对于包含它的文件。被包含的 `crestron.yaml` 从 `port:` 和平台列表开始，不再套一层 `crestron:`。实体列表内不需要 `platform: crestron`。
+`!include` 路径相对于包含它的文件。设备 YAML 从 `port:` 开始，不再包一层 `crestron:`，平台列表内不需要 `platform: crestron`。
 
-如果 YAML 放在组件目录，使用：
+join 必须与主控程序一致：数字 join 为 `1–4096`，模拟和串行 join 为 `1–1024`。成对开关使用瞬动控制，主控应在相同编号的反馈方向返回互斥的开/关状态；这需要主控程序配合。
 
-```yaml
-crestron: !include custom_components/crestron/crestron.yaml
-```
+## 3. 从 Excel 导入设备
 
-仓库自带的 `configuration.yaml` 只是这种路径安排的示例，请把需要的配置合并到自己的文件中。
+转换器只需 Python 3.8+，无需额外依赖。复制 [sample.xlsx](sample.xlsx)，按现场填写；只支持 `.xlsx`，旧 `.xls` 请先另存为 `.xlsx`。
 
-### Crestron 侧
-
-HA 是 TCP 服务端，Crestron 主控主动连接 HA：
-
-1. 在主控程序配置 TCP/IP Client，目标地址为 HA 主机，端口与 `port` 一致。
-2. 连接 XSIG（Intersystem Communication）符号与 TCP Client 的发送、接收通道。
-3. 将设备控制和状态反馈接到对应的数字、模拟、串行 join；启用连接及断线重连逻辑。
-4. 确保该 TCP 端口能从主控访问。集成监听 `0.0.0.0`，只维护一个活动客户端。
-
-join 编号必须以主控程序的实际 XSIG 映射为准。YAML 数字字段只填整数编号：数字 join 为 `1–4096`，模拟和串行 join 为 `1–1024`。`d1` 与 `a1` 属于不同类型，可以同时使用。
-
-本项目的成对开关控制约定：HA 向“开/关”join 发瞬动命令，主控在相同编号的反馈方向返回互斥状态。开高、关低表示开；开低、关高表示关；同高或同低不能确认状态。请在主控程序中实现这项约定，它不是任意 XSIG 程序自动具备的设备反馈。
-
-## 2. 从 Excel 生成设备配置
-
-转换器只使用 Python 标准库，可独立运行于 Python 3.8 及以上环境；不需要安装 HA、openpyxl 或 pandas。
-
-复制根目录的 `sample.xlsx` 作为模板，保留所需工作表。表名和表头须使用下列文字，第一行写表头，列顺序可以调整：
-
-| 工作表 | 推荐表头 | 生成结果与填写要求 |
+| 工作表 | 必填内容 | 可选能力 |
 |---|---|---|
-| 灯光 | 序号、楼层、房间、名称、功能、亮度、色温、开、关 | 亮度＋色温生成调色温灯；仅亮度生成调光灯；仅完整开＋关生成开关灯 |
-| 插座 | 序号、楼层、房间、名称、开、关 | 开、关必填，生成插座类型的 switch |
-| 窗帘 | 序号、楼层、房间、名称、类型、开、关、停止、位置 | 开、关、停止必填，位置可选；生成 cover |
-| 空调 | 序号、楼层、房间、开、关、制冷、制热、通风、除湿、低速、中速、高速、自动、温度、室温、风速值 | 开、关必填，其余控制和温度 join 可选；每行生成一个 climate |
+| 灯光 | 楼层、房间、名称；亮度或完整开＋关 | 色温（需配合亮度） |
+| 插座 | 楼层、房间、名称、开、关 | — |
+| 窗帘 | 楼层、房间、名称、开、关、停止 | 类型、位置 |
+| 空调 | 楼层、房间、名称、开、关 | 模式、风速、温度、室温 |
 
-填写要点：
-
-- join 单元格填写十进制整数编号，例如 `414`，不是 `a414`、`414.0` 或当前温度。建议使用静态数字。
-- “亮度、色温、位置、温度、室温”是模拟 join；开关、模式、风速是数字 join。
-- 灯光不能同时填写模拟控制与开关控制；色温必须配合亮度。“功能”通常只作备注，不决定能力。
-- 空行会忽略；“功能”为 `//` 且所有 join 都空的灯光模板行也会忽略。有名称但没有必需控制能力的普通设备行会报错。
-- 空调“风速值”目前不转换，使用低速、中速、高速、自动四根数字 join。
-- 窗帘类型支持 `awning`、`blind`、`curtain`、`damper`、`door`、`garage`、`gate`、`shade`、`shutter`、`window`；为空或无法识别时使用 `curtain`。
-- “说明”工作表会忽略；其他未知工作表会警告。同一平台的重名实体会自动追加数字后缀。
-
-在仓库根目录先检查：
+第一行是表头，列顺序不限。join 列填整数编号，例如 `414`，不是 `a414` 或当前温度。空行忽略；普通设备行的楼层、房间、名称不能为空。旧空调表需要补上 **名称** 列，例如填写“空调”。详细填写规则见 [Excel 指南](tools/README.md)。
 
 ```bash
-python3 tools/xlsx_to_yaml.py --check sample.xlsx
+# 先检查，不写文件
+python3 tools/xlsx_to_yaml.py --check 你的设备表.xlsx
+
+# 检查通过后生成
+python3 tools/xlsx_to_yaml.py 你的设备表.xlsx local/crestron.yaml
 ```
 
-检查通过后生成到一个待审阅文件：
+转换提示和生成 YAML 的注释使用中文，位置显示为“空调表第13行”。有错误时整次生成失败，原输出文件保持不变。成功生成会覆盖整个目标文件，默认端口为 `10200`；需自行检查端口，并合并手写的其他平台配置、`to_joins` 和 `from_joins`。
+
+### 楼层、房间和名称
+
+新版配置包含 `floor`、`room`，加载后自动创建或复用 HA 楼层和区域，并把设备放入对应区域：
+
+- 设备和实体的默认显示名来自 **名称** 列，不附加楼层、房间前缀。
+- 同一房间重名的设备从 1 编号，例如 `吊灯1`、`吊灯2`；跨设备类型也一起检查，不同房间可以同名。
+- 相同“楼层＋房间”的多行设备共用一个房间。不同楼层出现同名房间时，按 `书房1`、`书房2` 编号。
+- 已存在的带数字名称会被保留，自动编号避开冲突。重复导入复用区域 ID；可识别原来的 `1F.厨房` 这类区域并迁移。
+
+**已有安装**：更新组件后，用新版转换器重新生成并上传 YAML，再重载或重启 HA。只更新代码而继续使用旧 YAML，不会启用楼层、房间同步。
+
+保持原 join 和 `device_id` 时，已有实体 ID、设备关联及自动化引用保持不变。HA 中手工设置的名称仍优先，需清除自定义名称才能显示 Excel 名称。含 `floor`、`room` 的设备以 YAML 为区域来源；重载会重新分配设备区域，并清除相应实体单独设置的区域，使其继承设备区域。旧 YAML 仅有 `suggested_area` 时仍使用原来的区域建议方式。
+
+### 关联开关与人在自动化
+
+设备配置仍由 `tools/xlsx_to_yaml.py` 单独生成。设备导入后，用独立工具 `tools/xlsx_to_automations.py` 读取 Excel、HA 注册表和 [自动化模板](automations_manual_template.yaml) 生成关联。推荐使用上面的部署脚本自动完成注册信息读取。
+
+- “HA关联开关实体ID”：填写控制开关的 `switch.xxx`，支持灯光、插座、空调；品牌不限，必须可通过 HA 远程开关并反馈状态。
+- “HA关联人在实体ID”：填写报告 `on/off` 的 `binary_sensor.xxx`，支持灯光与插座。
+- 多个 ID 在单元格内换行；也兼容字面 `\n`。一个开关填到多行表示控制多台设备；一个设备可关联多个开关或传感器。
+- 三类设备都双向同步：任意设备开启算开，全部明确关闭才算关。组内已有设备开启时，再收到开关开启状态不会强制打开其余设备。空调只控制开关。
+- 多人在传感器：任意有人开启，全部持续无人 30 秒关闭。没有手动保持，共用队列时其他操作可能等待最多 8 秒关机反馈。
+
+关联报告中，被控设备的位置/名称来自 Excel；开关和传感器的位置/名称来自 HA，缺失位置显示“未分配”。匹配使用集成唯一标识，不根据名称猜测实体 ID；缺失、禁用或歧义会停止生成，保留旧成品。
+
+已有注册表导出文件时，也可以离线生成：
 
 ```bash
-python3 tools/xlsx_to_yaml.py sample.xlsx local/crestron.generated.yaml
+python3 tools/xlsx_to_automations.py local/HA设备接口配置表.xlsx \
+  local/automations_manual.yaml --registry local/ha_registry.json
+# 加 --check 只检查并输出关联清单，不写文件
 ```
 
-第二个参数也可以是目录，此时输出文件名固定为 `crestron.yaml`。
+生成的文件是单条自动化，可在 HA 单条自动化 YAML 编辑器粘贴。部署工具上传到 `/homeassistant/automations_manual.yaml`，检查并按需添加 `automation manual: !include automations_manual.yaml`；保留其他自动化文件。配置检查失败会恢复第二步修改前的文件；重载失败会明确报告并保留备份。模板中各占位区域旁有完整手填示例，原模板不能直接导入 HA。尚需现场验证实际联动效果。
 
-**存在任意校验错误时，整次生成失败，不创建或覆盖输出 YAML。** 错误位置使用真实 Excel 行号，例如 `灯光!10`；工作表中间的空行不会让行号提前。警告不阻止生成，但应检查重复 join、表头拼写和被忽略字段。
+## 4. 日常使用与修改配置
 
-成功生成会覆盖指定文件的全部内容，并写入默认 `port: 10200`。部署前检查实体与 join，按现场需要修改端口，并合并手写的 `to_joins`、`from_joins` 或其他平台配置；重新生成不会保留这些手工内容。备份旧文件后再替换 HA 实际引用的 YAML。
+- 调光灯会记住最近的非零亮度：例如调到 50%，关灯后再次开灯恢复为 50%；HA 正常重启后也保留。面板调整需反馈到 HA 才能更新记忆；显式指定亮度时使用指定值，没有有效记忆时默认 100%。更新组件并重启 HA 后生效，无需重新生成设备 YAML。
+- 空调可在独立空调仪表盘直接开关、调温和调风速，复杂设置进入实体详情。电源按钮调用独立开关，不发送模式选择命令；启动模式由主控保留。
+- 设温支持 `16–30°C` 整数；模式、风速和温度控件取决于已配置的 join。显示以主控真实反馈为准。
+- 修改 Excel 后需重新生成 YAML，上传到 HA 实际引用的路径；生成不会保留此前手改内容。
 
-生成器还会填入 `device_id`、`device_name` 和区域建议。灯光、插座、窗帘名称来自“楼层.房间 名称”，空调来自“楼层.房间 空调”。
-
-## 3. 手写或补充实体
-
-以下示例均为 **被 include 的文件内容**，每个平台列表在同一文件中只定义一次。join 仅为示例，请换成现场编号。
-
-### 灯光、开关、窗帘和空调
-
-```yaml
-port: 10200
-
-light:
-  - name: 客厅灯带
-    brightness_join: 1
-    color_temp_join: 201
-    device_id: living_strip
-    device_name: 客厅灯带
-    suggested_area: 客厅
-  - name: 走廊壁灯
-    on_join: 11
-    off_join: 12
-
-switch:
-  - name: 客厅插座
-    on_join: 21
-    off_join: 22
-    device_class: outlet
-
-cover:
-  - name: 客厅窗帘
-    type: curtain
-    open_join: 31
-    close_join: 32
-    stop_join: 33
-    pos_join: 301
-
-climate:
-  - name: 客厅空调
-    on_join: 41
-    off_join: 42
-    set_temp_join: 401
-    reg_temp_join: 402
-    mode_cool_join: 43
-    mode_heat_join: 44
-    mode_fan_join: 45
-    mode_dry_join: 46
-    fan_low_join: 47
-    fan_med_join: 48
-    fan_high_join: 49
-    fan_auto_join: 50
-```
-
-行为说明：
-
-- **调光灯**：亮度在主控侧为 `0–65535`，HA 侧为 `0–255`；色温直接使用 `2700–6500 K`。调光灯显示依赖主控反馈，命令不会立即改写反馈缓存。
-- **开关灯和 switch**：支持 `on_join`＋`off_join` 瞬动控制；单根保持电平控制可改用 `switch_join`。可选 `state_join` 提供独立反馈。switch 不允许同时配置这两种控制方式；可选 `mode_joins` 映射用于多状态反馈。
-- **窗帘**：`pos_join` 直接使用 `0–100`，0 为全关，100 为全开。Excel 必须填写开、关、停止；手写 YAML 还支持仅 `pos_join`＋`stop_join`。没有位置 join 就没有 HA 百分比控制功能。尚未收到真实位置时使用推定位置；收到后，百分比显示优先使用真实反馈。
-- **空调**：模式、风速、设定温度、室温按配置启用。没有模式 join 时提供关机和自动（纯开机）模式。温度直接使用摄氏整数，不做乘十或华氏换算。
-- **空调设温**：允许 `16–30°C` 的整数值，`25.0` 等整数表示也可接受；小数部分非零、布尔值、非有限值及越界值会被拒绝，显示和发送值保持一致。没有设温 join 时不提供设温能力。
-- **空调反馈**：未上报温度时保留未知或恢复值；真实零值会显示。设温写入范围不用于裁剪实时反馈，因此主控报告设定值 0 时会显示 0。室温与上一次接受值相差不足 `0.5°C` 时忽略。温度、模式、风速各自只根据对应通道的新反馈更新；其他状态变化或重连通知不会用旧缓存覆盖刚下发的设置。主控后来真实回传不同值时，HA 仍会更新显示。
-
-同一台空调的开关、模式、风速、设温操作按收到的调用顺序执行；例如切换模式时需要先开机，会完成开机脉冲和模式选择后，再处理后续操作。不同空调仍可并行，不会自动在批量关机时加入间隔。
-
-开关命令保留 2 秒反馈保护期；期满时会检查命令之后收到的开关反馈。没有新反馈时保留预显示值，不能据此确认设备已经执行。模式或风速反馈同时出现多个有效选项时，保留最近选择，等待明确反馈。
-
-所有平台都可使用 `device_id`、`device_name`、`suggested_area`。只有填写 `device_id` 才创建设备关联；相同 ID 归入同一设备。区域是建议，不覆盖已有手工分区。实体改名不会改变其唯一标识；更换控制 join 或选项 join 组可能创建新实体。
-
-### 其他平台
-
-将需要的列表追加到同一份 `crestron.yaml`：
-
-```yaml
-number:
-  - name: 通用整数设定
-    value_join: 501
-    min: 0
-    max: 100
-    step: 1
-
-select:
-  - name: 通风档位
-    options:
-      低速: 61
-      高速: 62
-
-sensor:
-  - name: 温度读数
-    value_join: 502
-    divisor: 10
-    unit_of_measurement: °C
-    device_class: temperature
-    state_class: measurement
-  - name: 运行模式
-    mode_joins:
-      制冷: 63
-      制热: 64
-
-binary_sensor:
-  - name: 门状态
-    is_on_join: 65
-    device_class: door
-
-media_player:
-  - name: 客厅音响
-    mute_join: 66
-    volume_join: 503
-    source_number_join: 504
-    sources:
-      1: 电视
-      2: 音乐
-```
-
-- `number` 的 `min/max/step` 及命令值必须为整数，默认 `16/30/1`，要求 `min < max`、`step > 0`。写入和历史恢复值受范围限制，实时反馈原样显示。现场取值请保持在 XSIG 无符号范围 `0–65535` 内。
-- `select` 至少配置一个选项，选择时先清除其他 join，再置目标 join 为高；反馈全部低时保留最近选择。
-- `sensor` 在 `value_join` 与非空 `mode_joins` 之间二选一。数值结果为原值除以正有限数 `divisor`，默认为 1；模式组全部上报且全低时显示“关闭”。
-- `binary_sensor` 读取一根数字 join，未上报时为未知。
-- `media_player` 必须填写静音、音量、音源 join 和非空音源表。音量 `0–1` 对应 `0–65535`；音源值 0 表示关闭，配置的音源编号应在 `1–65535` 内且名称不重复。开机使用最近一次有效音源反馈，否则使用配置中的第一个音源。
-
-### 在网页上直接开关、调温和调风速
-
-侧边栏“空调”的示例配置保存在 [dashboard/dashboard-climate.json](dashboard/dashboard-climate.json)，示例实体和位置须在部署前替换。每张卡片占 6 列、3 行；点击电源图标开关，下方调温和风速，点击名称打开详情。
-
-其他安装可在仪表盘添加原生 Tile 卡片，用以下 YAML 替换实体 ID：
-
-```yaml
-type: tile
-entity: climate.example_air_conditioner
-icon: mdi:power
-state_content:
-  - state
-  - current_temperature
-tap_action:
-  action: more-info
-icon_tap_action:
-  action: perform-action
-  perform_action: climate.toggle
-  target:
-    entity_id: climate.example_air_conditioner
-features_position: bottom
-grid_options:
-  columns: 6
-  rows: 3
-features:
-  - type: target-temperature
-  - type: climate-fan-modes
-    style: icons
-    fan_modes:
-      - low
-      - medium
-      - high
-      - auto
-```
-
-仅为配置了设温和相应风速 join 的实体添加这些控件。电源按钮通过 `climate.toggle` 调用集成的独立开关接口，不发送模式选择命令；实际启动模式以主控保留的模式为准。页面配置不需要重启 HA，也不需要安装前端插件。更多设置见 [Tile 卡片](https://www.home-assistant.io/dashboards/tile/)和[卡片功能](https://www.home-assistant.io/dashboards/features/)。
-
-## 4. 面板控制与状态同步
-
-### 主控触发 HA 动作：from_joins
-
-在 `crestron.yaml` 顶层加入：
-
-```yaml
-from_joins:
-  - join: d801
-    script:
-      - action: light.toggle
-        target:
-          entity_id: light.living_room
-```
-
-替换目标实体 ID。数字 join 只在本次连接中观察到 `0 → 1` 时执行：首次收到高电平不执行，重复高电平不执行；`0,1,0,1` 会执行两次。这是上升沿检测，没有时间防抖。断线或新连接接管会清空判断基线；主控应先上报低电平，否则连接后的第一次按键高电平可能不会触发。
-
-模拟和串行 join 每次收到帧都会执行对应脚本。脚本可用 `{{ value }}` 获取本次值；模拟值以字符串传入，计算前使用 `int` 或 `float` 转换。
-
-### HA 状态送回主控：to_joins
-
-```yaml
-to_joins:
-  - join: d802
-    entity_id: light.living_room
-  - join: a801
-    value_template: >-
-      {% set volume = state_attr('media_player.living_room', 'volume_level') %}
-      {{ (volume * 65535) | round(0) | int if volume is number else 'unknown' }}
-  - join: s801
-    entity_id: media_player.living_room
-    attribute: media_title
-```
-
-可使用 `entity_id` 的状态、指定 `attribute`，或者 `value_template`；显式模板优先。这里的通用模拟映射不会自动缩放，直接发送音量 `0.5` 会得到整数 0，因此示例显式乘以 65535。
-
-未知、不可用、空值不会作为有效状态发送。串行发送上限为 **252 个 UTF-8 字节**，超出后整条丢弃并记 INFO 日志。不要把同一写入 join 同时交给多个实体或重复的 `to_joins`；冲突会告警，但不会自动协调控制权。
-
-## 5. 修改、重载与更新
-
-| 操作 | 适用情况 | 作用 |
-|---|---|---|
-| 开发者工具 → 动作 → `crestron.reload` | 修改或重新生成 YAML 后 | 重新读取 YAML，重建集成与 TCP 监听 |
-| 集成“选项” → `resync_to_joins` | 需要把 HA 状态再次发给面板 | 重新渲染并发送所有 `to_joins`，不读取 YAML |
-| 重启 Home Assistant | 首次安装或更新 Python 代码后 | 重新加载组件代码和配置 |
-
-`crestron.reload` 需要管理员权限，也可以在动作编辑器执行：
-
-```yaml
-action: crestron.reload
-```
-
-重载会短暂断开连接，主控需要重新连接。未知顶层键、错误的平台段结构会使重载被拒绝；个别实体校验或创建失败则会记录错误并跳过该实体，不保证整份设备列表原子加载。重载失败时会尝试恢复旧配置；恢复本身也可能失败，应查看日志并修正配置或重启。
-
-删除 YAML 中的实体不会自动清理 HA 实体注册表。确认实体确已从本集成配置移除后，再在 HA 中清理相应遗留条目。
-
-### 部署组件和仪表盘
-
-`tools/deploy_to_ha.sh` 适用于能通过 SSH 访问 `/homeassistant` 且提供 `ha` CLI 的 HA 环境。运行脚本的电脑需要 Bash、curl、Python 3、ssh、scp，并能访问 GitHub 和 HA 网页；密码登录另需 sshpass。
-
-安装和更新都会从 GitHub 下载**指定分支的最新完整源码**，组件、转换器和页面部署工具使用这份源码。`--branch 分支名` 默认是 **master**，与本地当前 Git 分支无关；下载不会覆盖本地工作区。需要 dev 分支上的更改时，必须加 `--branch dev`。
-
-```bash
-# 安装 master 最新版（默认模式，也可明确写 --install）
-bash tools/deploy_to_ha.sh --host HA_HOST --user root --key
-
-# 更新已有集成，使用 dev 最新版
-bash tools/deploy_to_ha.sh --update --branch dev --host HA_HOST --user root --key
-```
-
-不带参数时会询问服务器地址、用户名及密码。安装模式还会询问是否生成、上传设备 YAML，默认否；`--update` 默认跳过这两步，保留现场设备配置，并检查目标已安装集成。需要更新设备配置时显式加 `--generate-yaml --upload-yaml`，也可用 `--xlsx FILE --yaml FILE` 指定本地输入和输出。默认路径仍是本地 `local/`，不会使用下载源码里的设备示例覆盖现场配置。
-
-完整安装/更新会保存全部源码到服务器 `/homeassistant/crestron-source/<提交 SHA>/`，另将组件部署到 `/homeassistant/custom_components/crestron/`，并部署源码 `dashboard/` 中的页面。覆盖组件前会备份到服务器 `/homeassistant/crestron-backups/deploy.<随机后缀>/crestron/`。源码中的示例 `configuration.yaml` 只存档，不覆盖 HA 配置；首次安装仍需按第 1 节配置 include。显式上传的设备 YAML 固定放到组件目录内的 `crestron.yaml`，include 应指向该位置。
-
-部署后先运行 `ha core check`，通过后保存页面，最后执行 **`ha core restart` 重启 Home Assistant 服务**使代码和配置生效，无需重启整台主机。脚本默认等待 HTTP API 恢复最多 120 秒，可用 `--restart-timeout 240` 调整；这仅确认 API 可访问，实体可用性及主控连接仍需在 HA 中检查。任何一步失败会停止后续步骤；已上传或保存的内容不会自动回滚。服务器上的源码和备份目录不会自动清理。
-
-只更新组件、跳过页面及设备 YAML：
-
-```bash
-bash tools/deploy_to_ha.sh --update --branch dev --host HA地址 --user root --key --skip-dashboard
-```
-
-更多参数见 `bash tools/deploy_to_ha.sh --help`。
-
-仅更新仪表盘，不上传组件或设备 YAML，不重启 HA：
-
-```bash
-bash tools/deploy_to_ha.sh --branch dev --host HA_HOST --user root --key --dashboard-only
-```
-
-仅页面模式同样下载指定分支，但不向服务器存档源码。若所选分支没有 `dashboard/`，完整安装/更新提示跳过页面，仅页面模式则报错。
-
-部署页面需要**运行脚本的电脑安装 Node.js 22+**，无需 npm 依赖，HA 服务器不需要安装 Node.js。本机须能访问 HA 的 HTTP(S) 地址；默认从 `ha core info` 获取端口和 SSL 设置，也可用 `--ha-url https://HA地址` 或 `HA_URL` 环境变量指定。
-
-认证优先使用 `HA_TOKEN` 环境变量中的管理员令牌；未设置时，通过 SSH 只读获取 `/homeassistant/.storage/auth` 中已有的有效所有者浏览器会话，换取临时访问令牌。这需要相应读取权限及远端 `jq`；没有可用会话时请提供 `HA_TOKEN`。令牌不会写入页面文件、备份或日志。
-
-#### dashboard 文件与覆盖规则
-
-`dashboard/` 纳入 Git；每个 `.json` 文件代表**一个完整仪表盘及其中的卡片**。部署会递归扫描目录，按文件路径排序。可以复制现有文件后修改：
-
-- `dashboard`：新建页面的 `url_path`、`title`、可选 `icon`、`show_in_sidebar`、`require_admin`。
-- `config`：HA 原始配置编辑器中的整个配置对象，包含非空 `views` 列表。
-
-`url_path` 必须是含连字符的小写地址，例如 `dashboard-climate`；它是判断已有页面的唯一依据，标题相同不会被当成同一个页面。单张卡片不能单独作为部署文件，须放在 `config.views` 下的卡片列表中。复制到其他安装前请替换实际实体 ID；脚本不自动创建实体。
-
-已有页面会逐项询问：
-
-| 输入 | 行为 |
+| 修改内容 | 生效方式 |
 |---|---|
-| `y` | 覆盖当前页面的整份 `config` |
-| `n` 或直接回车 | 跳过当前页面 |
-| `All yes` | 覆盖当前及本次部署后续所有已有页面 |
-| `All no` | 跳过当前及本次部署后续所有已有页面 |
+| 设备 YAML | 开发者工具 → 动作 → `crestron.reload`（管理员） |
+| Python 组件代码 | 重启 Home Assistant |
+| 仪表盘 JSON | 重新部署页面，刷新浏览器 |
+| 仅重新发送 HA 状态到面板 | 集成选项 → `resync_to_joins` |
 
-输入不区分大小写；`All` 的选择只在本次运行中生效。输入结束时，跳过所有剩余已有页面；不存在的页面仍会创建。已有页面的侧边栏标题、图标和权限等元信息保留，覆盖范围是页面内部布局与卡片。内置页面（包括 `/climate`）和 YAML 模式页面不能被此流程覆盖。
+重载会短暂断开 TCP，主控需重新连接。删除 YAML 行不会自动删除旧实体、设备、区域或楼层，请确认不再使用后在 HA 清理。
 
-写入前在本地 `local/dashboard-backups/<时间与随机后缀>/` 保存原页面元信息和配置，备份失败则不写入；新页面的备份记录原先不存在。写入后回读核对。页面在确认期间被修改会中止部署；保存失败或连接中断时请先核对远端状态，脚本不会自动重试写入或回滚。恢复已有页面时，可将备份中的 `config` 粘贴到 HA 的原始配置编辑器；备份文件不要放入 `dashboard/` 参与部署。
+手写配置还支持 `number`、`select`、`sensor`、`binary_sensor`、`media_player`。面板触发 HA 动作使用 `from_joins`，HA 状态送回主控使用 `to_joins`；字段及行为见 [ARCH.md](ARCH.md)。
 
-可用 `--dashboard-dir DIR` 改用本地页面目录，部署工具仍来自指定 GitHub 分支；`--skip-dashboard` 完全跳过页面。修改本地页面后，可先使用下面命令检查，再通过 `--dashboard-dir dashboard` 部署预览；正常安装/更新使用 GitHub 中已发布的页面。只检查文件、不连接服务器：
+## 5. 查找 HA 实体 ID
+
+在项目根目录运行，查询过程只读，不修改 HA：
 
 ```bash
-node tools/deploy_dashboards.mjs --dir dashboard --check
+# 连接信息只输入一次，随后连续查询，Ctrl+C 退出
+python3 tools/list_ha_entities.py
+
+# 带参数只查询一次；entity_id 包含 switch 或 occ 就显示
+python3 tools/list_ha_entities.py --host HA_HOST switch occ
+
+# 省略关键词使用默认筛选；单独传入带引号的 '*' 查询全部
+python3 tools/list_ha_entities.py --host HA_HOST '*'
+
+# 指定密码；没有密码时使用 SSH key
+python3 tools/list_ha_entities.py --host HA_HOST --password '你的密码' switch occ
+
+# 指定私钥；不指定则由 SSH 使用 ~/.ssh/ 的默认密钥、配置及 ssh-agent
+python3 tools/list_ha_entities.py --host HA_HOST --identity ~/.ssh/id_ed25519 occ
+
+# 导出无颜色的制表符表格，方便复制到 Excel
+python3 tools/list_ha_entities.py --host HA_HOST switch occ --format tsv > entities.tsv
 ```
 
-## 6. 排查问题
+默认用户 `root`、端口 `22`。密码交互输入隐藏；命令行密码可能留在 shell 历史中。密码登录需本机 `sshpass`，服务器需 `jq`、`curl` 和 `ha`。脚本复用 `tools/` 内的公共查询/连接模块，需在完整项目中运行。
 
-### 已连接，但状态不对
+无参数时每次查询后可继续输入关键词，失败后也可重试，每轮重新读取 HA。回车使用 `_occupancy_status_p_` 和 `_oh4w_on_p_` 两个默认关键词，输入 `*` 查全部；带参数运行时省略关键词也使用默认值。`Ctrl+C` 退出，输入流结束时同样退出。
 
-连接成功不代表所有 join 已同步。集成在连接时发送 `0xFD` 请求同步，但没有“完整快照已结束”的判断；零值、串行值和设备反馈是否补齐取决于主控程序。集成不轮询，发送命令也不等于收到反馈。
+彩色表格保留六列：楼层、房间、设备名称、实体名称、完整 `entity_id` 和 **HA 的 `device_id`**。实体名称中重复的设备名称会去掉，例如“厨房开关 左键”显示为“左键”，去掉后为空显示 `—`；仅调整输出，不修改 HA。多个关键词按“或”匹配、不区分大小写；只匹配 ID，不匹配名称，不作正则表达式解释。包含停用的已注册实体及无注册记录的当前实体；位置缺失显示“未分配”。
 
-断线后实体不可用；同一运行实例重连会保留上一次缓存。部分平台另有历史恢复或命令后的预显示，因此状态必须结合实际反馈判断。调光灯尚未收到亮度时目前会显示关闭，不能据此证明现场已关灯。
+每条实体一行，中文按显示宽度对齐，ID 不截断。表格超出终端宽度或高度时自动用本机 `less` 查看：左右方向键横向滚动、上下翻阅，按 `q` 返回继续输入关键词，`Ctrl+C` 退出脚本；带参数运行时按 `q` 结束。需要本机安装 `less`。重定向和 TSV 导出直接输出完整内容，不启动查看器。
 
-在集成菜单下载诊断，检查：
+颜色默认只在终端开启，重定向自动关闭；可用 `--color always|never` 控制，也支持 `NO_COLOR`。API 认证使用管理员 `HA_TOKEN`，或服务器已有的有效所有者会话；`--ha-url` 可指定 HA 网页地址。
 
-- `xsig.connected` / `xsig.available`：连接状态。
-- `xsig.digital` / `xsig.analog`：收到的值，键为 join 编号字符串，例如 `"401"`；真实 0 与缺少此键含义不同。
-- `xsig.serial`：只保留编号及内容长度，文本已隐藏。
-- `xsig.cache_counts`：各类已缓存 join 数量。
-- `configured_entities`：配置中的各平台条目数，不等于成功加载数。
-- `join_usage.conflicts`：检测到的配置冲突。
+## 6. 清理已删除设备记录
 
-某个 join 没有缓存，只能说明当前 hub 实例未成功接收并解析到它；应同时检查连接、编号、主控回传逻辑和解析日志。缓存存在也不保证是本次重连后更新的值。
+清空设备注册表中的 `data.deleted_devices`，不删除仍在使用的设备或实体。在完整项目根目录运行：
 
-### 临时开启日志
+```bash
+# 只读预览，不停止或修改 HA
+python3 tools/clear_deleted_devices.py --host HA_HOST --dry-run
 
-在 `configuration.yaml` 配置或合并：
+# 显示数量并询问确认；确认后停止 Core、备份、清理并恢复原运行状态
+python3 tools/clear_deleted_devices.py --host HA_HOST
 
-```yaml
-logger:
-  default: warning
-  logs:
-    custom_components.crestron: info
-    custom_components.crestron.crestron.frames: debug
+# 不带参数时逐步询问连接信息
+python3 tools/clear_deleted_devices.py
 ```
 
-INFO 可查看同步统计及串行超长丢弃；帧 DEBUG 日志可对应 join 与实体字段排查收发。统计中的“接收告一段落”不表示全量同步完整。如需查看空调命令与反馈值的对应关系，可再将 `custom_components.crestron.climate` 设为 `debug`；日志带设备名称，记录操作以及设温、模式、风速和开关反馈的变化。排查完成后按需要降低日志量。
+支持 `--password`、`--identity`；不提供密码时使用 SSH 默认密钥和配置。目标服务器需提供 `ha`、`jq`、`timeout`、`curl`，配置目录固定为 `/homeassistant`。终端默认彩色，可用 `--color never` 关闭。
 
-测试环境和未验证边界见 [ARCH.md](ARCH.md#验证方法)，剩余改进见 [TODO.md](TODO.md)。
+备份保存在服务器 `/homeassistant/crestron-backups/日期/时间-随机编号/device-registry/core.device_registry`。待清理数量为零时直接退出；Core 原本已停止则保持停止。默认确认选“否”，`--yes` 可跳过确认。原本运行时，清理后等待 HTTP 恢复，默认 120 秒，可用 `--restart-timeout` 调整。
+
+无法确认停止或备份失败时不会修改注册表。写入后校验失败会尝试恢复备份；若检测到其他程序修改文件或启动 Core，则停止自动恢复并提示人工核查。SSH 断线或进程被强制终止后，应先检查 Core、备份和锁目录 `/homeassistant/.crestron-device-cleanup.lock`，不要直接重复清理。
+
+## 7. 常见问题
+
+- **HA 已重启但脚本仍在等待**：新版通过服务器端检查接口，200/401 表示恢复。超时时查看打印的地址、HTTP 状态和 SSH/curl 错误；接口可访问仍不代表所有实体已就绪。
+- **所选分支的页面工具不支持服务器备份**：更新分支中的 `tools/deploy_dashboards.mjs`；暂不部署页面时可加 `--skip-dashboard`。脚本会在上传前检查，避免使用旧工具把备份写到本机。
+
+- **更新后没变化**：检查部署来源。GitHub 来源只使用目标分支已发布的代码；本地开发修改可通过 `--source local` 部署。设备变化还需更新现场 YAML。
+- **设备没有进入楼层、房间**：确认 YAML 有 `floor`、`room`、`device_id` 和 `name`，并查看是否有 `floor/room synchronization failed` 日志；修正后重载。
+- **已连接但状态不对**：核对 join 和主控反馈。HA 不轮询设备；界面预显示不代表命令已经执行，主控后来回传不同值时仍会更新。
+- **动作失败或无法加载**：查看“设置 → 系统 → 日志”中的 `custom_components.crestron`。临时启用 debug 后，完成排查请关闭：
+
+  ```yaml
+  logger:
+    logs:
+      custom_components.crestron: debug
+  ```

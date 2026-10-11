@@ -4,3 +4,6 @@
 # modules still import voluptuous for their schemas.
 voluptuous
 mypy
+# 自动化模板的 YAML 解析与 Jinja 行为回归测试。
+PyYAML
+Jinja2

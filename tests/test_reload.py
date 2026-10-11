@@ -11,6 +11,7 @@ import logging
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from loader import load
 
@@ -371,6 +372,50 @@ class SectionShapeTests(unittest.TestCase):
             self.assertEqual(_REAL_INVALID_ENTITIES({}), ([], []))
         finally:
             crestron._platform_schemas = original
+
+
+class LocationSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_location_sync_waits_for_registration_and_resets_on_reload(self):
+        events = []
+        entry = types.SimpleNamespace(entry_id="entry-1", async_on_unload=lambda cb: None)
+        hass = types.SimpleNamespace(
+            data={DOMAIN: {YAML_CONF: {"port": 10200}}},
+            services=types.SimpleNamespace(has_service=lambda *args: True),
+            bus=types.SimpleNamespace(async_listen_once=lambda *args: lambda: None),
+        )
+        accepted = ("light", "stable-1", {"floor": "1F", "room": "厨房"})
+        async def forward(*args):
+            self.assertEqual(hass.data[DOMAIN][crestron.LOCATION_ENTITIES], [])
+            hass.data[DOMAIN][crestron.LOCATION_ENTITIES].append(accepted)
+            events.append("registered")
+        async def synchronize(_hass, _entry, candidates):
+            self.assertEqual(events[-1], "registered")
+            self.assertEqual(candidates, [accepted])
+            events.append("synchronized")
+        hass.config_entries = types.SimpleNamespace(async_forward_entry_setups=forward)
+        hub = types.SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+        with patch.object(crestron, "CrestronHub", return_value=hub), patch.object(
+                crestron, "async_sync_locations", side_effect=synchronize):
+            self.assertTrue(await crestron.async_setup_entry(hass, entry))
+            self.assertTrue(await crestron.async_setup_entry(hass, entry))
+        self.assertEqual(events, ["registered", "synchronized"] * 2)
+        self.assertNotIn(crestron.LOCATION_ENTITIES, hass.data[DOMAIN])
+
+    async def test_location_failure_leaves_device_controls_running_and_logs_error(self):
+        entry = types.SimpleNamespace(entry_id="entry-1", async_on_unload=lambda cb: None)
+        hass = types.SimpleNamespace(
+            data={DOMAIN: {YAML_CONF: {"port": 10200}}},
+            services=types.SimpleNamespace(has_service=lambda *args: True),
+            bus=types.SimpleNamespace(async_listen_once=lambda *args: lambda: None),
+            config_entries=types.SimpleNamespace(async_forward_entry_setups=AsyncMock()),
+        )
+        hub = types.SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+        with patch.object(crestron, "CrestronHub", return_value=hub), patch.object(
+                crestron, "async_sync_locations", side_effect=OSError("storage unavailable")), self.assertLogs(
+                crestron.__name__, level="ERROR") as logs:
+            self.assertTrue(await crestron.async_setup_entry(hass, entry))
+        hub.stop.assert_not_awaited()
+        self.assertIn("floor/room synchronization failed", " ".join(logs.output))
 
 
 if __name__ == "__main__":

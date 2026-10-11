@@ -38,6 +38,8 @@ _LOGGER = logging.getLogger(__name__)
 # control system sees a distinct high->0 edge across program scans (a
 # zero-delay re-assert+0 lands in one scan and the 0 gets missed).
 OFF_REASSERT_SECONDS = 0.2
+# 使用模拟量原值保存记忆，避免低亮度经过 0–255 换算后丢失精度。
+ATTR_LAST_BRIGHTNESS = "last_nonzero_brightness"
 
 def _require_light_capability(config):
     """Reject join combinations that cannot produce a controllable light.
@@ -109,7 +111,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
 
-class CrestronLight(CrestronEntity, LightEntity):
+class CrestronLight(CrestronEntity, LightEntity, RestoreEntity):
     # 双色温灯色温范围（开发者 xlsx「说明」：色温值 2700–6500），按原值 K 直写模拟 join。
     _attr_min_color_temp_kelvin = 2700
     _attr_max_color_temp_kelvin = 6500
@@ -122,6 +124,7 @@ class CrestronLight(CrestronEntity, LightEntity):
         self._attr_unique_id = light_unique_id(config)
         self._attr_device_info = device_info(config)
         self._command_seq = 0
+        self._last_brightness = None
         if self._color_temp_join is not None:
             self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
             self._attr_color_mode = ColorMode.COLOR_TEMP
@@ -134,6 +137,43 @@ class CrestronLight(CrestronEntity, LightEntity):
         if self._color_temp_join is not None:
             joins.append(f"a{self._color_temp_join}")
         return joins
+
+    def _remember_brightness(self, value):
+        """只记住有效的非零亮度；关闭反馈不清除记忆。"""
+        if type(value) is not int or not 1 <= value <= 65535:
+            return False
+        changed = self._last_brightness != value
+        self._last_brightness = value
+        return changed
+
+    @property
+    def extra_state_attributes(self):
+        # 关灯时标准 brightness 属性不保留亮度，因此单独交给 RestoreEntity 保存。
+        return {ATTR_LAST_BRIGHTNESS: self._last_brightness}
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        # 等待恢复期间收到的新反馈或新命令优先于历史值。
+        if self._removed or self._last_brightness is not None:
+            return
+        if last is not None:
+            self._remember_brightness(last.attributes.get(ATTR_LAST_BRIGHTNESS))
+            # 兼容首次升级时只有标准亮度的开灯状态。
+            if self._last_brightness is None and last.state == "on":
+                previous = last.attributes.get("brightness")
+                if type(previous) is int and 1 <= previous <= 255:
+                    self._remember_brightness(round(previous / 255 * 65535))
+        if self._hub.is_available() and self._hub.has_analog(self._brightness_join):
+            self._remember_brightness(self._hub.get_analog(self._brightness_join))
+
+    async def process_callback(self, cbtype, value):
+        if self._removed:
+            return
+        # 仅亮度通道的新反馈更新记忆；色温和连接状态不能带回旧亮度缓存。
+        if cbtype == f"a{self._brightness_join}":
+            self._remember_brightness(self._hub.get_analog(self._brightness_join))
+        self._schedule_write()
 
     @property
     def brightness(self):
@@ -161,16 +201,20 @@ class CrestronLight(CrestronEntity, LightEntity):
         return self._hub.get_analog(self._brightness_join) > 0
 
     async def async_turn_on(self, **kwargs):
+        if self._removed:
+            return
         self._command_seq += 1
         if "brightness" in kwargs:
-            self._hub.set_analog(
-                self._brightness_join, round(kwargs["brightness"] / 255 * 65535)
-            )
+            level = round(kwargs["brightness"] / 255 * 65535)
+            self._hub.set_analog(self._brightness_join, level)
+            if self._remember_brightness(level):
+                self._schedule_write()
         elif not self.is_on:
-            # Only restore to full brightness when the light is currently off.
-            # Avoids stomping on an already-set level when the user changes
-            # only the color temperature.
-            self._hub.set_analog(self._brightness_join, 65535)
+            # 普通开灯恢复记忆；没有任何记录时才默认全亮。已开灯时不重设亮度。
+            level = self._last_brightness or 65535
+            self._hub.set_analog(self._brightness_join, level)
+            if self._remember_brightness(level):
+                self._schedule_write()
 
         if self._color_temp_join is not None and "color_temp_kelvin" in kwargs:
             color_temp = int(
@@ -182,6 +226,8 @@ class CrestronLight(CrestronEntity, LightEntity):
             self._hub.set_analog(self._color_temp_join, color_temp)
 
     async def async_turn_off(self, **kwargs):
+        if self._removed:
+            return
         self._command_seq += 1
         seq = self._command_seq
         # 快思聪调光模块通常只在 HA 下发的电平“发生变化”时才动作。物理开关开灯后，
@@ -190,8 +236,11 @@ class CrestronLight(CrestronEntity, LightEntity):
         # 明确的“高→0”跳变。两步之间必须有延时：零延时会让两个模拟量落进控制系统
         # 同一扫描周期、0 被重发值覆盖，导致第一次按关无效（要按两次）。
         current = self._hub.get_analog(self._brightness_join)
+        # 仅在没有记忆时补录缓存，避免旧缓存覆盖刚发出但尚未反馈的调光值。
+        if self._last_brightness is None and self._remember_brightness(current):
+            self._schedule_write()
         if current > 0:
-            self._hub.set_analog(self._brightness_join, current)
+            self._hub.set_analog(self._brightness_join, self._last_brightness or current)
             await asyncio.sleep(OFF_REASSERT_SECONDS)
             if seq != self._command_seq:
                 return

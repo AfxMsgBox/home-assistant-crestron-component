@@ -27,6 +27,8 @@ Two usage shapes:
 
 import logging
 
+from .locations import LOCATION_ENTITIES, validate_location
+
 from .const import HUB, DOMAIN, YAML_CONF
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,7 +88,8 @@ def setup_platform_entities(hass, platform_key, schema, factory):
     claimed = {}  # unique_id -> name of the entity that got it
     for index, item in enumerate(items):
         try:
-            entity = factory(hub, schema(item))
+            config = validate_location(schema(item))
+            entity = factory(hub, config)
         except Exception:
             name = item.get("name") if isinstance(item, dict) else None
             _LOGGER.exception(
@@ -118,6 +121,10 @@ def setup_platform_entities(hass, platform_key, schema, factory):
             claimed[unique_id] = (
                 item.get("name") if isinstance(item, dict) else None
             ) or f"#{index}"
+        if "floor" in config and unique_id is not None:
+            hass.data[DOMAIN].setdefault(LOCATION_ENTITIES, []).append(
+                (platform_key, unique_id, config)
+            )
         entities.append(entity)
     return entities
 

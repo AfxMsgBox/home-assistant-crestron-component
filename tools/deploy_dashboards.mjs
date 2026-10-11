@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Native HA dashboard deployment. Node.js 22+; no npm dependencies.
+// 部署 HA 原生仪表盘，需要 Node.js 22+，无需安装 npm 依赖。
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -46,7 +46,7 @@ export function overwritePrompt(readLine, log = console.log) {
   return async name => {
     if (all !== undefined) return all;
     for (;;) {
-      const answer = await readLine(`已存在 ${name}，是否覆盖？[y / n / All yes / All no，默认 n] `);
+      const answer = await readLine(`已存在 ${name}，是否覆盖？[y 覆盖 / n 跳过 / All yes 全部覆盖 / All no 全部跳过，默认 n] `);
       if (answer === null) {
         all = false;
         log('输入结束，跳过当前及后续已有页面；新页面仍会创建。');
@@ -57,7 +57,7 @@ export function overwritePrompt(readLine, log = console.log) {
         case '': case 'n': return false;
         case 'all yes': all = true; return true;
         case 'all no': all = false; return false;
-        default: log('请输入 y、n、All yes 或 All no。');
+        default: log('请输入 y（覆盖）、n（跳过）、All yes（全部覆盖）或 All no（全部跳过）。');
       }
     }
   };
@@ -67,7 +67,7 @@ export class HaError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
 
-// WebSocket replies are correlated by ID; disconnects reject outstanding calls.
+// 按请求 ID 匹配 WebSocket 响应，断开时结束尚未完成的调用。
 export class HaClient {
   constructor(url, token, Socket = WebSocket, timeout = 15000) {
     const wsUrl = new URL('api/websocket', url);
@@ -128,7 +128,7 @@ export async function deployDashboards(items, api, ask, backup, log = console.lo
   const dashboards = await api.call('lovelace/dashboards/list');
   const panels = await api.call('get_panels');
   const planned = [];
-  // Resolve every collision and read every required backup before any write.
+  // 写入前先检查所有页面地址冲突，并读取待备份的旧配置。
   for (const item of items) {
     const url = item.dashboard.url_path;
     const old = dashboards.find(d => d.url_path === url);
@@ -145,7 +145,7 @@ export async function deployDashboards(items, api, ask, backup, log = console.lo
   let created = 0, overwritten = 0;
   for (const { item, old, previous } of selected) {
     const url = item.dashboard.url_path;
-    // User may have edited a page while the overwrite question was open.
+    // 用户确认期间可能编辑页面，写入前再次检查，避免覆盖刚发生的修改。
     const latest = (await api.call('lovelace/dashboards/list')).find(d => d.url_path === url);
     if (!isDeepStrictEqual(latest, old) || (old && !isDeepStrictEqual(await readConfig(api, url), previous))) fail(`${url} 在确认期间发生变化，停止部署，请重新检查`);
     if (!old && (await api.call('get_panels'))[url]) fail(`${url} 已被其他页面占用`);
@@ -180,6 +180,32 @@ export function normalizeUrl(input) {
   return url.href;
 }
 
+// 备份内容通过标准输入传输，不拼入命令；远端写入成功后才允许修改页面。
+export function remoteBackup(command, directory) {
+  if (!command.length) fail('服务器备份需要 SSH 连接参数');
+  if (!/^\/homeassistant\/crestron-backups\/\d{4}-\d{2}-\d{2}\/\d{6}-[A-Za-z0-9]+\/dashboard$/.test(directory)) fail('服务器仪表盘备份目录无效');
+  return async (url, content) => {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(url)) fail('仪表盘备份名称无效');
+    const file = `${directory}/${url}.json`;
+    const script = `set -eu
+umask 077
+mkdir -p '${directory}'
+partial=$(mktemp '${directory}/.backup.XXXXXX')
+trap 'rm -f -- "$partial"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$partial"
+ln "$partial" '${file}'
+`;
+    try {
+      execFileSync(command[0], [...command.slice(1), script], {
+        input: JSON.stringify(content, null, 2) + '\n', encoding: 'utf8',
+        timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch { fail(`无法保存服务器备份：${file}，已停止该页面写入；请检查 SSH、磁盘空间和权限`); }
+    return file;
+  };
+}
+
 async function authenticate(options, command) {
   let url = options.url || process.env.HA_URL;
   if (!url) {
@@ -191,10 +217,9 @@ async function authenticate(options, command) {
   }
   url = normalizeUrl(url);
   if (process.env.HA_TOKEN) return { url, token: process.env.HA_TOKEN };
-  // Reuse an existing active owner's browser session through root SSH.
-  // Refresh credentials stay in memory; never write them to files or logs.
+  // 经 root SSH 复用有效所有者浏览器会话；凭据仅保留在内存中，不写文件和日志。
   const session = sshJson(command, `set -eu
-jq -ce '.data as $d | ($d.users | map(select(.is_owner and .is_active)) | first | .id) as $owner | ($d.refresh_tokens | map(select(.user_id == $owner and .token_type == "normal")) | sort_by(.created_at) | last) as $r | if $r == null then error("No owner session") else {token:$r.token,client_id:$r.client_id} end' /homeassistant/.storage/auth
+jq -ce '.data as $d | ($d.users | map(select(.is_owner and .is_active)) | first | .id) as $owner | ($d.refresh_tokens | map(select(.user_id == $owner and .token_type == "normal")) | sort_by(.created_at) | last) as $r | if $r == null then error("没有可用的所有者会话") else {token:$r.token,client_id:$r.client_id} end' /homeassistant/.storage/auth
 `);
   const response = await fetch(new URL('auth/token', url), {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
@@ -213,23 +238,23 @@ export async function main(argv) {
     const flag = argv[i];
     if (flag === '--') { command = argv.slice(i + 1); break; }
     if (flag === '--check') { options.check = true; continue; }
-    const key = { '--dir': 'dir', '--backup-dir': 'backup', '--host': 'host', '--ha-url': 'url' }[flag];
+    const key = { '--dir': 'dir', '--remote-backup-dir': 'backup', '--host': 'host', '--ha-url': 'url' }[flag];
     if (!key || !argv[i + 1]) fail(`参数无效或缺少值：${flag}`);
     options[key] = argv[++i];
   }
   if (!options.dir) fail('必须指定 --dir');
   const items = loadDashboards(options.dir);
-  if (options.check || !items.length) { console.log(`dashboard 配置检查通过：${items.length} 个页面`); return; }
-  if (!options.backup) fail('必须指定 --backup-dir');
-  if (typeof WebSocket !== 'function') fail('部署 dashboard 需要 Node.js 22 或更新版本');
+  if (options.check || !items.length) { console.log(`仪表盘配置检查通过：${items.length} 个页面`); return; }
+  if (!options.backup) fail('必须指定 --remote-backup-dir');
+  const backup = remoteBackup(command, options.backup);
+  if (typeof WebSocket !== 'function') fail('部署仪表盘需要 Node.js 22 或更新版本');
   const auth = await authenticate(options, command);
   const api = new HaClient(auth.url, auth.token);
   auth.token = '';
   let input;
-  let backupDir;
   try {
     await api.ready;
-    // Lazy readline avoids consuming input before interactive prompts start.
+    // 首次提问时才读取标准输入，避免提前消耗用户输入。
     let iterator;
     const ask = overwritePrompt(async prompt => {
       if (!input) { input = createInterface({ input: process.stdin, crlfDelay: Infinity }); iterator = input[Symbol.asyncIterator](); }
@@ -237,17 +262,8 @@ export async function main(argv) {
       const result = await iterator.next();
       return result.done ? null : result.value;
     });
-    const backup = async (url, content) => {
-      if (!backupDir) {
-        mkdirSync(options.backup, { recursive: true, mode: 0o700 });
-        backupDir = mkdtempSync(join(options.backup, new Date().toISOString().replace(/[:.]/g, '-') + '-'));
-      }
-      const file = join(backupDir, url + '.json');
-      writeFileSync(file, JSON.stringify(content, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-      return file;
-    };
     const result = await deployDashboards(items, api, ask, backup);
-    console.log(`dashboard 部署完成：新建 ${result.created}，覆盖 ${result.overwritten}，跳过 ${result.skipped}`);
+    console.log(`仪表盘部署完成：新建 ${result.created}，覆盖 ${result.overwritten}，跳过 ${result.skipped}`);
   } finally { input?.close(); api.close(); }
 }
 

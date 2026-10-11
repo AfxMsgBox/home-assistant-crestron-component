@@ -77,7 +77,7 @@ class WorkbookRowNumberTests(unittest.TestCase):
                 self.assertEqual(g.check(path), 1)
                 with self.assertRaises(g.WorkbookValidationError):
                     g.generate(path, output)
-            self.assertIn("灯光!10", report.getvalue())
+            self.assertIn("灯光表第10行", report.getvalue())
             with open(output, encoding="utf-8") as stream:
                 self.assertEqual(stream.read(), "existing configuration\n")
 
@@ -102,11 +102,12 @@ class LightTests(unittest.TestCase):
             light_row(名称="天花灯带", 功能="双色温", 亮度="1", 色温="201")
         )
         self.assertEqual(plat, "light")
-        self.assertEqual(ent["name"], "B2.车库 天花灯带")
+        self.assertEqual(ent["name"], "天花灯带")
         self.assertEqual(ent["type"], "color_temp")
         self.assertEqual(ent["brightness_join"], 1)
         self.assertEqual(ent["color_temp_join"], 201)
-        self.assertEqual(ent["suggested_area"], "B2.车库")
+        self.assertEqual((ent["floor"], ent["room"]), ("B2", "车库"))
+        self.assertNotIn("suggested_area", ent)
 
     def test_brightness_only_light(self):
         plat, ent = g.build_light(
@@ -165,13 +166,13 @@ class OutletTests(unittest.TestCase):
             outlet_row(名称="落地灯", 开="147", 关="148")
         )
         self.assertEqual(plat, "switch")
-        self.assertEqual(ent["name"], "B2.会客厅 落地灯")
+        self.assertEqual(ent["name"], "落地灯")
         self.assertEqual(ent["on_join"], 147)
         self.assertEqual(ent["off_join"], 148)
         self.assertEqual(ent["device_class"], "outlet")
         self.assertEqual(ent["device_id"], "outlet_147")
-        self.assertEqual(ent["device_name"], "B2.会客厅 落地灯")
-        self.assertEqual(ent["suggested_area"], "B2.会客厅")
+        self.assertEqual(ent["device_name"], "落地灯")
+        self.assertEqual((ent["floor"], ent["room"]), ("B2", "会客厅"))
 
     def test_missing_outlet_join_skipped(self):
         self.assertIsNone(g.build_outlet(outlet_row(名称="落地灯", 开="147")))
@@ -189,7 +190,7 @@ class CoverTests(unittest.TestCase):
         )
         self.assertEqual(plat, "cover")
         self.assertEqual(ent["type"], "curtain")
-        self.assertEqual(ent["name"], "B2.会客厅 纱帘1")
+        self.assertEqual(ent["name"], "纱帘1")
         self.assertEqual((ent["open_join"], ent["close_join"], ent["stop_join"]),
                          (700, 701, 702))
         self.assertEqual(ent["pos_join"], 480)
@@ -247,7 +248,7 @@ class CoverTests(unittest.TestCase):
 class AcTests(unittest.TestCase):
     def _full(self):
         # Column is named 自动 (not 自动风速) in the current 空调 sheet.
-        return {"楼层": "B2", "房间": "洗衣房", "开": "505", "关": "506",
+        return {"楼层": "B2", "房间": "洗衣房", "名称": "风盘机", "开": "505", "关": "506",
                 "制冷": "507", "制热": "508", "通风": "510", "除湿": "511",
                 "低速": "512", "中速": "513", "高速": "514", "自动": "515",
                 "温度": "414", "室温": "415"}
@@ -255,7 +256,7 @@ class AcTests(unittest.TestCase):
     def test_full_row_produces_one_climate(self):
         plat, ent = g.build_ac(self._full())
         self.assertEqual(plat, "climate")
-        self.assertEqual(ent["name"], "B2.洗衣房 空调")
+        self.assertEqual(ent["name"], "风盘机")
         self.assertEqual((ent["on_join"], ent["off_join"]), (505, 506))
         self.assertEqual(ent["set_temp_join"], 414)
         self.assertEqual(ent["reg_temp_join"], 415)
@@ -270,7 +271,7 @@ class AcTests(unittest.TestCase):
             (512, 513, 514, 515),
         )
         self.assertEqual(ent["device_id"], "ac_505")
-        self.assertEqual(ent["device_name"], "B2.洗衣房 空调")
+        self.assertEqual(ent["device_name"], "风盘机")
 
     def test_auto_fan_column_mapped(self):
         # Regression: the column is 自动 (was mistakenly read as 自动风速),
@@ -304,29 +305,67 @@ class AcTests(unittest.TestCase):
 
 
 class DedupTests(unittest.TestCase):
-    def test_duplicate_names_suffixed(self):
-        ents = [
-            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
-            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
-            {"name": "B2.车库 柜灯", "device_name": "B2.车库 柜灯"},
-            {"name": "B2.车库 吊灯", "device_name": "B2.车库 吊灯"},
-        ]
+    def test_duplicate_names_suffixed_from_one(self):
+        ents = [{"name": n, "device_name": n, "floor": "1F", "room": "客厅"}
+                for n in ["吊灯", "吊灯", "吊灯", "壁灯"]]
         g.dedup_names(ents)
-        self.assertEqual([e["name"] for e in ents],
-                         ["B2.车库 柜灯", "B2.车库 柜灯 2",
-                          "B2.车库 柜灯 3", "B2.车库 吊灯"])
-        self.assertEqual(
-            [e["device_name"] for e in ents],
-            [
-                "B2.车库 柜灯",
-                "B2.车库 柜灯 2",
-                "B2.车库 柜灯 3",
-                "B2.车库 吊灯",
-            ],
-        )
+        self.assertEqual([e["name"] for e in ents], ["吊灯1", "吊灯2", "吊灯3", "壁灯"])
+        self.assertEqual([e["device_name"] for e in ents], [e["name"] for e in ents])
+
+    def test_numbering_reserves_literal_names(self):
+        ents = [{"name": n} for n in ["吊灯", "吊灯1", "吊灯", "吊灯2"]]
+        g.dedup_names(ents)
+        self.assertEqual([e["name"] for e in ents], ["吊灯3", "吊灯1", "吊灯4", "吊灯2"])
+
+    def test_other_rooms_and_floors_may_share_names(self):
+        ents = [{"name": "灯", "floor": floor, "room": room}
+                for floor, room in [("1F", "客厅"), ("2F", "客厅"), ("1F", "餐厅")]]
+        g.dedup_names(ents)
+        self.assertEqual([e["name"] for e in ents], ["灯"] * 3)
+
+    def test_cross_platform_numbering_preserves_identity_and_location(self):
+        sheets = {"灯光": [light_row(名称="吊灯", 亮度="1")],
+                  "插座": [outlet_row(房间="车库", 名称="吊灯", 开="3", 关="4")]}
+        with patch.object(g, "parse_xlsx", return_value=sheets):
+            result, errors, _, _ = g._build_from_workbook("input.xlsx")
+        self.assertEqual(errors, 0)
+        self.assertEqual(result["light"][0]["name"], "吊灯1")
+        self.assertEqual(result["switch"][0]["name"], "吊灯2")
+        self.assertEqual(result["light"][0]["device_id"], "light_1")
+        self.assertEqual(result["switch"][0]["device_id"], "outlet_3")
+        self.assertEqual(result["switch"][0]["room"], "车库")
+
+    def test_normalized_location_pairs_share_one_room(self):
+        ents = [{"name": "灯", "floor": floor, "room": "客 厅"}
+                for floor in ["1 F", "1f"]]
+        g.dedup_names(ents)
+        self.assertEqual([e["name"] for e in ents], ["灯1", "灯2"])
 
 
 class ValidationTests(unittest.TestCase):
+    def test_location_and_name_are_required_with_physical_row(self):
+        for missing in ("楼层", "房间", "名称"):
+            row = light_row(名称="灯", 亮度="1", _xlsx_row=28)
+            row[missing] = " "
+            with patch.object(g, "parse_xlsx", return_value={"灯光": [row]}):
+                _, errors, _, report = g._build_from_workbook("input.xlsx")
+            self.assertEqual(errors, 1)
+            self.assertTrue(any(f"灯光表第28行：{missing}: 必填" in line for line in report))
+
+    def test_ac_requires_name_header(self):
+        rows = g._SheetRows([], headers=("楼层", "房间", "开", "关"))
+        self.assertIn(("error", "缺少必填表头：名称"),
+                      g._header_issues("空调", rows))
+
+    def test_sample_workbook_has_names_and_locations(self):
+        sample = os.path.join(os.path.dirname(__file__), "..", "sample.xlsx")
+        result, errors, _, report = g._build_from_workbook(sample)
+        self.assertEqual(errors, 0, report)
+        for ents in result.values():
+            for ent in ents:
+                self.assertTrue(ent["name"] and ent["floor"] and ent["room"])
+        self.assertEqual(result["climate"][0]["name"], "空调")
+
     def test_invalid_join_format_and_range_reported(self):
         row = light_row(名称="错误灯", 亮度="a20")
         self.assertIn("亮度: 必须只填写十进制数字", g._row_errors("灯光", row))
@@ -355,7 +394,7 @@ class ValidationTests(unittest.TestCase):
                 "停止": "",
             },
         )
-        self.assertEqual(errors, ["缺少必填 Join: 关, 停止"])
+        self.assertEqual(errors, ["缺少必填信号编号: 关, 停止"])
 
     def test_build_report_has_exact_ignored_rows_and_all_errors(self):
         sheets = {
@@ -379,11 +418,11 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(warnings, 0)
         self.assertEqual(len(by_platform["light"]), 1)
         report = "\n".join(messages)
-        self.assertIn("[error] 灯光!4: 亮度: 必须只填写十进制数字", report)
-        self.assertIn("ignored 2 empty/template row(s)", report)
-        self.assertIn("2 (empty row)", report)
-        self.assertIn("3 (template row", report)
-        self.assertIn("灯光: converted 1 entity row(s)", report)
+        self.assertIn("[错误] 灯光表第4行：亮度: 必须只填写十进制数字", report)
+        self.assertIn("已忽略2个空行或模板行", report)
+        self.assertIn("2 (空行)", report)
+        self.assertIn("3 (模板行", report)
+        self.assertIn("灯光表：已转换1条设备配置", report)
 
     def test_duplicate_name_rename_is_reported_with_source_row(self):
         sheets = {
@@ -397,10 +436,10 @@ class ValidationTests(unittest.TestCase):
                 g._build_from_workbook("input.xlsx")
             )
         self.assertEqual(errors, 0)
-        self.assertEqual(warnings, 1)
+        self.assertEqual(warnings, 2)
         self.assertIn(
-            "[warning] 灯光!9: duplicate entity name 'B2.车库 灯'; "
-            "renamed to 'B2.车库 灯 2'",
+            "[警告] 灯光表第9行：同房间设备名“灯”重复，"
+            "已改名为“灯2”",
             messages,
         )
 
@@ -414,16 +453,16 @@ class ValidationTests(unittest.TestCase):
         )
         issues = g._header_issues("窗帘", rows)
         text = "\n".join(f"{level}: {message}" for level, message in issues)
-        self.assertIn("error: duplicate column header(s): 开", text)
-        self.assertIn("error: missing required column header(s): 停止, 关", text)
-        self.assertIn("warning: blank column header(s) at column position(s): 9", text)
-        self.assertIn("warning: unknown column header(s) will be ignored: 停上", text)
+        self.assertIn("error: 表头重名，请修改重复列名：开", text)
+        self.assertIn("error: 缺少必填表头：停止, 关", text)
+        self.assertIn("warning: 以下列的表头为空，请检查列名：9", text)
+        self.assertIn("warning: 以下表头无法识别，对应列已忽略：停上", text)
 
     def test_light_headers_must_support_at_least_one_control_layout(self):
         rows = g._SheetRows([], headers=("序号", "楼层", "房间", "名称"))
         issues = g._header_issues("灯光", rows)
         self.assertTrue(any(
-            level == "error" and "cannot express a light control" in message
+            level == "error" and "缺少灯光控制表头" in message
             for level, message in issues
         ))
 
@@ -458,17 +497,17 @@ class EmitDomainTests(unittest.TestCase):
 
     def test_conversion_report_is_emitted_as_safe_yaml_comments(self):
         report = [
-            "[info] 灯光: converted 1 entity row(s)",
-            "[warning] 窗帘!9: first line\nsecond line",
+            "[信息] 灯光表：已转换1条设备配置",
+            "[警告] 窗帘表第9行：第一行说明\n第二行说明",
         ]
         out = g.emit_domain(
             {"light": [{"name": "灯", "brightness_join": 1}]},
             "x.xlsx",
             report,
         )
-        self.assertIn("# [info] 灯光: converted 1 entity row(s)", out)
-        self.assertIn("# [warning] 窗帘!9: first line", out)
-        self.assertIn("# second line", out)
+        self.assertIn("# [信息] 灯光表：已转换1条设备配置", out)
+        self.assertIn("# [警告] 窗帘表第9行：第一行说明", out)
+        self.assertIn("# 第二行说明", out)
         try:
             import yaml
         except ImportError:
@@ -481,7 +520,7 @@ class EmitDomainTests(unittest.TestCase):
             {"light": [{"name": "灯", "brightness_join": 1}]},
             0,
             1,
-            ["[warning] 灯光!7: example warning"],
+            ["[警告] 灯光表第7行：示例警告"],
         )
         with tempfile.TemporaryDirectory() as directory:
             output = os.path.join(directory, "crestron.yaml")
@@ -491,10 +530,10 @@ class EmitDomainTests(unittest.TestCase):
                     g.generate("input.xlsx", output)
             with open(output, encoding="utf-8") as stream:
                 generated = stream.read()
-        self.assertIn("[warning] 灯光!7: example warning", stdout.getvalue())
-        self.assertIn("# [warning] 灯光!7: example warning", generated)
-        self.assertIn("# wrote ", generated)
-        self.assertIn("errors:0, warnings:1", generated)
+        self.assertIn("[警告] 灯光表第7行：示例警告", stdout.getvalue())
+        self.assertIn("# [警告] 灯光表第7行：示例警告", generated)
+        self.assertIn("# 已生成 ", generated)
+        self.assertIn("错误：0，警告：1", generated)
         self.assertIn("# 下一步（如何使用这个配置文件）：", generated)
         self.assertIn(
             "#   1. 把生成的 crestron.yaml 复制到 Home Assistant 配置目录",

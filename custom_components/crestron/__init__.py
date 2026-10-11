@@ -1,6 +1,7 @@
 """The Crestron Integration Component"""
 
 from functools import partial
+
 import logging
 
 import voluptuous as vol
@@ -22,6 +23,7 @@ from .const import (
     CONF_PORT, HUB, DOMAIN, CONF_JOIN, CONF_SCRIPT, CONF_TO_HUB, CONF_FROM_HUB,
     YAML_CONF, HUB_WRAPPER,
 )
+from .locations import LOCATION_ENTITIES, async_sync_locations, validate_location
 from .schema import join_key
 from .bridge import ToJoinBridge, FromJoinBridge
 from .join_registry import build_join_metadata, find_conflicts, usage_summary
@@ -227,7 +229,7 @@ def _invalid_entities(domain_config):
             continue
         for index, item in enumerate(entries):
             try:
-                schema(item)
+                validate_location(schema(item))
             except Exception as err:
                 name = item.get("name") if isinstance(item, dict) else None
                 rows.append(
@@ -399,6 +401,7 @@ async def async_setup_entry(hass, entry):
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop)
     )
 
+    domain_data[LOCATION_ENTITIES] = []
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
@@ -408,6 +411,11 @@ async def async_setup_entry(hass, entry):
         domain_data.pop(HUB_WRAPPER, None)
         await hub.stop()
         raise
+    try:
+        await async_sync_locations(hass, entry, domain_data.pop(LOCATION_ENTITIES, []))
+    except Exception:
+        # Location errors must not take working physical-device controls offline.
+        _LOGGER.exception("Crestron floor/room synchronization failed; check configuration and reload")
     return True
 
 
