@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup } from '../tools/deploy_dashboards.mjs';
+import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup, buildClimateDashboard, climateSnapshot } from '../tools/deploy_dashboards.mjs';
 
 // 用本地临时目录模拟 SSH 服务器，执行真实的远端备份 shell，不连接现场。
 function remoteFixture(t) {
@@ -210,21 +210,109 @@ test('recursive JSON discovery rejects duplicate URLs and malformed files before
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('checked-in sample dashboard keeps its card compact with all controls', () => {
-  const [doc] = loadDashboards(fileURLToPath(new URL('../dashboard', import.meta.url)));
-  const sections = doc.config.views[0].sections;
-  assert.deepEqual(sections.map(s => s.cards.filter(c => c.type === 'tile').length), [1]);
-  const ids = new Set();
-  for (const card of sections.flatMap(s => s.cards).filter(c => c.type === 'tile')) {
-    ids.add(card.entity);
+const climateTemplate = () => loadDashboards(fileURLToPath(new URL('../dashboard', import.meta.url)))[0];
+function climateData() {
+  return {
+    floors: [{ floor_id: 'upper', name: '示例二层', level: 2 }, { floor_id: 'lower', name: '示例一层', level: 1 }],
+    areas: [{ area_id: 'a', name: '示例房间甲', floor_id: 'lower' }, { area_id: 'b', name: '示例房间乙', floor_id: 'upper' }],
+    devices: [{ id: 'd', area_id: 'a', name: '示例空调' }],
+    entities: [{ entity_id: 'climate.example_a', device_id: 'd' }, { entity_id: 'climate.example_b', device_id: 'd', area_id: 'b', name: '自定义名称' },
+      { entity_id: 'climate.disabled', disabled_by: 'user' }, { entity_id: 'climate.hidden', hidden_by: 'user' }],
+    states: ['example_a', 'example_b', 'unregistered', 'disabled', 'hidden'].map(name => ({ entity_id: `climate.${name}`, state: 'unavailable',
+      attributes: { friendly_name: name, supported_features: 9, fan_modes: ['auto', 'quiet', 'high'] } })),
+  };
+}
+function withClimateApi(f, data = climateData(), config = { state: 'RUNNING' }) {
+  const call = f.api.call;
+  const replies = { get_config: config, get_states: data.states,
+    'config/entity_registry/list': data.entities, 'config/device_registry/list': data.devices,
+    'config/area_registry/list': data.areas, 'config/floor_registry/list': data.floors };
+  f.api.call = async (type, args) => type in replies ? structuredClone(replies[type]) : call(type, args);
+}
+
+test('template has no household entities and generates compact cards with real HA IDs and capabilities', () => {
+  const doc = climateTemplate(), original = structuredClone(doc), data = climateData();
+  assert.deepEqual(doc.config.views[0].sections, []);
+  assert.equal(doc.generator.card.entity, undefined);
+  const config = buildClimateDashboard(doc, data), sections = config.views[0].sections;
+  assert.deepEqual(sections.map(s => s.cards[0].heading), ['示例一层', '示例二层', '未分配楼层']);
+  const cards = sections.flatMap(s => s.cards.slice(1));
+  assert.deepEqual(cards.map(c => c.entity), ['climate.example_a', 'climate.example_b', 'climate.unregistered']);
+  assert.equal(cards[1].name, '示例房间乙 · 自定义名称');
+  for (const card of cards) {
     assert.deepEqual(card.grid_options, { columns: 6, rows: 3 });
     assert.equal(card.icon_tap_action.perform_action, 'climate.toggle');
     assert.deepEqual(card.icon_tap_action.target, { entity_id: card.entity });
     assert.equal(card.tap_action.action, 'more-info');
     assert.equal(card.features_position, 'bottom');
     assert.deepEqual(card.features.map(f => f.type), ['target-temperature', 'climate-fan-modes']);
+    assert.deepEqual(card.features[1].fan_modes, ['auto', 'quiet', 'high']);
   }
-  assert.equal(ids.size, 1);
+  assert.deepEqual(doc, original);
+  data.states[0].attributes = { friendly_name: '示例房间甲空调', supported_features: 0 };
+  const card = buildClimateDashboard(doc, data).views[0].sections[0].cards[1];
+  assert.equal(card.name, '示例房间甲空调');
+  assert.deepEqual(card.features, []);
+  assert.throws(() => buildClimateDashboard(doc, { ...data, states: [] }), /未找到/);
+});
+
+test('dynamic schema rejects unknown generator types, embedded IDs and nonempty views', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'crestron-template-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const change of [d => { d.generator.type = 'unknown'; }, d => { d.generator.card.entity = 'climate.example'; },
+    d => { d.generator.card.icon_tap_action = {}; }, d => { d.config.views[0].sections.push({}); },
+    d => { d.generator.card.features = 'invalid'; }]) {
+    const { file, ...doc } = climateTemplate();
+    change(doc);
+    writeFileSync(join(dir, 'page.json'), JSON.stringify(doc));
+    assert.throws(() => loadDashboards(dir));
+  }
+});
+
+test('dynamic generation saves the complete runtime config and backup precedes writes', async () => {
+  const f = fixture([]), doc = climateTemplate(), data = climateData();
+  withClimateApi(f, data);
+  const result = await deployDashboards([doc], f.api, async () => true, f.backup, () => {});
+  assert.equal(result.created, 1);
+  assert.deepEqual(f.configs.get(doc.dashboard.url_path), buildClimateDashboard(doc, data));
+  assert(f.events.findIndex(e => e.type === 'backup') < f.events.findIndex(e => e.type === 'lovelace/config/save'));
+  assert.equal(f.events.some(e => e.type === 'call_service'), false);
+});
+
+test('empty data and registry errors stop all page writes; skipped templates require no device API', async () => {
+  for (const apiError of [false, true]) {
+    const f = fixture([]);
+    withClimateApi(f, { entities: [], devices: [], areas: [], floors: [], states: [] });
+    if (apiError) {
+      const call = f.api.call;
+      f.api.call = (type, args) => type === 'config/floor_registry/list' ? Promise.reject(new Error('权限不足')) : call(type, args);
+    }
+    await assert.rejects(deployDashboards([item('page-new'), climateTemplate()], f.api, async () => true, f.backup, () => {}), /未找到|权限不足/);
+    assert.equal(writes(f).length, 0);
+    assert.equal(f.backups.length, 0);
+  }
+  const f = fixture(['dashboard-climate']);
+  assert.equal((await deployDashboards([climateTemplate()], f.api, async () => false, f.backup, () => {})).skipped, 1);
+});
+
+test('snapshot waits for RUNNING and missing active entities, includes unavailable and ignores disabled', async () => {
+  const f = fixture([]), data = climateData();
+  withClimateApi(f, data);
+  const call = f.api.call;
+  let round = 0, elapsed = 0;
+  f.api.call = async (type, args) => {
+    if (type === 'get_config' && round === 0) return { state: 'STARTING' };
+    if (type === 'get_states' && round === 1) return [];
+    return call(type, args);
+  };
+  const pause = async ms => { elapsed += ms; round++; };
+  const result = await climateSnapshot(f.api, () => {}, 10, pause, () => elapsed);
+  assert.equal(round, 2);
+  assert.deepEqual(result.states, data.states);
+  round = 0; elapsed = 0;
+  await assert.rejects(climateSnapshot(f.api, () => {}, 1, pause, () => elapsed), /超时/);
+  withClimateApi(f, data, { state: 'RUNNING', safe_mode: true });
+  await assert.rejects(climateSnapshot(f.api), /安全/);
 });
 
 test('URL handling preserves HTTPS and a reverse-proxy prefix, rejecting credentials', () => {

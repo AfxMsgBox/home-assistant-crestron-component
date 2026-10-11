@@ -61,7 +61,7 @@ usage() {
   --update                    更新已有集成；询问是否重新生成设备，默认不上传设备 YAML
   --source local|github       源码来源（默认 local；无本地项目时自动使用 GitHub）
   --branch BRANCH             GitHub 分支名（默认 master；不能与 local 同用）
-  --restart-timeout SECONDS   重启后等待 HA HTTP API 的秒数（默认 120）
+  --restart-timeout SECONDS   HTTP 恢复及实体加载各阶段等待秒数（默认 120）
 
 连接选项：
   --host HOST                 HA 服务器地址或主机名
@@ -109,6 +109,8 @@ GitHub 模式下载所选分支最新提交；local 模式复制当前工作区�
 仅上传运行所需组件和选定的设备 YAML；源码、工具、文档和测试不在服务器存档。
 组件与仪表盘备份保存在服务器 /homeassistant/crestron-backups/日期/时间-随机编号/。
 重启后通过 SSH 在服务器端用 curl 检查 HTTP API，服务器需安装 curl。
+空调页面在实体加载后按实际楼层、房间生成，仓库只保存通用模板。
+示例命令中的 HA_HOST 请替换为实际服务器地址。
 组件、转换器、自动化模板及工具、页面工具均来自所选源码。默认部署其中 dashboard/ 下所有 JSON 页面。
 已有页面可选 y（覆盖）、n（跳过）、All yes（全部覆盖）、All no（全部跳过）；
 回车默认为 n，输入结束时跳过所有剩余已有页面。新页面仍会创建。

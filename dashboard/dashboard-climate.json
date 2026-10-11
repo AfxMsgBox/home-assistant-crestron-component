@@ -14,60 +14,37 @@
         "path": "overview",
         "type": "sections",
         "max_columns": 4,
-        "sections": [
-          {
-            "type": "grid",
-            "cards": [
-              {
-                "type": "heading",
-                "heading": "示例楼层",
-                "heading_style": "title"
-              },
-              {
-                "type": "tile",
-                "entity": "climate.example_air_conditioner",
-                "name": "示例房间 空调",
-                "icon": "mdi:power",
-                "vertical": false,
-                "state_content": [
-                  "state",
-                  "current_temperature"
-                ],
-                "tap_action": {
-                  "action": "more-info"
-                },
-                "icon_tap_action": {
-                  "action": "perform-action",
-                  "perform_action": "climate.toggle",
-                  "target": {
-                    "entity_id": "climate.example_air_conditioner"
-                  }
-                },
-                "features_position": "bottom",
-                "features": [
-                  {
-                    "type": "target-temperature"
-                  },
-                  {
-                    "type": "climate-fan-modes",
-                    "style": "icons",
-                    "fan_modes": [
-                      "low",
-                      "medium",
-                      "high",
-                      "auto"
-                    ]
-                  }
-                ],
-                "grid_options": {
-                  "columns": 6,
-                  "rows": 3
-                }
-              }
-            ]
-          }
-        ]
+        "sections": []
       }
     ]
+  },
+  "generator": {
+    "type": "climate",
+    "card": {
+      "type": "tile",
+      "icon": "mdi:power",
+      "vertical": false,
+      "state_content": [
+        "state",
+        "current_temperature"
+      ],
+      "tap_action": {
+        "action": "more-info"
+      },
+      "features_position": "bottom",
+      "features": [
+        {
+          "type": "target-temperature"
+        },
+        {
+          "type": "climate-fan-modes",
+          "style": "icons"
+        }
+      ],
+      "grid_options": {
+        "columns": 6,
+        "rows": 3
+      }
+    }
   }
 }

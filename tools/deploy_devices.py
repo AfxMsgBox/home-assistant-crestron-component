@@ -60,7 +60,8 @@ def deploy(args):
             print('已跳过仪表盘部署。', flush=True)
             return
         options = ['node', str(dashboard_tool), '--dir', str(dashboards),
-                   '--remote-backup-dir', backup + '/dashboard', '--host', args.host]
+                   '--remote-backup-dir', backup + '/dashboard', '--host', args.host,
+                   '--wait-seconds', str(args.restart_timeout)]
         if args.ha_url:
             options += ['--ha-url', args.ha_url]
         common.run([*options, '--', *connection.ssh], env=connection.env, message='仪表盘部署失败')
@@ -102,10 +103,11 @@ fi'''
             print('已按用户选择跳过 YAML 上传。', flush=True)
     print('正在检查 Home Assistant 配置（ha core check）...', flush=True)
     connection.remote('ha core check', message='配置检查未通过，已跳过重启。远端文件已更新，请修正配置或从备份恢复')
-    deploy_dashboards()
     print('正在重启 Home Assistant 服务...', flush=True)
     connection.remote('ha core restart', message='Home Assistant 服务重启失败')
     common.wait_for_http(connection, url, args.restart_timeout)
+    # 新设备需先注册，动态页面才能使用实际的实体 ID 和位置。
+    deploy_dashboards()
     if args.result_file:
         # 仅在第一步成功后交给第二步；不包含密码或令牌。
         Path(args.result_file).write_text(json.dumps({'backup_dir': backup, 'ha_url': url}), encoding='utf-8')

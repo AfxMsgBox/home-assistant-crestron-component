@@ -17,7 +17,7 @@ bash deploy_to_ha.sh
 
 没有本地项目时自动进入 GitHub 分支选择；有项目时显示 `1. 本地目录（默认）`、`2. GitHub`。GitHub 会列出全部分支，有 `master` 时默认选它，否则第一项。下载所选分支完整源码、检查所需文件后才开始部署。分支必须已包含新版部署工具；未发布的本地修改请使用本地来源。
 
-在本地项目根目录运行：
+以下命令中的 `HA_HOST` 请替换成你的 HA 地址。在本地项目根目录运行：
 
 ```bash
 # 交互选择来源和 GitHub 分支
@@ -47,7 +47,7 @@ bash tools/deploy_to_ha.sh --update --source local --host HA_HOST --user root --
 
 部署分两步：
 
-1. **设备配置**：从 Excel 生成 `crestron.yaml`，按选择上传；备份组件、检查配置、部署页面，重启 Home Assistant 服务并等待 HTTP 恢复。
+1. **设备配置**：从 Excel 生成 `crestron.yaml`，按选择上传；备份组件、检查配置，重启 Home Assistant 服务并等待 HTTP 恢复，再生成并部署页面。
 2. **自动化关联（可选）**：读取 Excel 和 HA 注册信息，等待涉及的实体注册并加载，按模板生成 `automations_manual.yaml`。列出双方的楼层、房间、名称和实体 ID，确认上传后备份旧文件、检查配置并重载自动化，无需再次重启。
 
 入口脚本依次调用 `deploy_devices.py` 和 `deploy_automations.py`，也可分别运行，方便调试；两个 Python 入口使用相同的来源、连接参数，并复用 Shell 下载流程。第二步依赖设备已导入 HA。默认等待 120 秒，可用 `--restart-timeout 240` 调整。HTTP 和自动化接口均通过 SSH 在服务器执行，避免本机代理影响；实体存在不代表主控已在线。
@@ -85,9 +85,11 @@ Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某�
 
 ### 仪表盘
 
-[dashboard/dashboard-climate.json](dashboard/dashboard-climate.json) 提供紧凑空调页面：每排两张卡片，电源图标直接开关，下方调温和风速，点击名称进入详情。文件中的实体 ID 为虚构示例，部署前需替换。
+[dashboard/dashboard-climate.json](dashboard/dashboard-climate.json) 提供紧凑空调页面：每排两张卡片，电源图标直接开关，下方调温和风速，点击名称进入详情。文件只保存通用模板；每次部署时从目标 HA 读取实际空调实体、楼层和房间，按楼层分组生成，无须手填实体 ID。风速选项按设备支持的档位显示。
 
-`dashboard/` 中每个 JSON 代表一个完整仪表盘，包含 `dashboard` 元信息与 `config` 页面配置。部署递归扫描所有 JSON，按 `url_path` 判断是否已存在；覆盖已有页面会替换整个页面配置，保留原页面元信息。
+空调页面包含所有品牌已加载、未停用且未隐藏的 `climate` 实体；位置以实体设置优先，其次继承设备位置，缺失位置归入“未分配”。完整安装会先重启并等待实体加载，再生成页面；没有空调或加载超时会停止页面部署，不覆盖旧页面，仅安装其他设备时使用 `--skip-dashboard`。调整设备或位置后重新部署页面即可更新；页面不会自行新增卡片。
+
+`dashboard/` 中每个 JSON 包含 `dashboard` 元信息与 `config` 页面配置。空调模板另含 `generator`，普通静态页面仍可直接填写完整 `config`。部署递归扫描所有 JSON，按 `url_path` 判断是否已存在；覆盖已有页面会替换整个页面配置，保留原页面元信息。
 
 | 选择 | 含义 |
 |---|---|
@@ -96,7 +98,7 @@ Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某�
 | `All yes` | 覆盖本次所有已有页面 |
 | `All no` | 跳过本次所有已有页面 |
 
-新页面仍会创建，并备份其原先不存在的记录。页面备份保存到服务器本次部署目录的 `dashboard/` 下；仅部署页面时也创建独立的日期备份目录。网页中的修改不会自动同步回仓库文件。
+新页面仍会创建，并备份其原先不存在的记录。页面备份保存到服务器本次部署目录的 `dashboard/` 下；仅部署页面时也创建独立的日期备份目录。网页中的修改不会自动同步回仓库文件，确认覆盖后会被重新生成的配置替换。生成的实体 ID 和名称只用于 HA 页面，不写回仓库；服务器备份也包含现场配置，请保留在私有环境。
 
 ```bash
 # 仅部署仪表盘，不重启 HA

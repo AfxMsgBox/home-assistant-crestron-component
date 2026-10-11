@@ -316,7 +316,7 @@ GitHub 来源通过 curl 调用 GitHub Git refs API，将分支解析为 40 位�
 
 组件、Excel 转换器、两个 Python 部署工具、deploy_common.py、自动化模板及页面工具均指向所选源码的临时副本。Shell 自身只负责源码准备、交互及调用两步工具，不再次执行下载的同名脚本；缺失公共模块或所需步骤工具时在连接 HA 前报错，不回退本地代码。项目模式中，用户 Excel、生成 YAML 仍定位到项目 `local/`；页面备份通过 SSH 写入 HA 服务器；`--dashboard-dir` 可显式使用本地页面。全部模式均需 curl/Python，页面模式另需 Node 22+。源码不存在 dashboard 时，完整部署提示跳过；仅页面模式报错。
 
-完整部署顺序：下载 GitHub 源码或复制本地源码并校验 → 校验页面及远端备份参数支持 → 按选项生成/检查本地 YAML → SSH 连接与更新前置检查 → 确定恢复探测地址并检查远端 curl → 创建服务器日期备份目录 → 压缩并校验旧组件备份 → 上传清除 crestron.yaml/pyc 缓存后的组件与可选设备 YAML → `ha core check` → 页面备份与部署 → `ha core restart` → HTTP API 恢复探测 → 可选自动化第二阶段。不上传整份源码、工具、文档、测试或示例配置，不创建新的 `crestron-source` 存档。下载、解压、组件副本和阶段结果只放本机 `STAGE_ROOT`，通过 EXIT trap 清理，INT/TERM 转为退出；强制杀死进程或断电仍可能留下本机临时目录。
+完整部署顺序：下载 GitHub 源码或复制本地源码并校验 → 校验页面及远端备份参数支持 → 按选项生成/检查本地 YAML → SSH 连接与更新前置检查 → 确定恢复探测地址并检查远端 curl → 创建服务器日期备份目录 → 压缩并校验旧组件备份 → 上传清除 crestron.yaml/pyc 缓存后的组件与可选设备 YAML → `ha core check` → `ha core restart` → HTTP API 恢复探测 → 等待实体加载、动态生成页面 → 页面备份与部署 → 可选自动化第二阶段。不上传整份源码、工具、文档、测试或示例配置，不创建新的 `crestron-source` 存档。下载、解压、组件副本和阶段结果只放本机 `STAGE_ROOT`，通过 EXIT trap 清理，INT/TERM 转为退出；强制杀死进程或断电仍可能留下本机临时目录。
 
 组件使用传统 SCP（`-O`），上传具名的 `crestron` 目录至组件父目录，不使用被 SCP 拒绝的 `目录/.`。远端仅保留正式运行文件和备份。`deploy_common.create_backup()` 使用服务器 `date` 一次取出日期和时间，以 `mktemp -d` 创建 `/homeassistant/crestron-backups/YYYY-MM-DD/HHMMSS-随机编号/`，同一次部署只创建一次，权限受 `umask 077` 保护，并校验返回路径后再拼入后续命令。
 
@@ -324,7 +324,7 @@ GitHub 来源通过 curl 调用 GitHub Git refs API，将分支解析为 40 位�
 
 只重启 Core 服务，不执行主机重启。使用 `ha core info --raw-json` 的端口/SSL 和 SSH 目标主机，或 HA_URL/`--ha-url` 得到 `/api/` 地址。上传前确认远端有 curl；重启后通过 SSH 在服务器端执行 curl，不使用部署电脑的 HTTP 代理。自定义 URL 必须能从服务器访问；用 Python `shlex.quote` 引用 URL，兼容远端 POSIX shell，保留 TLS 证书验证。每轮 curl 限时 5 秒、间隔 2 秒，SSH 沿用连接超时并设置 `ServerAliveInterval=5`、`ServerAliveCountMax=1`。只有 SSH/curl 退出码为 0 且 HTTP 为 200/401 才视为恢复。显示地址、等待时长、状态和失败详情；默认等待 120 秒，`--restart-timeout` 可调，实际退出可能多一个包含 SSH 连接的探测周期。该检查不证明 HA 完全启动、Crestron 连接成功或实体可用。
 
-失败会阻止后续步骤，包括重启；组件上传后检查/页面失败时文件已改变。组件采用覆盖复制，不清理上游已删除文件。已有组件备份与页面逐项备份，但没有跨组件/页面事务或自动回滚；历史源码存档与备份目录也不自动清理。`--dashboard-only` 准备源码后提前分支，只备份和部署页面，不生成/上传 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。
+失败会阻止后续步骤；组件配置检查失败不重启，页面运行时生成/部署失败发生在 Core 重启之后，组件已生效，但不会进入自动化第二阶段。组件采用覆盖复制，不清理上游已删除文件。已有组件备份与页面逐项备份，但没有跨组件/页面事务或自动回滚；历史源码存档与备份目录也不自动清理。`--dashboard-only` 准备源码后提前分支，只备份和部署页面，不生成/上传 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。
 
 安装与更新统一由 `deploy_to_ha.sh` 编排。`--devices-only` 只执行第一步，`--automations-only` 只执行第二步；两者互斥。两个 Python 公开入口调用 `deploy_common.launch()`，携带对应步骤选项进入相邻 Shell，以复用完全相同的源码准备和交互；Shell 随后用内部 `--prepared` 参数调用所选源码的工具，避免重复下载或递归。独立 Python 运行需要完整项目；单文件安装只需 Shell。
 
@@ -346,15 +346,23 @@ GitHub 来源通过 curl 调用 GitHub Git refs API，将分支解析为 40 位�
 
 ### 空调仪表盘
 
-`dashboard/dashboard-climate.json` 保存通用示例页面，包含 dashboard 元信息和 config 原生 Lovelace 配置；示例实体 ID 和位置须在部署前替换。Tile 卡片保持紧凑布局，不新增辅助实体。
+`dashboard/dashboard-climate.json` 只保存通用模板：`dashboard` 为页面元信息，`config` 含单个空 sections 视图，`generator: {type: "climate", card: {...}}` 定义卡片样式。静态 JSON 仍可只包含 dashboard/config。模板禁止写死 card.entity、name 和 icon_tap_action，部署时统一生成。
 
-电源图标使用 `perform-action` 显式调用 `climate.toggle`，HA 根据 off 状态分派到组件已有的 `async_turn_on/async_turn_off`；这条路径不调用模式选择接口。卡片正文使用 `more-info`，两个 feature 分别为 `target-temperature` 和 `climate-fan-modes`（icons）。使用 bottom 布局：现场前端 20260729.7 的 inline 模式只显示第一个 feature，会隐藏风速。页面不包含模式快捷按钮。HA 内置 `/climate` 属于前端自动生成视图，没有可保存的普通 Lovelace 配置。
+`climateSnapshot()` 通过 WebSocket 的 `get_config` 等待 RUNNING，拒绝安全/恢复模式，再读取实体、设备、区域、楼层注册表及 `get_states`。未停用且未隐藏的已注册空调缺少状态时继续等待，默认 120 秒，可经部署参数 `--restart-timeout`（Node 内部 `--wait-seconds`）调整；接口错误立即失败。启动状态字段见 [HA Config.as_dict](https://github.com/home-assistant/core/blob/dev/homeassistant/core_config.py)。状态 unavailable 仍保留卡片，不要求主控在线；零可见空调时报错，避免空配置覆盖旧页面。HA 尚未配置 Crestron 时需先完成集成配置，或暂用 --skip-dashboard。
+
+`buildClimateDashboard()` 为目标 HA 所有品牌可见 climate 实体生成卡片，包含无注册记录但有实时状态的实体。实体区域优先于设备区域，区域关联楼层；缺失位置进入未分配分组。按楼层 level、名称、房间和实体排序，用楼层 ID 分组，避免同名楼层混合。名称采用实体自定义名称/友好名称等并补房间前缀，已有房间名不重复添加。现场数据只在内存生成，不保存到源码或本地持久文件。
+
+每卡 6 列、3 行，同分区每排两张。电源图标调用 `climate.toggle`，正文打开 `more-info`，温度与风速 feature 根据实体支持能力显示，风速档位取实际 fan_modes；保持 bottom 布局以显示两个控件。生成过程中不调用设备服务；页面没有模式快捷按钮。HA 内置 `/climate` 不是本工具管理的 storage 仪表盘。
 
 `deploy_dashboards.mjs` 使用 Node.js 22+ 内置 fetch/WebSocket，无第三方依赖。所有 JSON 文件在连接前做结构与重复 url_path 检查，不包含完整前端卡片 schema 校验。认证优先用 HA_TOKEN；否则通过沿用 SSH 认证参数的子进程读取现有所有者会话，经 `/auth/token` 换取临时令牌。端口/SSL 通过 `ha core info --raw-json` 获取，HA_URL 可覆盖地址；凭据只在环境或进程内存中流转。
 
-部署流程：读取 `lovelace/dashboards/list` 与 `get_panels` → 拒绝内置/YAML 地址冲突 → 读取旧配置 → 收集全部覆盖决定 → 每项写入前再次确认元信息及配置未变化 → 经 SSH 写服务器备份 → 必要时创建页面 → `lovelace/config/save` → 回读比对。按 url_path 匹配，不按标题匹配；覆盖保留旧页面元信息。确认与写入之间的复核不是服务端原子比较更新，仍存在很短的并发窗口。All yes/no 只影响本次已有项，新项继续创建；EOF 按 All no 处理。
+部署流程：读取 `lovelace/dashboards/list` 与 `get_panels` → 拒绝内置/YAML 地址冲突 → 读取旧配置 → 收集全部覆盖决定 → 读取一次实时快照并生成所有选中的动态页面（失败则不写任何页面） → 每项写入前再次确认元信息及配置未变化 → 经 SSH 写服务器备份 → 必要时创建页面 → `lovelace/config/save` → 回读比对。按 url_path 匹配，不按标题匹配；覆盖保留旧页面元信息。确认与写入之间的复核不是服务端原子比较更新，仍存在很短的并发窗口。All yes/no 只影响本次已有项，新项继续创建；EOF 按 All no 处理。
 
 页面备份在本次服务器备份目录的 `dashboard/<url_path>.json`，包含 `{dashboard, config}`；新页面两字段为 null。Node 工具仅接受 `--remote-backup-dir`，shell 在上传前通过 `--check` 同时检验所选来源的页面工具是否支持该参数；旧工具拒绝参数时停止，需更新分支或跳过页面。`remoteBackup()` 校验备份路径和页面名，通过现有 SSH 命令的标准输入传输 JSON，内容不拼入 shell 命令，不写本地持久备份。远端使用 `umask 077` 和 `mktemp` 写临时文件，完成后以硬链接创建最终文件，已有文件会报错，EXIT trap 清理临时文件；SSH 最长等待 30 秒。备份成功才写入页面，失败立即终止，不自动重试写入或回滚；创建成功但保存失败可能留下空页面，需要核对远端后处理。页面通过 HA API 保存，不直接修改运行中的 `.storage`，不调用设备控制服务。后续 UI 编辑不会自动同步到仓库 JSON；本地旧备份仍作为历史文件保留。
+
+### 公开源码与现场数据
+
+公开源码只保留通用页面模板和虚构示例；现场工作簿、生成配置及注册表导出放在被忽略的 local/，备份保存在私有环境。当前仓库提交身份使用 GitHub noreply 邮箱。历史脱敏包含旧现场工作簿、页面布局、文档地址及本项目维护者的个人提交身份，保留其他贡献者署名。历史重写会改变相关提交编号；其他工作副本应重新克隆或谨慎迁移未提交改动，避免合并回旧历史。
 
 ## 验证方法
 
@@ -378,4 +386,4 @@ bash -n tools/deploy_to_ha.sh
 
 位置测试覆盖重复导入、旧区域迁移、跨楼层重名、带数字名称冲突、大小写/空格规范化、已有区域归属、实体区域覆盖清除、身份与自定义名称保留、无效配置隔离、存储失败和 setup 顺序。注册表使用替身测试，不操作现场 HA。
 
-页面部署的 Node 测试覆盖四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用 GitHub、SSH/SCP、Node 替身，验证安装/更新/仅页面路径、默认及指定分支、交互分支分页/默认值/非法输入/EOF、本地路径推断/副本稳定性/文件排除/源码缺失/符号链接、固定提交下载、仅运行文件上传、下载转换器、配置保留、压缩包校验、备份失败、配置/页面失败阻止重启及恢复超时。SCP 回归另外使用本机真实 scp 的发送端/接收端，经匿名管道验证目录上传，覆盖隐藏文件、空格/中文文件名和两种源码来源；未安装 scp 时该组测试跳过。备份回归在本机临时目录执行真实远端 shell，验证按日期独立建目录、tar 压缩包包含原 YAML、备份/校验失败阻止覆盖、失败清理和页面 JSON 备份先于写入，包含权限、特殊字符和防覆盖。测试不访问 GitHub 或现场服务器。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。
+页面部署的 Node 测试覆盖动态模板、位置继承/覆盖、不同品牌风速、能力筛选、未加载/隐藏/停用实体、空数据与 API 错误保护、四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用 GitHub、SSH/SCP、Node 替身，验证安装/更新/仅页面路径、默认及指定分支、交互分支分页/默认值/非法输入/EOF、本地路径推断/副本稳定性/文件排除/源码缺失/符号链接、固定提交下载、仅运行文件上传、下载转换器、配置保留、压缩包校验、备份失败、配置检查失败阻止重启、重启/恢复失败阻止页面写入、页面失败阻止第二阶段及恢复超时。SCP 回归另外使用本机真实 scp 的发送端/接收端，经匿名管道验证目录上传，覆盖隐藏文件、空格/中文文件名和两种源码来源；未安装 scp 时该组测试跳过。备份回归在本机临时目录执行真实远端 shell，验证按日期独立建目录、tar 压缩包包含原 YAML、备份/校验失败阻止覆盖、失败清理和页面 JSON 备份先于写入，包含权限、特殊字符和防覆盖。测试不访问 GitHub 或现场服务器。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。

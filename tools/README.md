@@ -124,8 +124,8 @@ sheet 名必须与上面完全一致。可以保留 `说明` sheet，转换器�
 
 | 序号 | 楼层 | 房间 | 名称 | 类型 | 开 | 关 | 停止 | 位置 |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 2F | 女儿房 | 卷1 | shade | 700 | 701 | 702 | 480 |
-| 2 | 2F | 女主卧 | 布帘2 | curtain | 704 | 705 | 706 | 481 |
+| 1 | 2F | 示例房间甲 | 卷1 | shade | 700 | 701 | 702 | 480 |
+| 2 | 2F | 示例房间乙 | 布帘2 | curtain | 704 | 705 | 706 | 481 |
 | 3 | 1F | 露台 | 遮阳篷 | awning | 708 | 709 | 710 | 482 |
 
 “开”“关”“停止”都是必填的数字 join；缺少任意一个时会报错，阻止整次生成。“位置”
@@ -303,6 +303,8 @@ crestron: !include custom_components/crestron/crestron.yaml
 
 ## 11. 安装与更新到 HA 服务器
 
+命令中的 `HA_HOST` 是占位符，请替换为实际服务器地址。空调仪表盘由通用模板在部署时读取目标 HA 的实体和位置生成，不含预设家庭布局；完整部署先重启并等待实体加载，再备份和保存页面。只安装非空调设备时可加 `--skip-dashboard`。
+
 统一使用 `deploy_to_ha.sh`，支持 GitHub 分支或本地开发目录两种来源，通过 SSH/SCP
 部署组件，通过 HA API 保存仪表盘。Shell 可单独下载，其余源码自动获取；缺少本地项目时自动使用 GitHub。有本地项目时，来源菜单第一项为本地（默认），第二项为 GitHub。选择 GitHub 后分页读取
 全部分支供编号选择，有 master 时默认 master，否则第一项。
@@ -350,8 +352,8 @@ HA 的 include 需指向该位置。源码中的设备示例和 Python 缓存不
 完整安装/更新仅上传运行所需文件，取消服务器源码存档。旧组件压缩为 `crestron.tar.gz`，
 页面旧配置存为 `dashboard/*.json`，统一保存在服务器 `/homeassistant/crestron-backups/日期/时间-随机编号/`。
 备份完成后
-部署到 `/homeassistant/custom_components/crestron/`，运行 `ha core check`，保存页面，
-最后执行 `ha core restart`，通过 SSH 在服务器端检查 HTTP API，显示等待进度和失败原因；
+部署到 `/homeassistant/custom_components/crestron/`，运行 `ha core check` 和 `ha core restart`，通过 SSH 在服务器端检查 HTTP API，
+随后等待实体加载、生成并保存页面；显示等待进度和失败原因，
 默认等待 120 秒，可用 `--restart-timeout` 调整。`--ha-url` 指定的地址也须能从服务器访问。
 已有页面提供 `y`、`n`、
 `All yes`、`All no` 四种覆盖选择；`--skip-dashboard` 跳过页面。

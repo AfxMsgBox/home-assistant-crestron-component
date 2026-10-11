@@ -476,14 +476,17 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertTrue(any('--remote-backup-dir' in line and '--check' not in line for line in log))
         self.assertNotIn('是否从 Excel', result.stdout)
 
-    def test_regular_flow_checks_then_deploys_dashboard_then_restarts(self):
+    def test_regular_flow_checks_restarts_waits_then_deploys_dashboard(self):
         result, log = self.run_script('--skip-generate-yaml', '--skip-upload-yaml')
         self.assertEqual(result.returncode, 0, result.stderr)
         check = next(i for i, line in enumerate(log) if 'ha core check' in line)
         dashboard = next(i for i, line in enumerate(log) if '--remote-backup-dir' in line and '--check' not in line)
         restart = next(i for i, line in enumerate(log) if 'ha core restart' in line)
-        self.assertLess(check, dashboard)
-        self.assertLess(dashboard, restart)
+        probe = next(i for i, line in enumerate(log) if line.startswith('remote-curl '))
+        self.assertLess(check, restart)
+        self.assertLess(restart, probe)
+        self.assertLess(probe, dashboard)
+        self.assertIn('--wait-seconds 120', log[dashboard])
 
     def test_skip_dashboard_does_not_require_node(self):
         result, log = self.run_script('--skip-dashboard', '--skip-generate-yaml', '--skip-upload-yaml')
@@ -503,11 +506,14 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any('--remote-backup-dir' in line and '--check' not in line or 'ha core restart' in line for line in log))
 
-    def test_failed_dashboard_stops_restart(self):
+    def test_failed_dashboard_after_restart_stops_second_stage(self):
+        xlsx = self.automation_sources()
         self.env['FAIL_DASHBOARD'] = '1'
-        result, log = self.run_script('--skip-generate-yaml', '--skip-upload-yaml')
+        result, log = self.run_script('--xlsx', str(xlsx), '--skip-generate-yaml',
+                                      '--skip-upload-yaml', '--generate-automations', '--skip-upload-automations')
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(any('ha core restart' in line for line in log))
+        self.assertTrue(any('ha core restart' in line for line in log))
+        self.assertFalse(any(line.startswith('automation-stage2') for line in log))
 
     def test_conflicting_flags_fail_before_remote_access(self):
         for flag in ['--skip-dashboard', '--generate-yaml', '--upload-yaml']:
@@ -709,13 +715,15 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
 
     def test_restart_failure_does_not_report_success(self):
         self.env['FAIL_RESTART'] = '1'
-        result, _ = self.run_script('--update')
+        result, log = self.run_script('--update')
+        self.assertFalse(any('--remote-backup-dir' in line and '--check' not in line for line in log))
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('部署完成：', result.stdout)
 
     def test_http_probe_timeout_does_not_report_success(self):
         self.env['PROBE_STATUS'] = '503'
-        result, _ = self.run_script('--update', '--restart-timeout', '1')
+        result, log = self.run_script('--update', '--restart-timeout', '1')
+        self.assertFalse(any('--remote-backup-dir' in line and '--check' not in line for line in log))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('未在 1 秒内恢复', result.stderr)
         self.assertIn('HTTP 状态：503', result.stdout)

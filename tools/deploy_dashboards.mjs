@@ -25,7 +25,7 @@ export function loadDashboards(directory) {
     let doc;
     try { doc = JSON.parse(readFileSync(file, 'utf8')); }
     catch { fail(`${file}：无法读取有效 JSON`); }
-    if (!object(doc) || Object.keys(doc).some(k => !['dashboard', 'config'].includes(k))) fail(`${file}：只允许 dashboard、config 两个顶层字段`);
+    if (!object(doc) || Object.keys(doc).some(k => !['dashboard', 'config', 'generator'].includes(k))) fail(`${file}：只允许 dashboard、config、generator 顶层字段`);
     const d = doc.dashboard;
     if (!object(d) || !/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(d.url_path)) fail(`${file}：dashboard.url_path 必须为含连字符的小写地址`);
     if (Object.keys(d).some(k => !['url_path', 'title', 'icon', 'show_in_sidebar', 'require_admin'].includes(k))) fail(`${file}：未知 dashboard 字段`);
@@ -35,10 +35,87 @@ export function loadDashboards(directory) {
       if (d[key] !== undefined && typeof d[key] !== 'boolean') fail(`${file}：${key} 必须为布尔值`);
     }
     if (!object(doc.config) || !Array.isArray(doc.config.views) || !doc.config.views.length || !doc.config.views.every(object)) fail(`${file}：config.views 必须是非空视图列表`);
+    if (doc.generator !== undefined) {
+      const g = doc.generator;
+      if (!object(g) || g.type !== 'climate' || Object.keys(g).some(k => !['type', 'card'].includes(k)) || !object(g.card) || g.card.type !== 'tile') fail(`${file}：generator 必须指定 climate 类型和 tile 卡片模板`);
+      if (doc.config.views.length !== 1 || doc.config.views[0].type !== 'sections' || !Array.isArray(doc.config.views[0].sections) || doc.config.views[0].sections.length) fail(`${file}：动态空调页面须包含一个 sections 视图，sections 留空`);
+      if (g.card.entity !== undefined || g.card.name !== undefined || g.card.icon_tap_action !== undefined) fail(`${file}：卡片实体、名称和电源动作由目标 HA 自动生成，请勿写入模板`);
+      if (g.card.features !== undefined && (!Array.isArray(g.card.features) || !g.card.features.every(object))) fail(`${file}：卡片 features 必须是对象列表`);
+    }
     if (urls.has(d.url_path)) fail(`${file}：重复 url_path ${d.url_path}`);
     urls.add(d.url_path);
-    return { file, dashboard: { show_in_sidebar: true, require_admin: false, ...d }, config: doc.config };
+    return { file, dashboard: { show_in_sidebar: true, require_admin: false, ...d }, config: doc.config,
+      ...(doc.generator === undefined ? {} : { generator: doc.generator }) };
   });
+}
+
+const isClimate = row => typeof row.entity_id === 'string' && row.entity_id.startsWith('climate.');
+const visible = row => !row.disabled_by && !row.hidden_by;
+
+// 等待启动及实体加载完成；接口失败直接报错，不能把缺失数据当成空页面覆盖。
+export async function climateSnapshot(api, log = console.log, waitSeconds = 120,
+  pause = ms => new Promise(resolvePause => setTimeout(resolvePause, ms)), now = Date.now) {
+  const deadline = now() + waitSeconds * 1000;
+  for (;;) {
+    const config = await api.call('get_config');
+    if (config.safe_mode || config.recovery_mode) fail('HA 处于安全/恢复模式，停止生成空调页面');
+    let missing = [];
+    if (config.state === 'RUNNING') {
+      const [entities, devices, areas, floors, states] = await Promise.all([
+        'config/entity_registry/list', 'config/device_registry/list',
+        'config/area_registry/list', 'config/floor_registry/list', 'get_states',
+      ].map(type => api.call(type)));
+      if (![entities, devices, areas, floors, states].every(Array.isArray)) fail('HA 返回的注册表或状态列表无效');
+      const loaded = new Set(states.filter(isClimate).map(row => row.entity_id));
+      missing = entities.filter(row => isClimate(row) && visible(row) && !loaded.has(row.entity_id));
+      if (!missing.length) return { entities, devices, areas, floors, states };
+    }
+    if (now() >= deadline) fail(`等待空调实体超时${missing.length ? `，仍有 ${missing.length} 个未加载` : '，HA 尚未完成启动'}；页面未修改`);
+    log(`等待 HA 完成启动及空调实体加载${missing.length ? `（剩余 ${missing.length} 个）` : ''}...`);
+    await pause(2000);
+  }
+}
+
+// 只生成配置，不调用设备服务；现场名称和实体 ID 仅保留在内存与 HA 中。
+export function buildClimateDashboard(item, snapshot) {
+  const index = (rows, key) => new Map(rows.map(row => [row[key], row]));
+  const entities = index(snapshot.entities, 'entity_id'), devices = index(snapshot.devices, 'id');
+  const areas = index(snapshot.areas, 'area_id'), floors = index(snapshot.floors, 'floor_id');
+  const rows = snapshot.states.filter(isClimate).filter(state => visible(entities.get(state.entity_id) || {})).map(state => {
+    const entity = entities.get(state.entity_id) || {}, device = devices.get(entity.device_id) || {};
+    const area = areas.get(entity.area_id || device.area_id), floor = floors.get(area?.floor_id);
+    const name = entity.name || state.attributes?.friendly_name || device.name_by_user || device.name || entity.original_name || state.entity_id;
+    const room = area?.name || '未分配房间';
+    return { state, floor, room, name: name.includes(room) ? name : `${room} · ${name}` };
+  });
+  if (!rows.length) fail('未找到可显示的空调实体，页面未修改；仅部署设备可使用 --skip-dashboard');
+  const compare = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true });
+  rows.sort((a, b) => (a.floor ? 0 : 1) - (b.floor ? 0 : 1)
+    || (a.floor?.level ?? 0) - (b.floor?.level ?? 0)
+    || compare(a.floor?.name || '', b.floor?.name || '') || compare(a.room, b.room)
+    || compare(a.name, b.name) || compare(a.state.entity_id, b.state.entity_id));
+  const sections = new Map();
+  for (const { state, floor, name } of rows) {
+    const key = floor?.floor_id ?? null;
+    if (!sections.has(key)) sections.set(key, { type: 'grid', cards: [{ type: 'heading', heading: floor?.name || '未分配楼层', heading_style: 'title' }] });
+    const card = structuredClone(item.generator.card), attrs = state.attributes || {};
+    card.entity = state.entity_id;
+    card.name = name;
+    card.icon_tap_action = { action: 'perform-action', perform_action: 'climate.toggle', target: { entity_id: state.entity_id } };
+    // 温度与风速按实际能力显示，兼容其他品牌和自定义风速名称。
+    card.features = (card.features || []).filter(feature => {
+      if (feature.type === 'target-temperature') return Boolean(attrs.supported_features & 1);
+      if (feature.type === 'climate-fan-modes') {
+        if (!(attrs.supported_features & 8) || !Array.isArray(attrs.fan_modes) || !attrs.fan_modes.length) return false;
+        feature.fan_modes = [...attrs.fan_modes];
+      }
+      return true;
+    });
+    sections.get(key).cards.push(card);
+  }
+  const config = structuredClone(item.config);
+  config.views[0].sections = [...sections.values()];
+  return config;
 }
 
 export function overwritePrompt(readLine, log = console.log) {
@@ -124,7 +201,7 @@ async function readConfig(api, url) {
   catch (err) { if (err instanceof HaError && err.code === 'config_not_found') return null; throw err; }
 }
 
-export async function deployDashboards(items, api, ask, backup, log = console.log) {
+export async function deployDashboards(items, api, ask, backup, log = console.log, waitSeconds = 120) {
   const dashboards = await api.call('lovelace/dashboards/list');
   const panels = await api.call('get_panels');
   const planned = [];
@@ -141,6 +218,16 @@ export async function deployDashboards(items, api, ask, backup, log = console.lo
     const { item, old } = plan;
     if (old && !await ask(`${item.dashboard.title} (${item.dashboard.url_path})`)) { log(`跳过：${item.dashboard.url_path}`); continue; }
     selected.push(plan);
+  }
+  // 全部动态页面生成成功后才开始备份/写入；跳过的页面不读取设备数据。
+  const dynamic = selected.filter(plan => plan.item.generator);
+  if (dynamic.length) {
+    const snapshot = await climateSnapshot(api, log, waitSeconds);
+    for (const plan of dynamic) {
+      plan.item = { ...plan.item, config: buildClimateDashboard(plan.item, snapshot) };
+      const sections = plan.item.config.views[0].sections;
+      log(`已生成空调页面：${sections.length} 个楼层分区，${sections.reduce((n, s) => n + s.cards.length - 1, 0)} 张卡片`);
+    }
   }
   let created = 0, overwritten = 0;
   for (const { item, old, previous } of selected) {
@@ -238,11 +325,13 @@ export async function main(argv) {
     const flag = argv[i];
     if (flag === '--') { command = argv.slice(i + 1); break; }
     if (flag === '--check') { options.check = true; continue; }
-    const key = { '--dir': 'dir', '--remote-backup-dir': 'backup', '--host': 'host', '--ha-url': 'url' }[flag];
+    const key = { '--dir': 'dir', '--remote-backup-dir': 'backup', '--host': 'host', '--ha-url': 'url', '--wait-seconds': 'wait' }[flag];
     if (!key || !argv[i + 1]) fail(`参数无效或缺少值：${flag}`);
     options[key] = argv[++i];
   }
   if (!options.dir) fail('必须指定 --dir');
+  const waitSeconds = Number(options.wait ?? 120);
+  if (!Number.isInteger(waitSeconds) || waitSeconds < 1 || waitSeconds > 9999) fail('--wait-seconds 必须在 1..9999 之间');
   const items = loadDashboards(options.dir);
   if (options.check || !items.length) { console.log(`仪表盘配置检查通过：${items.length} 个页面`); return; }
   if (!options.backup) fail('必须指定 --remote-backup-dir');
@@ -262,7 +351,7 @@ export async function main(argv) {
       const result = await iterator.next();
       return result.done ? null : result.value;
     });
-    const result = await deployDashboards(items, api, ask, backup);
+    const result = await deployDashboards(items, api, ask, backup, console.log, waitSeconds);
     console.log(`仪表盘部署完成：新建 ${result.created}，覆盖 ${result.overwritten}，跳过 ${result.skipped}`);
   } finally { input?.close(); api.close(); }
 }
