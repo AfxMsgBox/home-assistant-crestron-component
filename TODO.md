@@ -23,7 +23,9 @@
 
 ## P2：校验与真实 HA 验证
 
-- [ ] 获得现场清理授权后，验证 `tools/clear_deleted_devices.py` 的停止、状态识别、日期备份、清空与恢复流程。本机故障模拟已覆盖，目标 HA 仅完成只读预览。
+- [ ] 补充调光灯开灯修复的现场边界验证：用户已反馈原开灯问题解决，本地 29 项调光灯回归此前通过；仍需检查指定同亮度开灯、快速连续开关和双色温灯的表现。
+
+- [ ] 获得现场清理授权后，验证 `tools/clear_deleted_devices.py --target devices|entities|all` 的停止、双表日期备份、清理及恢复流程，以及删除集成后重建的实体 ID 和自动化引用。单表/双表本机故障模拟已覆盖，新双表流程尚未操作目标 HA。
 
 - [ ] 获得现场部署授权后，验证从 GitHub 只下载 deploy_to_ha.sh 的实际联网安装，确认能够下载并运行 deploy_devices.py、deploy_common.py、deploy_automations.py 及其转换器/模板。本地替身已覆盖自动下载、默认本地和两个 Python 独立入口；尚未在现场执行新流程。
 

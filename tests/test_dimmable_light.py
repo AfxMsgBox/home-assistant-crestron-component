@@ -1,12 +1,7 @@
-"""Tests for the dimmable light's turn_off command sequence.
+"""调光灯开关电平变化、亮度记忆及并发命令回归。
 
-light.py imports homeassistant, which isn't installed in the bare test
-environment, so minimal stand-ins are installed into sys.modules before
-loading the module via the synthetic-package loader. voluptuous is real.
-
-async_turn_off must re-assert the current level and then send 0 (a distinct
-high->0 edge), so the Crestron dimmer — which acts only on level *changes* —
-reliably turns the bulb off on a single press.
+使用最小 HA 替身和真实 voluptuous，避免连接现场；主控替身区分实际亮度、
+HA 输入电平与回报缓存，验证实体开关关灯后同亮度再次开灯。
 """
 
 import asyncio
@@ -15,6 +10,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 from loader import load
 
@@ -66,6 +62,7 @@ _install_stubs()
 light_mod = load("light")
 # Keep the test fast: collapse the re-assert hold to a no-op delay.
 light_mod.OFF_REASSERT_SECONDS = 0
+light_mod.ON_RESET_SECONDS = 0
 
 
 class FakeHub:
@@ -221,7 +218,7 @@ class BrightnessMemoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_record_defaults_to_full_brightness(self):
         await self.light.async_turn_on()
-        self.assertEqual(self.hub.sent_analog, [(20, 65535)])
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 65535)])
 
     async def test_restart_while_off_restores_memory_without_turning_light_on(self):
         await self.feedback(23456)
@@ -235,7 +232,7 @@ class BrightnessMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(restored.is_on)
         self.assertEqual(hub.sent_analog, [])
         await restored.async_turn_on()
-        self.assertEqual(hub.sent_analog, [(20, 23456)])
+        self.assertEqual(hub.sent_analog, [(20, 0), (20, 23456)])
 
     async def test_initial_live_nonzero_feedback_takes_priority_over_saved_memory(self):
         hub = FakeHub()
@@ -326,6 +323,149 @@ class BrightnessMemoryTests(unittest.IsolatedAsyncioTestCase):
         await self.light.async_turn_off()
         self.assertEqual(self.hub.sent_analog, [])
         self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 20000)
+
+
+class ChangeDrivenHub(FakeHub):
+    """模拟只响应 HA 输入电平变化的主控；实体开关不改 HA 输入电平。"""
+
+    def __init__(self):
+        super().__init__()
+        self.command_level = 0
+        self.actual_level = 0
+
+    def set_analog(self, join, value):
+        super().set_analog(join, value)
+        if join == 20 and value != self.command_level:
+            self.command_level = value
+            self.actual_level = value
+
+
+class TurnOnSequenceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hub = ChangeDrivenHub()
+        self.light = make_light(self.hub)
+        self.waits = asyncio.Queue()
+
+    async def hold(self, seconds):
+        release = asyncio.Event()
+        await self.waits.put((seconds, release))
+        await release.wait()
+
+    async def feedback(self, value):
+        self.hub.analog[20] = value
+        await self.light.process_callback('a20', str(value))
+
+    async def test_panel_off_then_same_level_turn_on_really_opens_light(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                await self.light.async_turn_on(brightness=128)
+                level = self.hub.actual_level
+                await self.feedback(level)
+                # 实体开关关灯并回报零，但上次 HA 输入仍是同一个非零值。
+                self.hub.actual_level = 0
+                await self.feedback(0)
+                self.assertFalse(self.light.is_on)
+                self.assertEqual(self.hub.command_level, level)
+                self.hub.sent_analog.clear()
+                await self.light.async_turn_on(**({'brightness': 128} if explicit else {}))
+                self.assertEqual(self.hub.actual_level, level)
+                self.assertEqual(self.hub.sent_analog, [(20, 0), (20, level)])
+                self.assertEqual(self.light.extra_state_attributes['last_nonzero_brightness'], level)
+                # 命令不伪造状态；收到反馈后才显示开灯。
+                self.assertFalse(self.light.is_on)
+                await self.feedback(level)
+                self.assertTrue(self.light.is_on)
+
+    async def test_already_on_dimming_does_not_send_zero(self):
+        await self.feedback(12345)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [])
+        await self.light.async_turn_on(brightness=128)
+        self.assertEqual(self.hub.sent_analog, [(20, round(128 / 255 * 65535))])
+
+    async def test_zero_request_does_not_wait_or_clear_memory(self):
+        await self.feedback(12345)
+        with patch.object(light_mod.asyncio, 'sleep', self.hold):
+            await self.light.async_turn_on(brightness=0)
+        self.assertTrue(self.waits.empty())
+        self.assertEqual(self.hub.sent_analog, [(20, 0)])
+        self.assertEqual(self.light.extra_state_attributes['last_nonzero_brightness'], 12345)
+
+    async def test_zero_is_held_before_sending_remembered_raw_level(self):
+        await self.feedback(12345)
+        await self.feedback(0)
+        with patch.object(light_mod, 'ON_RESET_SECONDS', 0.2), patch.object(light_mod.asyncio, 'sleep', self.hold):
+            task = asyncio.create_task(self.light.async_turn_on())
+            seconds, release = await self.waits.get()
+            self.assertEqual(seconds, 0.2)
+            self.assertEqual(self.hub.sent_analog, [(20, 0)])
+            self.assertFalse(task.done())
+            release.set()
+            await task
+        self.assertEqual(self.hub.actual_level, 12345)
+
+    async def test_new_off_cancels_pending_brightness_and_color_temperature(self):
+        self.light = light_mod.CrestronLight(self.hub, {
+            'name': '示例灯', 'brightness_join': 20, 'color_temp_join': 21})
+        with patch.object(light_mod.asyncio, 'sleep', self.hold):
+            task = asyncio.create_task(self.light.async_turn_on(brightness=128, color_temp_kelvin=4000))
+            _, release = await self.waits.get()
+            await self.light.async_turn_off()
+            release.set()
+            await task
+        self.assertEqual(self.hub.actual_level, 0)
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 0)])
+
+    async def test_new_on_supersedes_old_target_and_preserves_pending_memory(self):
+        for request in ({'brightness': 64}, {}):
+            with self.subTest(request=request):
+                self.hub.sent_analog.clear()
+                with patch.object(light_mod.asyncio, 'sleep', self.hold):
+                    first = asyncio.create_task(self.light.async_turn_on(brightness=128))
+                    _, first_release = await self.waits.get()
+                    second = asyncio.create_task(self.light.async_turn_on(**request))
+                    _, second_release = await self.waits.get()
+                    first_release.set()
+                    await first
+                    self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 0)])
+                    second_release.set()
+                    await second
+                level = round(request.get('brightness', 128) / 255 * 65535)
+                self.assertEqual(self.hub.sent_analog[-1], (20, level))
+                self.assertEqual(self.light.extra_state_attributes['last_nonzero_brightness'], level)
+
+    async def test_old_feedback_during_wait_does_not_replace_sent_target_memory(self):
+        with patch.object(light_mod.asyncio, 'sleep', self.hold):
+            task = asyncio.create_task(self.light.async_turn_on(brightness=128))
+            _, release = await self.waits.get()
+            await self.feedback(65535)
+            release.set()
+            await task
+        self.assertEqual(self.light.extra_state_attributes['last_nonzero_brightness'], round(128 / 255 * 65535))
+
+    async def test_cancelled_turn_on_does_not_send_delayed_level(self):
+        with patch.object(light_mod.asyncio, 'sleep', self.hold):
+            task = asyncio.create_task(self.light.async_turn_on(brightness=128))
+            await self.waits.get()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(self.hub.sent_analog, [(20, 0)])
+
+    async def test_removal_cancels_pending_on_and_off_writes(self):
+        for turn_on in (True, False):
+            with self.subTest(turn_on=turn_on):
+                self.light = make_light(self.hub)
+                self.hub.sent_analog.clear()
+                await self.feedback(0 if turn_on else 12345)
+                with patch.object(light_mod.asyncio, 'sleep', self.hold):
+                    task = asyncio.create_task(self.light.async_turn_on() if turn_on else self.light.async_turn_off())
+                    _, release = await self.waits.get()
+                    before = list(self.hub.sent_analog)
+                    await self.light.async_will_remove_from_hass()
+                    release.set()
+                    await task
+                self.assertEqual(self.hub.sent_analog, before)
 
 
 if __name__ == "__main__":

@@ -197,7 +197,7 @@ python3 tools/xlsx_to_automations.py local/HA设备接口配置表.xlsx \
 
 ## 4. 日常使用与修改配置
 
-- 调光灯会记住最近的非零亮度：例如调到 50%，关灯后再次开灯恢复为 50%；HA 正常重启后也保留。面板调整需反馈到 HA 才能更新记忆；显式指定亮度时使用指定值，没有有效记忆时默认 100%。更新组件并重启 HA 后生效，无需重新生成设备 YAML。
+- 调光灯会记住最近的非零亮度：例如调到 50%，关灯后再次开灯恢复为 50%；HA 正常重启后也保留。面板调整需反馈到 HA 才能更新记忆；显式指定亮度时使用指定值，没有有效记忆时默认 100%。关闭状态开灯时，先发送 0，等待约 0.2 秒，再恢复目标亮度，以兼容只响应亮度变化的主控；已开灯时调光不经过置零。更新组件并重启 HA 后生效，无需重新生成设备 YAML。
 - 空调可在独立空调仪表盘直接开关、调温和调风速，复杂设置进入实体详情。电源按钮调用独立开关，不发送模式选择命令；启动模式由主控保留。
 - 设温支持 `16–30°C` 整数；模式、风速和温度控件取决于已配置的 join。显示以主控真实反馈为准。
 - 修改 Excel 后需重新生成 YAML，上传到 HA 实际引用的路径；生成不会保留此前手改内容。
@@ -247,26 +247,39 @@ python3 tools/list_ha_entities.py --host HA_HOST switch occ --format tsv > entit
 
 颜色默认只在终端开启，重定向自动关闭；可用 `--color always|never` 控制，也支持 `NO_COLOR`。API 认证使用管理员 `HA_TOKEN`，或服务器已有的有效所有者会话；`--ha-url` 可指定 HA 网页地址。
 
-## 6. 清理已删除设备记录
+## 6. 清理已删除设备和实体记录
 
-清空设备注册表中的 `data.deleted_devices`，不删除仍在使用的设备或实体。在完整项目根目录运行：
+`clear_deleted_devices.py` 清空所选注册表中的已删除记录，保留仍在使用的设备、实体和其他字段。`--target devices` 清理 `deleted_devices`（默认，兼容旧命令），`--target entities` 清理 `deleted_entities`，`--target all` 清理两者。在项目根目录运行，将 `HA_HOST` 替换为实际地址：
 
 ```bash
-# 只读预览，不停止或修改 HA
-python3 tools/clear_deleted_devices.py --host HA_HOST --dry-run
+# 只读预览两个注册表，不停止或修改 HA
+python3 tools/clear_deleted_devices.py --host HA_HOST --target all --dry-run
 
-# 显示数量并询问确认；确认后停止 Core、备份、清理并恢复原运行状态
-python3 tools/clear_deleted_devices.py --host HA_HOST
+# 清理两者：显示各自数量，询问确认后执行
+python3 tools/clear_deleted_devices.py --host HA_HOST --target all
 
-# 不带参数时逐步询问连接信息
+# 仅清理已删除实体记录
+python3 tools/clear_deleted_devices.py --host HA_HOST --target entities
+
+# 不带参数时逐步询问连接信息和清理范围
 python3 tools/clear_deleted_devices.py
 ```
 
 支持 `--password`、`--identity`；不提供密码时使用 SSH 默认密钥和配置。目标服务器需提供 `ha`、`jq`、`timeout`、`curl`，配置目录固定为 `/homeassistant`。终端默认彩色，可用 `--color never` 关闭。
 
-备份保存在服务器 `/homeassistant/crestron-backups/日期/时间-随机编号/device-registry/core.device_registry`。待清理数量为零时直接退出；Core 原本已停止则保持停止。默认确认选“否”，`--yes` 可跳过确认。原本运行时，清理后等待 HTTP 恢复，默认 120 秒，可用 `--restart-timeout` 调整。
+确认后停止 Core，完整备份所选注册表，再清理并恢复原运行状态。两个文件的备份和新内容全部校验通过后才开始写入。备份保存在服务器同一个日期目录中：
 
-无法确认停止或备份失败时不会修改注册表。写入后校验失败会尝试恢复备份；若检测到其他程序修改文件或启动 Core，则停止自动恢复并提示人工核查。SSH 断线或进程被强制终止后，应先检查 Core、备份和锁目录 `/homeassistant/.crestron-device-cleanup.lock`，不要直接重复清理。
+```text
+/homeassistant/crestron-backups/日期/时间-随机编号/
+  device-registry/core.device_registry
+  entity-registry/core.entity_registry
+```
+
+只备份所选范围；所选记录总数为零则直接退出。Core 原本已停止则保持停止。确认默认为“否”，`--yes` 跳过确认，仅作用于所选范围。原本运行时，清理后等待 HTTP 恢复，默认 120 秒，可用 `--restart-timeout` 调整。
+
+两个文件逐个替换；部分写入失败时会尝试恢复本次已修改的文件。若检测到其他程序改文件或启动 Core，则停止自动恢复和自动启动，提示人工核查。SSH 断线、强制终止或断电后，先检查 Core、备份和锁目录 `/homeassistant/.crestron-device-cleanup.lock`，不要直接重复清理。
+
+**清理不会改变现有实体 ID。** 若要重新分配 ID，应先删除对应集成，再清理其遗留的已删除记录；该工具按设备/实体类别清理全部已删除记录，不按集成筛选。保留 `crestron:` YAML 时重启 HA 会尝试重新导入，新 ID 由 HA 命名规则决定，不保证自动包含新楼层或房间。重建后需要检查旧自动化和页面引用，重新生成本项目的关联自动化及动态仪表盘。
 
 ## 7. 常见问题
 

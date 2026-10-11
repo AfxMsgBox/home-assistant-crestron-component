@@ -38,6 +38,8 @@ _LOGGER = logging.getLogger(__name__)
 # control system sees a distinct high->0 edge across program scans (a
 # zero-delay re-assert+0 lands in one scan and the 0 gets missed).
 OFF_REASSERT_SECONDS = 0.2
+# 开灯前保持零电平，让只响应输入变化的主控识别随后恢复的亮度。
+ON_RESET_SECONDS = 0.2
 # 使用模拟量原值保存记忆，避免低亮度经过 0–255 换算后丢失精度。
 ATTR_LAST_BRIGHTNESS = "last_nonzero_brightness"
 
@@ -204,15 +206,28 @@ class CrestronLight(CrestronEntity, LightEntity, RestoreEntity):
         if self._removed:
             return
         self._command_seq += 1
+        seq = self._command_seq
+        was_on = self.is_on
+        level = None
         if "brightness" in kwargs:
             level = round(kwargs["brightness"] / 255 * 65535)
-            self._hub.set_analog(self._brightness_join, level)
-            if self._remember_brightness(level):
-                self._schedule_write()
-        elif not self.is_on:
+        elif not was_on:
             # 普通开灯恢复记忆；没有任何记录时才默认全亮。已开灯时不重设亮度。
             level = self._last_brightness or 65535
+
+        if level is not None:
+            # 先保存本次目标，使等待期间新的普通开灯仍能沿用该亮度。
+            if self._remember_brightness(level):
+                self._schedule_write()
+            if level > 0 and not was_on:
+                # 面板关灯后的反馈为零，但主控的 HA 输入可能仍停在上次亮度。
+                # 先置零并留出扫描间隔，再恢复目标，避免同值写入被忽略。
+                self._hub.set_analog(self._brightness_join, 0)
+                await asyncio.sleep(ON_RESET_SECONDS)
+                if self._removed or seq != self._command_seq:
+                    return
             self._hub.set_analog(self._brightness_join, level)
+            # 等待期间可能收到旧亮度反馈，实际发送后重新记住本次目标。
             if self._remember_brightness(level):
                 self._schedule_write()
 
@@ -242,7 +257,7 @@ class CrestronLight(CrestronEntity, LightEntity, RestoreEntity):
         if current > 0:
             self._hub.set_analog(self._brightness_join, self._last_brightness or current)
             await asyncio.sleep(OFF_REASSERT_SECONDS)
-            if seq != self._command_seq:
+            if self._removed or seq != self._command_seq:
                 return
         self._hub.set_analog(self._brightness_join, 0)
 

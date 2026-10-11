@@ -399,21 +399,24 @@ python3 tools/xlsx_to_automations.py local/HA设备接口配置表.xlsx \
 源模板为根目录 `automations_manual_template.yaml`。手工使用时，删除三个占位标记，参照旁边注释填写触发器、开关映射、人在映射；三处都需保持一致。生成后的文件是单条自动化，可粘贴到 HA 单条 YAML 编辑器；脚本部署则使用独立 `automation manual` 引用，并保留其他自动化。固定 `id` 用于工具确认加载结果，请勿改动；`alias` 可改。更新自动生成文件会覆盖之前的手工修改，应优先修改 Excel 或模板。
 
 
-## 清理已删除设备记录
+## 清理已删除设备和实体记录
 
-`clear_deleted_devices.py` 清空 `/homeassistant/.storage/core.device_registry` 中的 `data.deleted_devices`。在完整项目根目录运行：
+`clear_deleted_devices.py` 支持 `--target devices|entities|all`：分别清理设备注册表 `data.deleted_devices`、实体注册表 `data.deleted_entities` 或两者；默认 devices，兼容原命令。保留活跃记录及其他字段，不按集成筛选。在完整项目根目录运行：
 
 ```bash
-python3 tools/clear_deleted_devices.py --host HA_HOST --dry-run
-python3 tools/clear_deleted_devices.py --host HA_HOST
+python3 tools/clear_deleted_devices.py --host HA_HOST --target all --dry-run
+python3 tools/clear_deleted_devices.py --host HA_HOST --target all
+python3 tools/clear_deleted_devices.py --host HA_HOST --target entities
 python3 tools/clear_deleted_devices.py
 ```
 
-第一条仅预览。正式运行会显示数量并询问确认，默认不执行；确认后停止 Core、确认停止、备份完整注册表、只清空已删除列表、校验并恢复原运行状态。原本已停止则不启动，空列表直接结束。备份位于服务器 `crestron-backups/日期/时间-随机编号/device-registry/core.device_registry`，临时文件正常退出时删除。
+第一条仅预览所选范围的各自数量和 Core 状态。正式运行询问确认后停止 Core、复核删除集合、备份全部所选注册表，所有备份及新内容校验通过后才逐文件替换。失败时尝试安全回滚已改文件；原本运行则恢复启动，原本停止则保持停止，全部为空直接结束。服务器日期备份目录下分别为 `device-registry/core.device_registry` 和 `entity-registry/core.entity_registry`，临时文件正常退出时删除。
 
-支持 `--password`、`--identity`、`--port`、`--color`；省略密码使用 SSH key，省略 identity 使用默认密钥/配置。不带参数逐步询问。需本机 Python 3、SSH（密码方式另需 sshpass）及同目录公共工具，服务器需 ha/jq/timeout/curl 和标准文件工具；不需要 HA API 令牌。`--yes` 跳过清理确认，`--restart-timeout` 调整恢复 HTTP 的等待时间，`--ha-url` 覆盖自动识别的地址。
+支持 `--password`、`--identity`、`--port`、`--color`；省略密码使用 SSH key，省略 identity 使用默认密钥/配置。不带参数逐步询问连接和范围，范围默认“设备”。需本机 Python 3、SSH（密码方式另需 sshpass）及同目录公共工具，服务器需 ha/jq/timeout/curl 和标准文件工具；不需要 HA API 令牌。`--yes` 跳过所选范围的确认，`--restart-timeout` 调整恢复 HTTP 的等待时间，`--ha-url` 覆盖自动识别地址。
 
-不能确认停止、确认后待删除集合变化或备份失败时停止操作。写入后校验失败仅在文件未被其他进程修改且 Core 仍停止时恢复备份；否则提示人工检查。异常断线/强制终止后先核查 Core、备份及 `.crestron-device-cleanup.lock`，不要直接重试。
+不能确认停止、确认后删除集合变化或备份失败时不写入。两个文件不构成跨文件原子事务；回滚仅在所有所选文件均未被外部进程修改且 Core 仍停止时尝试，否则提示人工检查并不自动启动。异常断线/强制终止后先核查 Core、备份及 `.crestron-device-cleanup.lock`，不要直接重试。
+
+清理不重命名现有实体；删除集成后清理对应遗留记录，才可避免重新添加时从删除记录恢复旧 ID。YAML 保留时，重启会尝试重新导入，名称由 HA 规则生成；之后需核对脚本/自动化/页面的引用。
 
 ## 查询服务器实体、设备和位置
 

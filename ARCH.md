@@ -32,7 +32,7 @@ tools/
   deploy_devices.py      第一步设备生成、SSH/SCP 上传、页面、Core 检查及重启
   deploy_common.py       Python 入口复用启动器、SSH 参数、日期备份、HTTP 探测
   list_ha_entities.py    只读实体检索、设备位置解析、彩色中文对齐表格/TSV
-  clear_deleted_devices.py 停止 Core、备份并清空已删除设备记录、恢复运行状态
+  clear_deleted_devices.py 停止 Core、备份并清空已删除设备/实体记录、恢复运行状态
   deploy_dashboards.mjs  JSON 校验、覆盖交互、HA WebSocket 页面部署
 tests/             unittest；HA 替身和本地 TCP 测试
 dashboard/         受 Git 管理的完整仪表盘 JSON（元信息与 config）
@@ -159,8 +159,10 @@ FrameDecoder 处理 TCP 拆包、粘包，保留不完整尾部；错误 UTF-8 �
 
 补充边界：
 
-- 调光灯关机在已缓存亮度大于 0 时，先重发记忆亮度（无记忆时补录当前值）、等待 0.2 秒再置零；这样刚下发的新亮度不会被旧反馈缓存替换。新开灯命令通过序号使旧延迟关灯失效。
+- 调光灯关机在已缓存亮度大于 0 时，先重发记忆亮度（无记忆时补录当前值）、等待 0.2 秒再置零；这样刚下发的新亮度不会被旧反馈缓存替换。新开灯命令通过序号使旧延迟关灯失效；实体移除后也丢弃延迟写入。
 - 调光灯的 `_last_brightness` 保存 1–65535 的模拟量原值。显式调光命令先更新记忆，后续该亮度通道的非零反馈再按真实值校正；零值、色温和连接状态反馈不修改记忆。普通开灯仅在反馈为关时下发记忆值，没有记录才用 65535；已开灯时不重设亮度。实际 `brightness`/`is_on` 仍直接读取反馈缓存，记忆值不代表命令已经执行。
+- 当命令开始时亮度反馈为关闭且本次目标非零，开灯先发 0，等待 `ON_RESET_SECONDS = 0.2`，再发记忆值或指定亮度。用于主控 HA 输入仍停在上次亮度、实体开关已关灯的情况，避免同值命令不产生输入变化。目标亮度在等待前记住，实际发送后再记一次，防止等待期间旧反馈改变后续恢复值；普通开灯不会恢复成全亮，除非没有有效记忆。已开灯时的普通开灯不改亮度，显式调光直接发送，零亮度请求也不做开灯延迟。
+- 开关与调光共用 `_command_seq`；开灯等待结束时检查序号及 `_removed`，旧任务不再写目标亮度或附带色温。取消等待也不补发非零值；不改共享反馈缓存、不把记忆当作实际状态。`tests/test_dimmable_light.py` 用只响应输入变化的主控替身复现实体开关关灯后同亮度开灯，并通过受控等待覆盖新关灯、新调光、取消、移除、旧反馈及原始亮度记忆；用户已反馈原开灯问题解决；快速连续操作、双色温等边界的现场表现仍待验证。
 - `CrestronLight` 继承 `RestoreEntity`，通过额外状态属性 `last_nonzero_brightness` 保存原始亮度；关灯时该属性仍存在。加载时校验历史值为 1–65535 的整数；首次升级可从旧开灯状态的标准 `brightness`（1–255）换算。已知、在线的非零缓存优先于历史记忆，等待恢复期间收到的新反馈或命令也优先；恢复本身不发送开灯命令。[HA 2026.10.0 RestoreEntity](https://github.com/home-assistant/core/blob/2026.10.0/homeassistant/helpers/restore_state.py) 在内部生命周期注册实体，正常关闭和周期性保存状态；此方案支持正常重启/重载，不保证异常断电前尚未落盘的最新值。
 - 色温 join 必须配合亮度；不允许模拟灯光与数字开关控制混用。light 的 `type` 标签不替代 join 能力检查。
 - cover 的 `current_cover_position` 优先真实位置，但 `is_closed` 另行优先独立关闭反馈、成对反馈，再参考位置；冲突时两属性可能不一致。
@@ -290,19 +292,23 @@ builder 单独调用时可能返回 None；用户入口先汇总错误，存在�
 
 `tests/test_list_ha_entities.py` 覆盖 OR/字面匹配、实时与注册实体合并、位置覆盖/继承、缺关联、名称优先级、中文/长 ID/颜色对齐、控制字符、TSV、密码不进入 SSH 参数、默认密钥规则、交互/EOF 和只读调用边界。已完成目标 HA 的只读查询验证；未部署、重启或控制设备。
 
-新增回归覆盖默认关键词、显式全部、重复设备名称移除、连续刷新和失败重试、分页参数及环境、完整 ID 与六列宽度、Ctrl+C 退出、缺少查看器和重定向不分页。本机具备 less/POSIX 时使用真实伪终端验证 q/Ctrl+C 及终端恢复；查询工具 21 项测试通过，复用公共解析/凭据函数的清理工具 17 项回归通过。
+新增回归覆盖默认关键词、显式全部、重复设备名称移除、连续刷新和失败重试、分页参数及环境、完整 ID 与六列宽度、Ctrl+C 退出、缺少查看器和重定向不分页。本机具备 less/POSIX 时使用真实伪终端验证 q/Ctrl+C 及终端恢复；查询工具已有独立回归；复用公共解析/凭据函数的清理工具另有单表/双表测试。
 
-### 已删除设备记录清理
+### 已删除设备与实体记录清理
 
-`tools/clear_deleted_devices.py` 通过公共 SSH 连接执行远端 POSIX shell，只处理 `/homeassistant/.storage/core.device_registry` 的 `data.deleted_devices`。复用实体查询工具的中文参数解析、密码环境隔离和颜色开关，无参数交互输入；`--dry-run` 仅查询数量和状态，默认写入前确认，`--yes` 显式跳过确认。空列表或字段不存在直接退出，不停止 Core；字段存在但不是数组则拒绝。
+`tools/clear_deleted_devices.py` 通过公共 SSH 连接执行远端 POSIX shell，`--target devices|entities|all` 选择设备/实体注册表的 `data.deleted_devices` / `data.deleted_entities`。默认 devices 保持原命令与 --yes 的清理范围；无参数询问连接后再选择范围。路径固定为 `/homeassistant/.storage/core.device_registry`、`core.entity_registry`，不接受任意文件路径。预览返回 target、总数、按固定顺序排列的各表 count/digest、Core state，Python 严格校验范围、整数总数、摘要及状态；空列表或缺少删除字段记为零，字段类型错误、缺少所选注册表或符号链接均拒绝。全空时不查 Core 状态、不停止或写入。
 
-停止状态不能从 HTTP 失败判断：当前现场 `ha core info` 没有 Core 状态字段，Supervisor 自身的 state 也不能代替。脚本使用 `ha core stats --raw-json`：成功的对象响应表示运行中；只有明确的 `Home Assistant is not running` 或 `homeassistant_not_running_error` 表示停止。依据 [Supervisor 2026.09.3 Core 实现](https://github.com/home-assistant/supervisor/blob/2026.09.3/supervisor/homeassistant/core.py) 和 [对应异常定义](https://github.com/home-assistant/supervisor/blob/2026.09.3/supervisor/exceptions.py)。查询超时、非 JSON、其他 API 错误一律拒绝修改。stats 限时 30 秒，stop/start 各 180 秒。
+停止状态使用 `ha core stats --raw-json`：成功对象响应表示运行中；只有明确的 `Home Assistant is not running` 或 `homeassistant_not_running_error` 表示停止。依据 [Supervisor 2026.09.3 Core 实现](https://github.com/home-assistant/supervisor/blob/2026.09.3/supervisor/homeassistant/core.py) 和 [异常定义](https://github.com/home-assistant/supervisor/blob/2026.09.3/supervisor/exceptions.py)。超时、非 JSON、其他 API 错误均拒绝修改，不能用 HTTP 失败判断停止；stats 限时 30 秒，stop/start 各 180 秒。
 
-确认后在同一远端进程内创建排他锁目录 `.crestron-device-cleanup.lock`，复查 Core 状态及已删除集合 SHA-256，再停止 Core。停止落盘后重新确认集合未变化；变化则退出、恢复原运行状态，要求重新预览。完整文件备份到服务器日期目录 `device-registry/core.device_registry`，核对 SHA-256 后才生成新文件。原文件复制到 `.storage` 同一文件系统的临时目录，保留权限/所有者，用 jq 清空目标数组，并比较整个 JSON 确认其他内容不变；复查停止状态和原文件哈希，再原子替换及回读校验。拒绝注册表符号链接。
+所有范围沿用 `.crestron-device-cleanup.lock` 排他锁，防止新旧脚本并发。确认后复查所有已删除集合 SHA-256 和 Core 状态，停止落盘后再复查。全部所选文件备份到同一服务器日期目录下的 `device-registry/core.device_registry`、`entity-registry/core.entity_registry`；验证完整文件哈希及备份中删除集合仍与确认内容一致。使用 `.storage/.device-cleanup.*/<devices|entities>/` 保存新文件、旧/新哈希、数量与写入标记，保留原权限及所有者，比较整个 JSON 确认仅目标数组改变。零记录的所选文件仍备份，但保留原字节，不补不存在的字段。
 
-EXIT/HUP/INT/TERM 处理在远端执行：校验失败且确认 Core 仍停止、文件仍是本次写入版本时恢复完整备份；有第三方变更或无法确认停止时不盲目覆盖，也不自动启动。写入提交成功后，启动失败保留清理结果和备份并报错。原本运行则恢复启动并通过 SSH 等待 HTTP 200/401；原本停止则保持停止。正常退出清理暂存目录及锁，备份保留。排他锁只约束本脚本，不能阻止外部管理员操作；SSH 断线、SIGKILL、断电仍可能留下锁或停止状态，需人工核查。
+全部备份及新文件校验成功后才开始逐表替换，每次复查 Core 已停止、文件非链接且原哈希一致。同文件系统 rename 对单文件原子，不提供跨文件原子事务。替换后校验哈希及整个 JSON，最后复查全部文件和 Core 状态才提交。失败的 EXIT/HUP/INT/TERM 处理先核对整个批次：被改文件须仍为本次旧/新版本，未改文件须仍为旧版本，备份须校验一致；确认 Core 停止后逐个恢复已修改文件。外部修改、状态未知或恢复失败时不盲目覆盖，不自动启动，报告备份位置。
 
-`tests/test_clear_deleted_devices.py` 在本机临时目录运行真实 shell/jq/文件操作，替换 HA 命令，覆盖正常清理、原本停止、空集合、停止失败/未停止、状态未知、备份失败、写后校验失败回滚、第三方修改、启动失败、确认后集合变化、锁冲突及符号链接；CLI 测试覆盖只读预览、取消、交互凭据和恢复等待边界。目标 HA 只运行过 `--dry-run`；正式停机清理尚未验证。
+清理已提交但启动失败时保留结果与备份并报错。原本运行则恢复启动并通过 SSH 等待 HTTP 200/401；原本停止则保持停止。正常退出移除暂存与锁，保留备份。锁不能阻止外部管理员；SSH 断线、SIGKILL、断电可能留下部分写入、锁或停止状态，需人工核查。
+
+该工具按类别清空全部已删除记录，不按集成过滤，不改变活跃实体 ID。HA 注册表可按 domain/platform/unique_id 从 deleted_entities 恢复旧 ID；仅清理 deleted_devices 无法阻止此行为。Crestron 的 YAML 导入仍存在时，重启会尝试重建集成；清理不保证新 ID 包含楼层/房间，依赖实际 HA 命名规则。清理脚本不直接调用设备控制服务。
+
+`tests/test_clear_deleted_devices.py` 执行本机真实 shell/jq/文件操作并替换 HA 命令，覆盖单表/双表、空字段、活跃数据与权限保留、同批次备份、第二表备份/写入/校验失败、跨文件恢复、外部修改保护、启动失败、陈旧确认、锁及符号链接；CLI 覆盖默认兼容、交互范围、参数、预览校验和恢复等待。双表流程尚未在真实 HA 停机执行。
 
 ### GitHub / 本地安装与更新
 

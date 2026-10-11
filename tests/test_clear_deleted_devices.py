@@ -32,6 +32,14 @@ class CleanupShellTests(unittest.TestCase):
         self.registry.write_text(json.dumps(self.original, ensure_ascii=False) + '\n')
         self.registry.chmod(0o640)
         self.before = self.registry.read_bytes()
+        self.entity_registry = self.ha / '.storage/core.entity_registry'
+        self.entity_original = {'key': 'core.entity_registry', 'version': 1,
+                                'data': {'entities': [{'entity_id': 'climate.example_active', 'unique_id': 'active'}],
+                                         'deleted_entities': [{'entity_id': 'climate.example_old', 'unique_id': 'old'}],
+                                         'settings': {'keep': True}}, 'future': 123}
+        self.entity_registry.write_text(json.dumps(self.entity_original) + '\n')
+        self.entity_registry.chmod(0o600)
+        self.entity_before = self.entity_registry.read_bytes()
         self.state = self.root / 'state'
         self.state.write_text('running')
         self.log = self.root / 'log'
@@ -86,13 +94,13 @@ else:
         return subprocess.run(['sh', '-c', script.replace('/homeassistant', str(self.ha))],
                               env=self.env, text=True, capture_output=True, timeout=15)
 
-    def preview(self):
-        result = self.shell(d.preview_script())
+    def preview(self, target='devices'):
+        result = self.shell(d.preview_script(target))
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def cleanup(self, mode='', preview=None):
-        preview = preview or self.preview()
+    def cleanup(self, mode='', preview=None, target='devices'):
+        preview = preview or self.preview(target)
         self.env['TEST_MODE'] = mode
         return self.shell(d.cleanup_script(preview))
 
@@ -252,10 +260,149 @@ sys.exit(result.returncode)
         self.assertNotEqual(self.shell(d.preview_script()).returncode, 0)
         self.assertEqual(target.read_bytes(), self.before)
 
+    def test_entities_only_preserves_device_registry(self):
+        preview = self.preview('entities')
+        self.assertEqual(preview['count'], 1)
+        result = self.cleanup(preview=preview)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.registry.read_bytes(), self.before)
+        expected = copy.deepcopy(self.entity_original)
+        expected['data']['deleted_entities'] = []
+        self.assertEqual(json.loads(self.entity_registry.read_text()), expected)
+        backups = list(self.ha.glob('crestron-backups/*/*/entity-registry/core.entity_registry'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.entity_before)
+        self.assertEqual(self.entity_registry.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.backups())
+
+    def test_all_preserves_active_records_and_backs_up_both_before_restarting_once(self):
+        preview = self.preview('all')
+        self.assertEqual(preview['count'], 3)
+        self.assertEqual([row['count'] for row in preview['registries']], [2, 1])
+        result = self.cleanup(preview=preview)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for file, original, field in [(self.registry, self.original, 'deleted_devices'),
+                                      (self.entity_registry, self.entity_original, 'deleted_entities')]:
+            expected = copy.deepcopy(original)
+            expected['data'][field] = []
+            self.assertEqual(json.loads(file.read_text()), expected)
+        entity_backup = next(self.ha.glob('crestron-backups/*/*/entity-registry/core.entity_registry'))
+        self.assertEqual(entity_backup.parent.parent, self.backups()[0].parent.parent)
+        self.assertEqual(entity_backup.read_bytes(), self.entity_before)
+        self.assertEqual([x for x in self.log.read_text().splitlines() if x != 'stats'], ['stop', 'start'])
+        self.assert_clean_temporary()
+
+    def test_all_with_empty_device_list_keeps_its_exact_bytes(self):
+        original = copy.deepcopy(self.original)
+        del original['data']['deleted_devices']
+        before = json.dumps(original).encode()
+        self.registry.write_bytes(before)
+        result = self.cleanup(target='all')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.assertEqual(self.backups()[0].read_bytes(), before)
+        self.assertEqual(json.loads(self.entity_registry.read_text())['data']['deleted_entities'], [])
+
+    def test_all_empty_skips_core_query(self):
+        for file, field in [(self.registry, 'deleted_devices'), (self.entity_registry, 'deleted_entities')]:
+            content = json.loads(file.read_text())
+            content['data'][field] = []
+            file.write_text(json.dumps(content))
+        preview = self.preview('all')
+        self.assertEqual((preview['count'], preview['state']), (0, 'unchecked'))
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.backups())
+
+    def test_second_backup_failure_changes_neither_file(self):
+        cp = shutil.which('cp')
+        self.program('cp', f'''import os, sys
+if '/entity-registry/' in sys.argv[-1]: sys.exit(1)
+os.execv({cp!r}, [{cp!r}, *sys.argv[1:]])
+''')
+        result = self.cleanup(target='all')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.registry.read_bytes(), self.before)
+        self.assertEqual(self.entity_registry.read_bytes(), self.entity_before)
+        self.assertEqual(self.state.read_text(), 'running')
+        self.assert_clean_temporary()
+
+    def test_second_write_failure_restores_first_file(self):
+        mv = shutil.which('mv')
+        self.program('mv', f'''import os, sys
+if sys.argv[-2].endswith('/entities/new'): sys.exit(1)
+os.execv({mv!r}, [{mv!r}, *sys.argv[1:]])
+''')
+        result = self.cleanup(target='all')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.registry.read_bytes(), self.before)
+        self.assertEqual(self.entity_registry.read_bytes(), self.entity_before)
+        self.assertEqual(self.state.read_text(), 'running')
+        self.assert_clean_temporary()
+
+    def test_second_validation_failure_restores_both_exact_files(self):
+        jq = shutil.which('jq')
+        self.program('jq', f'''import os, sys
+if '-s' in sys.argv and sys.argv[-1].endswith('/.storage/core.entity_registry'): sys.exit(1)
+os.execv({jq!r}, [{jq!r}, *sys.argv[1:]])
+''')
+        result = self.cleanup(target='all')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.registry.read_bytes(), self.before)
+        self.assertEqual(self.entity_registry.read_bytes(), self.entity_before)
+        self.assertEqual(self.state.read_text(), 'running')
+        self.assert_clean_temporary()
+
+    def test_external_change_to_second_file_stops_rollback_and_restart(self):
+        mv = shutil.which('mv')
+        self.program('mv', f'''import subprocess, sys
+from pathlib import Path
+result = subprocess.run([{mv!r}, *sys.argv[1:]])
+if result.returncode == 0 and sys.argv[-2].endswith('/entities/new'):
+    Path(sys.argv[-1]).write_text('{{"external": true}}')
+sys.exit(result.returncode)
+''')
+        result = self.cleanup(target='all')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(self.entity_registry.read_text()), {'external': True})
+        self.assertEqual(self.state.read_text(), 'stopped')
+        self.assertIn('无法安全自动恢复', result.stderr)
+        self.assertNotIn('start', self.log.read_text().splitlines())
+
+    def test_entity_collection_changed_after_confirmation_prevents_stop(self):
+        preview = self.preview('all')
+        content = copy.deepcopy(self.entity_original)
+        content['data']['deleted_entities'].append({'entity_id': 'climate.example_added'})
+        self.entity_registry.write_text(json.dumps(content))
+        result = self.cleanup(preview=preview)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('stop', self.log.read_text().splitlines())
+        self.assertEqual(self.registry.read_bytes(), self.before)
+
+    def test_invalid_unselected_registry_is_ignored_but_selected_registry_blocks_all(self):
+        self.entity_registry.write_text('{}')
+        self.assertEqual(self.preview()['count'], 2)
+        result = self.shell(d.preview_script('all'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.registry.read_bytes(), self.before)
+        self.assertFalse(self.backups())
+
+    def test_entity_symlink_is_rejected(self):
+        target = self.root / 'entity-copy'
+        target.write_bytes(self.entity_before)
+        self.entity_registry.unlink()
+        self.entity_registry.symlink_to(target)
+        result = self.shell(d.preview_script('all'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), self.entity_before)
+
+
 
 class CleanupCliTests(unittest.TestCase):
     def invoke(self, flags, state='running', count=2, accepted=True):
-        preview = dict(count=count, digest='a' * 64, state=state)
+        target = flags[flags.index('--target') + 1] if '--target' in flags else 'devices'
+        kinds = d.targets(target)
+        preview = dict(target=target, count=count * len(kinds), state=state if count else 'unchecked',
+                       registries=[dict(target=kind, count=count, digest='a' * 64) for kind in kinds])
         with patch.object(d.common, 'Connection') as connection, \
              patch.object(d.common, 'core_url', return_value='http://ha:80') as url, \
              patch.object(d.common, 'wait_for_http') as wait, \
@@ -283,12 +430,40 @@ class CleanupCliTests(unittest.TestCase):
 
     def test_interactive_password_and_default_key(self):
         for password in ('secret', ''):
-            replies = ['ha', '', '', *([] if password else [''])]
+            replies = ['ha', '', '', *([] if password else ['']), '']
             with patch('builtins.input', side_effect=replies), patch.object(d.getpass, 'getpass', return_value=password):
                 args = d.parse_args([])
             self.assertEqual((args.host, args.user, args.port), ('ha', 'root', 22))
             self.assertEqual(args.password, password)
             self.assertIsNone(args.identity)
+            self.assertEqual(args.target, 'devices')
+
+    def test_cli_scope_selects_only_requested_registry_and_all_is_explicit(self):
+        for target in ('devices', 'entities', 'all'):
+            result, remote, _, _, _ = self.invoke(['--yes', '--target', target])
+            self.assertEqual(result, 0)
+            script = remote.call_args_list[0].args[0]
+            self.assertIn("target=" + target, script)
+        self.assertEqual(d.parse_args(['--host', 'ha']).target, 'devices')
+
+    def test_interactive_selects_all_and_retries_invalid_input(self):
+        with patch('builtins.input', side_effect=['ha', '', '', 'bad', '3']), \
+             patch.object(d.getpass, 'getpass', return_value='password'), patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(d.parse_args([]).target, 'all')
+
+    def test_malformed_or_incomplete_preview_is_rejected(self):
+        valid = dict(target='all', count=2, state='running', registries=[
+            dict(target=kind, count=1, digest='a' * 64) for kind in ('devices', 'entities')])
+        d.validate_preview(valid, 'all')
+        for mutate in [lambda p: p.update(count=True), lambda p: p.update(count=1),
+                       lambda p: p['registries'].pop(), lambda p: p['registries'][1].update(digest='bad'),
+                       lambda p: p['registries'][1].update(target='devices'), lambda p: p.update(state='unchecked')]:
+            value = copy.deepcopy(valid)
+            mutate(value)
+            with self.assertRaises(d.common.DeployError):
+                d.cleanup_script(value)
+        with self.assertRaises(d.common.DeployError):
+            d.validate_preview(valid, 'devices')
 
 
 if __name__ == '__main__':
