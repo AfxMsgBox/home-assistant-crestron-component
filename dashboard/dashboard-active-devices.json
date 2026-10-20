@@ -1,0 +1,27 @@
+{
+  "dashboard": {
+    "url_path": "dashboard-active-devices",
+    "title": "已开启设备",
+    "icon": "mdi:power-plug",
+    "show_in_sidebar": true,
+    "require_admin": false
+  },
+  "config": {
+    "title": "已开启设备",
+    "views": [
+      {
+        "title": "已开启设备",
+        "path": "overview",
+        "type": "sections",
+        "max_columns": 3,
+        "sections": []
+      }
+    ]
+  },
+  "generator": {
+    "type": "active_devices"
+  },
+  "resources": [
+    "resources/active-devices-card.js"
+  ]
+}

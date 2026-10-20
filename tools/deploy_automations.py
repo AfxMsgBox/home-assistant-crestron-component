@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""部署第二阶段：读取 HA 注册信息、展示关联、生成并按用户选择上传自动化。"""
+"""读取 HA 注册信息、展示关联、生成并按用户选择上传自动化。"""
 
 import argparse
 import hashlib
@@ -242,7 +242,7 @@ def main(argv=None):
         raise generator.AssociationError('注册表导出路径不能覆盖输入或自动化文件')
     api = Api(command, args.ha_url)
     deadline = time.monotonic() + args.wait_seconds
-    common.heading('第二步：生成并部署自动化关联')
+    common.heading('生成并部署自动化关联')
     common.details([('工作簿', args.xlsx), ('自动化输出', args.output)])
     common.message('正在读取 HA 注册表并等待关联实体完成注册/加载...', 'step')
     while True:
@@ -272,7 +272,7 @@ def main(argv=None):
         common.message('已保留本地生成文件，跳过服务器自动化修改。')
         return 0
     if not args.backup_dir:
-        # 独立第二步在确认上传后才创建备份；完整流程复用第一步的目录。
+        # 独立运行在确认上传后才创建备份；完整流程复用设备部署的目录。
         args.backup_dir = common.create_backup(command)
     upload(command, args.backup_dir, content, old_config, old_manual, new_config,
            content_mtime=Path(args.output).stat().st_mtime)

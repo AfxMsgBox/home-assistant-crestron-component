@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""第一步：设备生成、组件及仪表盘部署、配置检查与 Core 重启。"""
+"""设备生成、组件部署、配置检查与 Core 重启。"""
 
 import argparse
 import json
@@ -13,68 +13,36 @@ import deploy_common as common
 
 
 def deploy(args):
-    common.heading('第一步：部署组件和设备配置' if not args.dashboard_only else '部署仪表盘')
+    common.heading('部署组件和设备配置')
     root = Path(args.source_root)
     component = root / 'custom_components/crestron'
     converter = root / 'tools/xlsx_to_yaml.py'
     for file in (component / 'manifest.json', converter):
         if not file.is_file():
             raise common.DeployError(f'所选源码缺少 {file}')
-    dashboards = Path(args.dashboard_dir) if args.dashboard_dir else root / 'dashboard'
-    dashboard_tool = root / 'tools/deploy_dashboards.mjs'
-    if not dashboards.is_dir() and not args.dashboard_dir and not args.dashboard_only:
-        common.message('所选源码不包含 dashboard，跳过页面部署。', 'warning')
-        args.skip_dashboard = True
-    if not args.skip_dashboard:
-        if not dashboards.is_dir() or not dashboard_tool.is_file():
-            raise common.DeployError('所选源码不包含 dashboard 或页面部署工具')
-        common.require('node')
-        common.run(['node', '-e', 'if (Number(process.versions.node.split(".")[0]) < 22 || typeof WebSocket !== "function") process.exit(1)'],
-                   message='页面部署需要 Node.js 22 或更新版本')
-        common.run(['node', str(dashboard_tool), '--dir', str(dashboards), '--check',
-                    '--remote-backup-dir', '/homeassistant/crestron-backups'],
-                   message='页面校验失败或所选分支的页面工具不支持服务器备份')
     if args.generate_yaml:
         if not args.xlsx or not Path(args.xlsx).is_file():
             raise common.DeployError('必须提供存在的 xlsx 文件')
         Path(args.yaml).parent.mkdir(parents=True, exist_ok=True)
         common.message(f'正在生成 YAML：{args.yaml}', 'step')
         common.run([sys.executable, str(converter), args.xlsx, args.yaml], message='设备 YAML 生成失败')
-    if args.dashboard_only:
-        args.upload_yaml = False
-    elif args.upload_yaml is None:
+    if args.upload_yaml is None:
         args.upload_yaml = common.ask_yes_no(f'是否上传 {args.yaml} 到目标 HA 服务器（存在则覆盖）？', default=True)
     if args.upload_yaml and not Path(args.yaml).is_file():
         raise common.DeployError(f'要上传的 YAML 不存在：{args.yaml}')
-    if not args.dashboard_only:
-        common.require('scp')
+    common.require('scp')
     connection = common.Connection(args)
     common.details([('目标服务器', connection.target), ('设备配置', args.yaml),
                     ('上传设备', '是（存在则覆盖）' if args.upload_yaml else '否')])
     connection.check()
-    if args.update and not args.dashboard_only:
+    if args.update:
         connection.remote("test -f '/homeassistant/custom_components/crestron/manifest.json'",
                           message='目标尚未安装 Crestron，请使用 --install')
-    url = '' if args.dashboard_only else common.core_url(connection, args.ha_url)
+    url = common.core_url(connection, args.ha_url)
     if args.require_automations:
         connection.remote('command -v jq >/dev/null 2>&1', message='自动化关联需要服务器 jq')
     backup = common.create_backup(connection.ssh, connection.env)
 
-    def deploy_dashboards():
-        if args.skip_dashboard:
-            common.message('已跳过仪表盘部署。')
-            return
-        options = ['node', str(dashboard_tool), '--dir', str(dashboards),
-                   '--remote-backup-dir', backup + '/dashboard', '--host', args.host,
-                   '--wait-seconds', str(args.restart_timeout)]
-        if args.ha_url:
-            options += ['--ha-url', args.ha_url]
-        common.run([*options, '--', *connection.ssh], env=connection.env, message='仪表盘部署失败')
-
-    if args.dashboard_only:
-        deploy_dashboards()
-        common.message('页面部署完成，无需重启 Home Assistant。', 'success')
-        return 0
     # 本机只准备运行组件；独立 YAML 和缓存不随组件复制。
     staging_parent = Path(args.result_file).parent if args.result_file else None
     with tempfile.TemporaryDirectory(prefix='crestron-devices-', dir=staging_parent) as temp:
@@ -94,7 +62,8 @@ else
     echo "首次安装，无旧组件需要备份。"
 fi'''
         connection.remote(script, message='组件备份失败，尚未覆盖组件')
-        connection.remote("mkdir -p -- '/homeassistant/custom_components'")
+        # HA 启动时才注册 /local 路由；完整安装在本次重启前准备好 www。
+        connection.remote("mkdir -p -- '/homeassistant/custom_components' '/homeassistant/www'")
         common.message('正在上传组件', 'step')
         common.details([('本地目录', component), ('目标位置', connection.target + ':/homeassistant/custom_components/crestron/')])
         common.local_files(sorted(p for p in staged.rglob('*') if p.is_file()), base=staged)
@@ -116,10 +85,8 @@ fi'''
     common.message('正在重启 Home Assistant 服务...', 'step')
     connection.remote('ha core restart', message='Home Assistant 服务重启失败')
     common.wait_for_http(connection, url, args.restart_timeout)
-    # 新设备需先注册，动态页面才能使用实际的实体 ID 和位置。
-    deploy_dashboards()
     if args.result_file:
-        # 仅在第一步成功后交给第二步；不包含密码或令牌。
+        # 仅在设备部署成功后交给后续步骤；不包含密码或令牌。
         Path(args.result_file).write_text(json.dumps({'backup_dir': backup, 'ha_url': url}), encoding='utf-8')
     common.message('设备部署完成，HA HTTP 接口已恢复。', 'success')
     return 0
@@ -140,17 +107,12 @@ def main(argv=None):
     upload.add_argument('--upload-yaml', action='store_true', default=None)
     upload.add_argument('--skip-upload-yaml', action='store_false', dest='upload_yaml')
     parser.add_argument('--update', action='store_true')
-    parser.add_argument('--dashboard-dir')
-    parser.add_argument('--skip-dashboard', action='store_true')
-    parser.add_argument('--dashboard-only', action='store_true')
     parser.add_argument('--require-automations', action='store_true')
     parser.add_argument('--restart-timeout', type=int, default=120)
     parser.add_argument('--result-file')
     args = parser.parse_args(argv)
     if not 1 <= args.restart_timeout <= 9999:
         parser.error('--restart-timeout 必须在 1..9999 之间')
-    if args.dashboard_only and (args.skip_dashboard or args.generate_yaml or args.upload_yaml):
-        parser.error('--dashboard-only 不能与生成、上传 YAML 或跳过页面同用')
     return deploy(args)
 
 

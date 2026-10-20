@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 单文件启动器：准备 GitHub/本地源码，依次调用设备和自动化部署工具。
+# 单文件启动器：准备 GitHub/本地源码，依次调用设备、仪表盘和自动化部署工具。
 
 set -Eeuo pipefail
 
@@ -123,14 +123,14 @@ YAML 选项：
 自动化关联选项：
   --generate-automations      设备生效后，读取 Excel 和 HA 注册表重新生成自动化
   --skip-generate-automations 跳过自动化关联生成/部署
-  --devices-only              仅执行第一步，不询问/部署自动化
-  --automations-only          仅执行第二步，不上传组件或设备配置，不重启 HA
+  --devices-only              仅部署组件/设备，不部署页面或自动化
+  --automations-only          仅部署自动化，不上传组件或设备配置，不重启 HA
   --automation-yaml FILE      自动化输出路径（默认与设备 YAML 同目录）
   --upload-automations        确认上传并覆盖服务器自动化；默认生成后询问
   --skip-upload-automations   仅生成本地自动化，不上传
 
 仪表盘选项：
-  --dashboard-only            仅部署页面，不上传组件/YAML、不检查配置或重启 HA 服务
+  --dashboard-only            仅部署页面；常规更新不重启，首次初始化 www 时会询问
   --skip-dashboard            跳过页面部署（仅部署组件/YAML）
   --dashboard-dir DIR         覆盖所选源码中的 dashboard/，使用指定本地目录
   --ha-url URL                HA 网页地址（默认通过 ha core info 获取端口）
@@ -140,17 +140,19 @@ YAML 选项：
 
 不带参数时先选择来源：1. 本地目录（默认），2. GitHub。
 本地目录由脚本所在 tools/ 的上一级推断；单独下载此 Shell 即可从 GitHub 部署。
-没有本地项目时自动选择 GitHub；完整源码下载并检查后才运行两个 Python 部署步骤。
+没有本地项目时自动选择 GitHub；完整源码下载并检查后才运行三个 Python 部署工具。
 选择 GitHub 后分页读取全部分支，按编号选择（有 master 时默认 master，否则第一项）。
 再询问服务器地址、用户名和密码，密码留空使用 SSH 密钥。
 未指定选项时分别询问是否重新生成设备文件、自动化关联；回车默认 Yes，输入结束则跳过。
-第二步在设备重启生效后读取注册表，输出可读关联清单，确认上传后备份、检查并重载自动化。
+自动化工具在设备重启生效后读取注册表，输出可读关联清单，确认上传后备份、检查并重载自动化。
 GitHub 模式下载所选分支最新提交；local 模式复制当前工作区，包含未提交和新增源码，
 排除 .git、local/、虚拟环境、缓存、.env 文件和 crestron.yaml；无需 git。
 仅上传运行所需组件和选定的设备 YAML；源码、工具、文档和测试不在服务器存档。
 组件与仪表盘备份保存在服务器 /homeassistant/crestron-backups/日期/时间-随机编号/。
 重启后通过 SSH 在服务器端用 curl 检查 HTTP API，服务器需安装 curl。
 空调页面在实体加载后按实际楼层、房间生成，仓库只保存通用模板。
+已开启设备页面覆盖各集成的主要耗电设备，按楼层/房间/类型排列，状态实时筛选。
+该页面不包含窗帘/传感器，提供全屋关空调/关灯按钮；新增设备或位置变更会自动更新。
 示例命令中的 HA_HOST 请替换为实际服务器地址。
 组件、转换器、自动化模板及工具、页面工具均来自所选源码。默认部署其中 dashboard/ 下所有 JSON 页面。
 已有页面可选 y（覆盖）、n（跳过）、All yes（全部覆盖）、All no（全部跳过）；
@@ -352,6 +354,8 @@ fi
     || die "--restart-timeout 必须为 1..9999 的整数"
 
 if [[ "${DEVICES_ONLY}" == true ]]; then
+    [[ "${DASHBOARD_ONLY}" == false ]] || die "--devices-only 不能与 --dashboard-only 同用"
+    SKIP_DASHBOARD=true
     [[ "${AUTOMATIONS_ONLY}" == false && "${GENERATE_AUTOMATIONS}" != yes ]] \
         || die "--devices-only 不能与自动化部署选项同用"
     GENERATE_AUTOMATIONS=no
@@ -492,12 +496,13 @@ PY
 
 prepare_source_paths() {
     DEVICE_DEPLOYER="${SOURCE_ROOT}/tools/deploy_devices.py"
+    DASHBOARD_DEPLOYER="${SOURCE_ROOT}/tools/deploy_dashboards.py"
     AUTOMATION_GENERATOR="${SOURCE_ROOT}/tools/xlsx_to_automations.py"
     AUTOMATION_DEPLOYER="${SOURCE_ROOT}/tools/deploy_automations.py"
     AUTOMATION_TEMPLATE="${SOURCE_ROOT}/automations_manual_template.yaml"
     [[ -f "${SOURCE_ROOT}/tools/deploy_common.py" ]] \
         || die "所选源码缺少 tools/deploy_common.py；请先将新版部署工具发布到所选分支"
-    if [[ "${AUTOMATIONS_ONLY}" == false ]]; then
+    if [[ "${AUTOMATIONS_ONLY}" == false && "${DASHBOARD_ONLY}" == false ]]; then
         [[ -f "${DEVICE_DEPLOYER}" ]] \
             || die "所选源码缺少 tools/deploy_devices.py；请先将新版部署工具发布到所选分支"
     fi
@@ -624,7 +629,7 @@ command -v python3 >/dev/null 2>&1 || die "准备源码需要 python3"
 STAGE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/crestron-ha-deploy.XXXXXX")
 # Python 独立入口仅增加步骤参数，也保留来源/连接的交互体验。
 INTERACTIVE=false
-if (( ORIGINAL_ARGC == 0 )) || { (( ORIGINAL_ARGC == 1 )) && [[ "${DEVICES_ONLY}" == true || "${AUTOMATIONS_ONLY}" == true ]]; }; then
+if (( ORIGINAL_ARGC == 0 )) || { (( ORIGINAL_ARGC == 1 )) && [[ "${DEVICES_ONLY}" == true || "${AUTOMATIONS_ONLY}" == true || "${DASHBOARD_ONLY}" == true ]]; }; then
     INTERACTIVE=true
     select_source
 elif [[ "${LOCAL_PROJECT}" == false && "${SOURCE_WAS_SET}" == false && "${BRANCH_WAS_SET}" == false ]]; then
@@ -725,6 +730,23 @@ if [[ "${UPLOAD_YAML}" == "yes" && "${GENERATE_YAML}" != yes ]]; then
     [[ -f "${YAML_PATH}" ]] || die "要上传的 YAML 不存在：${YAML_PATH}"
 fi
 
+# 页面预检由独立子工具完成，在任何服务器写入之前执行。
+if [[ "${SKIP_DASHBOARD}" == false ]]; then
+    if [[ "${DASHBOARD_DIR_WAS_SET}" == false ]]; then
+        DASHBOARD_DIR="${SOURCE_ROOT}/dashboard"
+        if [[ ! -d "${DASHBOARD_DIR}" && "${DASHBOARD_ONLY}" == false ]]; then
+            ui_log warning '所选源码不包含 dashboard，跳过页面部署。'
+            SKIP_DASHBOARD=true
+        fi
+    fi
+    if [[ "${SKIP_DASHBOARD}" == false ]]; then
+        [[ -f "${DASHBOARD_DEPLOYER}" ]] || die "所选源码缺少 tools/deploy_dashboards.py"
+        DASHBOARD_OPTIONS=(--prepared --source-root "${SOURCE_ROOT}" --dashboard-dir "${DASHBOARD_DIR}"
+            --restart-timeout "${RESTART_TIMEOUT}")
+        python3 -B "${DASHBOARD_DEPLOYER}" "${DASHBOARD_OPTIONS[@]}" --host "${HOST}" --check
+    fi
+fi
+
 # 密码仅经子进程环境传递，不进入命令行或阶段结果文件。
 export HA_SSH_PASSWORD="${PASSWORD}"
 CONNECTION=(--host "${HOST}" --user "${SSH_USER}" --port "${SSH_PORT}")
@@ -736,7 +758,7 @@ ui_heading '部署概览'
 printf '       源码来源 : %s\n       部署编号 : %s\n       目标主机 : %s\n       登录用户 : %s\n' \
     "${SOURCE_LABEL}" "${SOURCE_ID}" "${HOST}" "${SSH_USER}"
 
-if [[ "${AUTOMATIONS_ONLY}" == false ]]; then
+if [[ "${AUTOMATIONS_ONLY}" == false && "${DASHBOARD_ONLY}" == false ]]; then
     DEVICE_OPTIONS=(--prepared "${CONNECTION[@]}" --source-root "${SOURCE_ROOT}"
         --yaml "${YAML_PATH}" --restart-timeout "${RESTART_TIMEOUT}" --result-file "${RESULT_FILE}")
     [[ "${MODE}" != update ]] || DEVICE_OPTIONS+=(--update)
@@ -744,11 +766,12 @@ if [[ "${AUTOMATIONS_ONLY}" == false ]]; then
     [[ "${GENERATE_YAML}" != yes ]] || DEVICE_OPTIONS+=(--generate-yaml)
     [[ "${UPLOAD_YAML}" != yes ]] || DEVICE_OPTIONS+=(--upload-yaml)
     [[ "${UPLOAD_YAML}" != no ]] || DEVICE_OPTIONS+=(--skip-upload-yaml)
-    [[ "${SKIP_DASHBOARD}" != true ]] || DEVICE_OPTIONS+=(--skip-dashboard)
-    [[ "${DASHBOARD_ONLY}" != true ]] || DEVICE_OPTIONS+=(--dashboard-only)
-    [[ "${DASHBOARD_DIR_WAS_SET}" != true ]] || DEVICE_OPTIONS+=(--dashboard-dir "${DASHBOARD_DIR}")
     [[ "${GENERATE_AUTOMATIONS}" != yes ]] || DEVICE_OPTIONS+=(--require-automations)
     python3 -B "${DEVICE_DEPLOYER}" "${DEVICE_OPTIONS[@]}"
+fi
+if [[ "${SKIP_DASHBOARD}" == false ]]; then
+    [[ ! -f "${RESULT_FILE}" ]] || DASHBOARD_OPTIONS+=(--context "${RESULT_FILE}")
+    python3 -B "${DASHBOARD_DEPLOYER}" "${DASHBOARD_OPTIONS[@]}" "${CONNECTION[@]}"
 fi
 if [[ "${GENERATE_AUTOMATIONS}" == yes ]]; then
     AUTOMATION_OPTIONS=(--prepared "${CONNECTION[@]}" --xlsx "${XLSX_PATH}"
@@ -757,6 +780,6 @@ if [[ "${GENERATE_AUTOMATIONS}" == yes ]]; then
     [[ ! -f "${RESULT_FILE}" ]] || AUTOMATION_OPTIONS+=(--context "${RESULT_FILE}")
     python3 -B "${AUTOMATION_DEPLOYER}" "${AUTOMATION_OPTIONS[@]}"
 else
-    ui_log info '已跳过第二步：自动化关联生成。'
+    ui_log info '已跳过自动化关联生成。'
 fi
 ui_log success "部署完成：${SOURCE_LABEL} / ${SOURCE_ID}。"

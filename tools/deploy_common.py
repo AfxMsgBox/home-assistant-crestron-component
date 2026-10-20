@@ -1,4 +1,4 @@
-"""两步部署共用的启动、SSH、服务器备份和 HTTP 恢复检查。仅使用标准库。"""
+"""部署工具共用的启动、SSH、服务器备份和 HTTP 恢复检查。仅使用标准库。"""
 
 import json
 from datetime import datetime, timezone
@@ -91,7 +91,8 @@ def launch(stage, argv):
     script = Path(__file__).with_name('deploy_to_ha.sh')
     if not script.is_file():
         raise DeployError('缺少 deploy_to_ha.sh，请下载完整源码，或单独运行该 Shell 启动器')
-    option = '--devices-only' if stage == 'devices' else '--automations-only'
+    option = {'devices': '--devices-only', 'dashboards': '--dashboard-only',
+              'automations': '--automations-only'}[stage]
     # 不使用 exec：让最外层 Shell 的 EXIT 清理始终有机会执行。
     return subprocess.call(['bash', str(script), option, *argv])
 

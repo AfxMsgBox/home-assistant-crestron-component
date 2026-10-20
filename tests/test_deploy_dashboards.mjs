@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup, buildClimateDashboard, climateSnapshot, terminalUi } from '../tools/deploy_dashboards.mjs';
+import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup, buildClimateDashboard, climateSnapshot, terminalUi, buildActiveDevicesDashboard, remoteResource, deployResources } from '../tools/deploy_dashboards.mjs';
+import { activeRows, groupRows, turnOffActive, RegistryWatch, ActiveDevicesCard } from '../dashboard/resources/active-devices-card.js';
 
 test('deployment UI aligns Chinese labels and respects TTY and NO_COLOR', () => {
   const original = { term: process.env.TERM, noColor: process.env.NO_COLOR };
@@ -253,7 +254,107 @@ test('recursive JSON discovery rejects duplicate URLs and malformed files before
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-const climateTemplate = () => loadDashboards(fileURLToPath(new URL('../dashboard', import.meta.url)))[0];
+const climateTemplate = () => loadDashboards(fileURLToPath(new URL('../dashboard', import.meta.url))).find(item => item.generator?.type === 'climate');
+const activeTemplate = () => loadDashboards(fileURLToPath(new URL('../dashboard', import.meta.url))).find(item => item.generator?.type === 'active_devices');
+
+function powerData() {
+  const data = climateData();
+  data.entities = [{ entity_id: 'light.lamp', platform: 'crestron', device_id: 'd' },
+    { entity_id: 'climate.unit', platform: 'another_brand', device_id: 'd', area_id: 'b' },
+    { entity_id: 'switch.plug', platform: 'third_brand', area_id: 'a' },
+    { entity_id: 'switch.setting', entity_category: 'config' },
+    { entity_id: 'light.hidden', hidden_by: 'user' },
+    { entity_id: 'fan.disabled', disabled_by: 'integration' }];
+  data.states = [
+    ['light.lamp', 'off'], ['climate.unit', 'heat'], ['switch.plug', 'on'],
+    ['fan.unregistered', 'on'], ['media_player.tv', 'paused'], ['humidifier.unit', 'on'],
+    ['water_heater.tank', 'eco'], ['vacuum.robot', 'cleaning'],
+    ['cover.curtain', 'open'], ['binary_sensor.presence', 'on'], ['sensor.power', '50'],
+    ['automation.rule', 'on'], ['input_boolean.virtual', 'on'],
+    ['switch.setting', 'on'], ['light.hidden', 'on'], ['fan.disabled', 'on'],
+  ].map(([entity_id, state]) => ({ entity_id, state, attributes: { friendly_name: entity_id, ...(entity_id === 'switch.plug' ? { device_class: 'outlet' } : {}) } }));
+  return data;
+}
+
+const stateMap = data => Object.fromEntries(data.states.map(state => [state.entity_id, state]));
+
+test('live card spans integrations, inherits position, excludes inactive and non-power entities', () => {
+  const data = powerData(), rows = activeRows(stateMap(data), data);
+  assert.deepEqual(rows.map(row => row.id), ['switch.plug', 'climate.unit', 'fan.unregistered']);
+  assert.equal(rows.find(row => row.id === 'climate.unit').area.area_id, 'b');
+  assert.deepEqual([...groupRows(rows).values()].map(row => row.name), ['示例一层', '示例二层', '未分配楼层']);
+});
+
+test('new entities, off feedback, renames and moved rooms update without deployment', () => {
+  const data = powerData(), states = stateMap(data);
+  states['light.new'] = { entity_id: 'light.new', state: 'on', attributes: { friendly_name: '新灯' } };
+  assert(activeRows(states, data).some(row => row.id === 'light.new'));
+  data.entities.push({ entity_id: 'light.new', area_id: 'a', name: '改名后的灯' });
+  assert.equal(activeRows(states, data).find(row => row.id === 'light.new').floor.floor_id, 'lower');
+  data.areas[0].floor_id = 'upper';
+  assert.equal(activeRows(states, data).find(row => row.id === 'light.new').floor.floor_id, 'upper');
+  assert.equal(activeRows(states, data).find(row => row.id === 'light.new').name, '改名后的灯');
+  for (const state of ['off', 'unknown', 'unavailable']) {
+    states['light.new'].state = state;
+    assert(!activeRows(states, data).some(row => row.id === 'light.new'));
+  }
+  delete states['light.new'];
+  assert(!activeRows(states, data).some(row => row.id === 'light.new'));
+  assert.equal(groupRows(activeRows({}, data)).size, 0);
+});
+
+test('bulk close reads current targets and never sends empty, brightness or cooling commands', async () => {
+  const data = powerData(), calls = [], hass = { states: stateMap(data),
+    callService: async (...args) => calls.push(args) };
+  assert.equal(await turnOffActive(hass, data, 'light'), 0);
+  assert.equal(calls.length, 0);
+  hass.states['light.lamp'].state = 'on';
+  assert.equal(await turnOffActive(hass, data, 'light'), 1);
+  assert.equal(await turnOffActive(hass, data, 'climate'), 1);
+  assert.deepEqual(calls, [['light', 'turn_off', {}, { entity_id: ['light.lamp'] }],
+    ['climate', 'turn_off', {}, { entity_id: ['climate.unit'] }]]);
+  hass.callService = async () => { throw new Error('禁止操作'); };
+  await assert.rejects(turnOffActive(hass, data, 'light'), /禁止操作/);
+  await assert.rejects(turnOffActive(hass, null, 'light'), /尚未加载/);
+  await assert.rejects(turnOffActive(hass, data, 'switch'), /不支持/);
+  hass.connection = { connected: false };
+  await assert.rejects(turnOffActive(hass, data, 'light'), /断开/);
+});
+
+test('same named locations stay separate, names sort naturally, and empty groups disappear', () => {
+  const data = powerData();
+  data.floors[0].name = data.floors[1].name;
+  data.areas[1].name = data.areas[0].name;
+  data.entities.push({ entity_id: 'light.second', area_id: 'a' });
+  data.states.push({ entity_id: 'light.second', state: 'on', attributes: { friendly_name: '灯2' } });
+  data.states[0].attributes.friendly_name = '灯10'; data.states[0].state = 'on';
+  const rows = activeRows(stateMap(data), data);
+  assert.equal(groupRows(rows).size, 3);
+  assert.deepEqual(rows.filter(row => row.domain === 'light').map(row => row.name), ['灯2', '灯10']);
+});
+
+test('active deployment stores only generic card config and skipped page installs no assets', async () => {
+  const f = fixture([]), doc = activeTemplate(), installed = [];
+  await deployDashboards([doc], f.api, async () => true, f.backup, () => {}, 120,
+    async items => installed.push(...items));
+  assert.deepEqual(f.configs.get(doc.dashboard.url_path), buildActiveDevicesDashboard(doc));
+  assert.equal(installed[0].resources[0].name, 'active-devices-card.js');
+  assert.equal(f.events.some(e => /call_service|registry|get_states/.test(e.type)), false);
+  const skipped = fixture(['dashboard-active-devices']);
+  await deployDashboards([doc], skipped.api, async () => false, skipped.backup, () => {}, 120,
+    async items => assert.equal(items.length, 0));
+  assert.equal(writes(skipped).length, 0);
+});
+
+test('active template rejects embedded device data and extra generator keys', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'crestron-active-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { file, ...doc } = activeTemplate();
+  doc.generator.entities = ['light.private'];
+  writeFileSync(join(dir, 'page.json'), JSON.stringify(doc));
+  assert.throws(() => loadDashboards(dir), /仅接受 type/);
+});
+
 function climateData() {
   return {
     floors: [{ floor_id: 'upper', name: '示例二层', level: 2 }, { floor_id: 'lower', name: '示例一层', level: 1 }],
@@ -402,4 +503,223 @@ test('WebSocket bad auth and timed-out command fail cleanly', async () => {
   await assert.rejects(api.call('get_panels'), /超时/);
   assert.equal(api.pending.size, 0);
   api.close();
+});
+
+function registryFixture() {
+  const data = powerData(), events = new Map(), listeners = new Map();
+  let reads = 0, stopped = 0, interval, cancelled = false;
+  const connection = {
+    connected: true,
+    subscribeEvents: async (callback, name) => { events.set(name, callback); return () => { stopped++; }; },
+    addEventListener: (name, cb) => listeners.set(name, cb),
+    removeEventListener: name => listeners.delete(name),
+    sendMessagePromise: async ({ type }) => {
+      reads++;
+      return { entity: data.entities, device: data.devices, area: data.areas, floor: data.floors }[type.split('/')[1].split('_')[0]];
+    },
+  };
+  const changes = [];
+  const watcher = new RegistryWatch(connection, (registry, error) => changes.push({ registry, error }),
+    cb => { interval = cb; return 42; }, id => { assert.equal(id, 42); cancelled = true; });
+  return { data, events, listeners, connection, changes, watcher, interval: () => interval(),
+    get reads() { return reads; }, get stopped() { return stopped; }, get cancelled() { return cancelled; } };
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('registry events, periodic checks and reconnect update metadata and release subscriptions', async () => {
+  const f = registryFixture();
+  await f.watcher.start();
+  assert.equal(f.reads, 4); assert.equal(f.events.size, 4);
+  f.data.areas[0].name = '新房间';
+  f.events.get('area_registry_updated')(); await tick();
+  assert.equal(f.changes.at(-1).registry.areas[0].name, '新房间');
+  f.connection.connected = false;
+  f.listeners.get('disconnected')();
+  assert.equal(f.changes.at(-1).registry, null);
+  f.connection.connected = true;
+  f.listeners.get('ready')(); await tick();
+  assert(f.changes.at(-1).registry);
+  await f.interval();
+  assert.equal(f.reads, 16);
+  f.watcher.stop(); await tick();
+  assert.equal(f.stopped, 4); assert.equal(f.cancelled, true); assert.equal(f.listeners.size, 0);
+  await f.watcher.refresh(); assert.equal(f.reads, 16);
+});
+
+test('failed registry reads disable actions until recovery; late responses do not update detached card', async () => {
+  const f = registryFixture(), send = f.connection.sendMessagePromise;
+  f.connection.sendMessagePromise = async () => { throw new Error('offline'); };
+  await f.watcher.start();
+  assert.equal(f.changes.at(-1).registry, null); assert.match(f.changes.at(-1).error, /无法读取/);
+  f.connection.sendMessagePromise = send;
+  await f.interval(); assert(f.changes.at(-1).registry);
+  let resolveRead;
+  f.connection.sendMessagePromise = () => new Promise(resolve => { resolveRead = resolve; });
+  // 四个在途响应共享一个 Promise，断开后不能写回数据。
+  const pending = new Promise(resolve => { resolveRead = resolve; });
+  f.connection.sendMessagePromise = () => pending;
+  const read = f.watcher.refresh(), count = f.changes.length;
+  f.watcher.stop(); resolveRead([]); await read;
+  assert.equal(f.changes.length, count);
+});
+
+test('registry events during a refresh trigger a second read and suppress stale metadata', async () => {
+  const f = registryFixture(), send = f.connection.sendMessagePromise;
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  let calls = 0;
+  f.connection.sendMessagePromise = msg => ++calls <= 4 ? pending : send(msg);
+  const starting = f.watcher.start(); await tick();
+  f.events.get('entity_registry_updated')();
+  finish([]); await starting;
+  assert.equal(calls, 8); assert.equal(f.changes.length, 1);
+  assert(f.changes[0].registry.entities.length > 0);
+  f.watcher.stop();
+});
+
+function resourceFixture() {
+  const f = fixture([]), call = f.api.call, resources = [];
+  f.api.call = async (type, args = {}) => {
+    if (type === 'get_config') return { state: 'RUNNING' };
+    if (type === 'lovelace/info') return { resource_mode: 'storage' };
+    if (type === 'lovelace/resources') return structuredClone(resources);
+    if (type === 'lovelace/resources/create') {
+      f.events.push({ type });
+      resources.push({ id: 'resource-one', url: args.url, type: args.res_type }); return;
+    }
+    if (type === 'lovelace/resources/update') {
+      f.events.push({ type });
+      const old = resources.find(row => row.id === args.resource_id);
+      assert(old); Object.assign(old, { url: args.url, type: args.res_type }); return;
+    }
+    return call(type, args);
+  };
+  return { ...f, resources };
+}
+
+test('resource deploy backs up registry and old file, uploads once, registers module with content hash', async t => {
+  const remote = remoteFixture(t), f = resourceFixture(), doc = activeTemplate();
+  const resource = doc.resources[0], local = join(remote.root, 'www/crestron', resource.name);
+  mkdirSync(join(remote.root, 'www/crestron'), { recursive: true });
+  writeFileSync(local, 'old module');
+  f.resources.push({ id: 'old-id', url: '/local/crestron/active-devices-card.js?v=old', type: 'module' });
+  await deployResources([doc, doc], f.api, remote.backup,
+    remoteResource([process.execPath, remote.ssh, remote.root], remote.directory), () => {});
+  assert.equal(readFileSync(join(remote.local, 'resources', resource.name), 'utf8'), 'old module');
+  assert.deepEqual(readFileSync(local), resource.content);
+  assert.equal(statSync(local).mode & 0o777, 0o644);
+  assert.equal(f.resources.length, 1);
+  assert.equal(f.resources[0].url, resource.url);
+  assert.equal(f.resources[0].id, 'old-id');
+  assert.match(f.resources[0].url, /\?v=[a-f0-9]{64}$/);
+  const backup = JSON.parse(readFileSync(join(remote.local, 'card-resources.json')));
+  assert.equal(backup.resources[0].url, '/local/crestron/active-devices-card.js?v=old');
+  assert.equal(f.events.filter(e => e.type === 'lovelace/resources/update').length, 1);
+  assert.equal(readdirSync(join(remote.root, 'www/crestron')).length, 1);
+});
+
+test('resource upload failure or YAML resource mode stops before any page save', async () => {
+  const doc = activeTemplate(), f = resourceFixture();
+  await assert.rejects(deployDashboards([doc], f.api, async () => true, f.backup, () => {}, 120,
+    items => deployResources(items, f.api, f.backup, async () => { throw new Error('disk full'); })), /disk full/);
+  assert.equal(writes(f).length, 0);
+  const call = f.api.call;
+  f.api.call = (type, args) => type === 'lovelace/info' ? { resource_mode: 'yaml' } : call(type, args);
+  await assert.rejects(deployResources([doc], f.api, f.backup, async () => assert.fail('must not upload')), /存储模式/);
+});
+
+test('unchanged module reuses registration, while resource backup failure prevents upload', async () => {
+  const f = resourceFixture(), doc = activeTemplate(), resource = doc.resources[0];
+  f.resources.push({ id: 'r', type: 'module', url: resource.url });
+  let uploads = 0;
+  await deployResources([doc], f.api, f.backup, async () => { uploads++; }, () => {});
+  assert.equal(uploads, 1); assert.equal(writes(f).length, 0);
+  await assert.rejects(deployResources([doc], f.api, async () => { throw new Error('backup failed'); },
+    async () => assert.fail('must not upload')), /backup failed/);
+});
+
+test('resource source rejects traversal, absent assets and malformed lists before SSH', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'card-source-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const resources of [['../secret.js'], ['/root/private.js'], ['resources/missing.js'], 'bad']) {
+    writeFileSync(join(dir, 'page.json'), JSON.stringify({ ...item('page-one'), resources }));
+    assert.throws(() => loadDashboards(dir));
+  }
+});
+
+test('active state rules only include lights, climates, outlets and fans', () => {
+  for (const [domain, on, off] of [
+    ['climate', ['heat', 'cool', 'auto', 'heat_cool', 'dry', 'fan_only'], ['off', 'unknown', 'unavailable']],
+    ['light', ['on'], ['off', 'unknown', 'unavailable']],
+    ['fan', ['on'], ['off', 'unknown', 'unavailable']],
+    ['switch', [], ['on', 'off']],
+    ['media_player', [], ['on', 'playing', 'paused']],
+    ['water_heater', [], ['eco', 'on']],
+    ['humidifier', [], ['on']],
+    ['vacuum', [], ['on', 'cleaning', 'returning']],
+  ]) {
+    const id = `${domain}.test`, data = { entities: [], devices: [], floors: [], areas: [] };
+    for (const state of on) assert.equal(activeRows({ [id]: { entity_id: id, state } }, data).length, 1);
+    for (const state of off) assert.equal(activeRows({ [id]: { entity_id: id, state } }, data).length, 0);
+  }
+});
+
+test('concurrent page edit prevents even resource upload', async () => {
+  const doc = activeTemplate(), f = resourceFixture();
+  f.dashboards.push({ ...doc.dashboard, mode: 'storage' });
+  f.configs.set(doc.dashboard.url_path, oldConfig);
+  await assert.rejects(deployDashboards([doc], f.api, async () => {
+    f.configs.set(doc.dashboard.url_path, { views: [{ title: '用户刚修改的配置' }] }); return true;
+  }, f.backup, () => {}, 120, async () => assert.fail('must not upload resources')), /发生变化/);
+});
+
+// 轻量 DOM 替身检查用户交互，不代替真实浏览器的主题和移动端布局验证。
+test('card renders safe names, opens more-info and reports service failure without hiding a device', async () => {
+  class Element {
+    constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = nodes; }
+    setAttribute(key, value) { this[key] = value; }
+    querySelectorAll(tag) { return this.children.flatMap(child => [
+      ...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag),
+    ]); }
+    focus() {}
+  }
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new Element(tag) };
+  try {
+    const data = powerData(), state = stateMap(data);
+    state['light.lamp'].state = 'on';
+    state['light.lamp'].attributes.friendly_name = '<img src=x onerror=alert(1)>';
+    const card = new ActiveDevicesCard(), root = new Element('root');
+    card.isConnected = true; card.shadowRoot = root; card.registry = data;
+    card._hass = { states: state, callService: async () => { throw new Error('拒绝请求'); } };
+    card.render();
+    const row = root.querySelectorAll('button').find(node => node.dataset.key === 'light.lamp');
+    assert.equal(row.children[1].textContent, '<img src=x onerror=alert(1)>');
+    assert.equal(root.querySelectorAll('img').length, 0);
+    let event;
+    card.dispatchEvent = value => { event = value; };
+    row.onclick(); assert.equal(event.type, 'hass-more-info'); assert.equal(event.detail.entityId, 'light.lamp');
+    await card.closeDomain('light');
+    assert.match(card.actionMessage, /拒绝请求/);
+    assert(root.querySelectorAll('button').some(node => node.dataset.key === 'light.lamp'));
+    assert.equal(card.busy, '');
+  } finally { globalThis.document = previous; }
+});
+
+// 未填写 entity_category 的功能开关也必须排除，不能靠名称猜测插座。
+test('outlets require explicit device class, while robot feature switches stay excluded', () => {
+  const data = { entities: [], devices: [], areas: [], floors: [] };
+  const states = Object.fromEntries([
+    ['switch.outlet', 'outlet', 'on'], ['switch.off_outlet', 'outlet', 'off'],
+    ['switch.robot_feature', undefined, 'on'], ['switch.named_plug', 'switch', 'on'],
+    ['switch.unknown_outlet', 'outlet', 'unavailable'],
+  ].map(([entity_id, device_class, state]) => [entity_id, { entity_id, state,
+    attributes: { device_class, friendly_name: '插座' } }]));
+  assert.deepEqual(activeRows(states, data).map(row => row.id), ['switch.outlet']);
+  states['switch.new_outlet'] = { entity_id: 'switch.new_outlet', state: 'on', attributes: { device_class: 'outlet' } };
+  assert.equal(activeRows(states, data).length, 2);
+  data.entities.push({ entity_id: 'switch.new_outlet', entity_category: 'config' });
+  assert.equal(activeRows(states, data).length, 1);
 });

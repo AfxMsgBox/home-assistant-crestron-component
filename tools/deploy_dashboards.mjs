@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // 部署 HA 原生仪表盘，需要 Node.js 22+，无需安装 npm 依赖。
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve, relative } from 'node:path';
+import { readFileSync, readdirSync, statSync, realpathSync } from 'node:fs';
+import { join, resolve, relative, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { createInterface } from 'node:readline';
+import { createHash } from 'node:crypto';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fail = message => { throw new Error(message); };
@@ -63,9 +64,10 @@ export function loadDashboards(directory) {
     let doc;
     try { doc = JSON.parse(readFileSync(file, 'utf8')); }
     catch { fail(`${file}：无法读取有效 JSON`); }
-    if (!object(doc) || Object.keys(doc).some(k => !['dashboard', 'config', 'generator'].includes(k))) fail(`${file}：只允许 dashboard、config、generator 顶层字段`);
+    if (!object(doc) || Object.keys(doc).some(k => !['dashboard', 'config', 'generator', 'resources'].includes(k))) fail(`${file}：只允许 dashboard、config、generator、resources 顶层字段`);
     const d = doc.dashboard;
     if (!object(d) || !/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(d.url_path)) fail(`${file}：dashboard.url_path 必须为含连字符的小写地址`);
+    if (d.url_path === 'card-resources') fail(`${file}：card-resources 为资源备份保留名称`);
     if (Object.keys(d).some(k => !['url_path', 'title', 'icon', 'show_in_sidebar', 'require_admin'].includes(k))) fail(`${file}：未知 dashboard 字段`);
     if (typeof d.title !== 'string' || !d.title.trim()) fail(`${file}：缺少 dashboard.title`);
     if (d.icon !== undefined && (typeof d.icon !== 'string' || !d.icon.startsWith('mdi:'))) fail(`${file}：icon 应为 mdi: 图标`);
@@ -75,14 +77,32 @@ export function loadDashboards(directory) {
     if (!object(doc.config) || !Array.isArray(doc.config.views) || !doc.config.views.length || !doc.config.views.every(object)) fail(`${file}：config.views 必须是非空视图列表`);
     if (doc.generator !== undefined) {
       const g = doc.generator;
-      if (!object(g) || g.type !== 'climate' || Object.keys(g).some(k => !['type', 'card'].includes(k)) || !object(g.card) || g.card.type !== 'tile') fail(`${file}：generator 必须指定 climate 类型和 tile 卡片模板`);
-      if (doc.config.views.length !== 1 || doc.config.views[0].type !== 'sections' || !Array.isArray(doc.config.views[0].sections) || doc.config.views[0].sections.length) fail(`${file}：动态空调页面须包含一个 sections 视图，sections 留空`);
-      if (g.card.entity !== undefined || g.card.name !== undefined || g.card.icon_tap_action !== undefined) fail(`${file}：卡片实体、名称和电源动作由目标 HA 自动生成，请勿写入模板`);
-      if (g.card.features !== undefined && (!Array.isArray(g.card.features) || !g.card.features.every(object))) fail(`${file}：卡片 features 必须是对象列表`);
+      if (!object(g) || !['climate', 'active_devices'].includes(g.type)) fail(`${file}：generator 类型须为 climate 或 active_devices`);
+      if (doc.config.views.length !== 1 || doc.config.views[0].type !== 'sections' || !Array.isArray(doc.config.views[0].sections) || doc.config.views[0].sections.length) fail(`${file}：动态页面须包含一个 sections 视图，sections 留空`);
+      if (g.type === 'climate') {
+        if (Object.keys(g).some(k => !['type', 'card'].includes(k)) || !object(g.card) || g.card.type !== 'tile') fail(`${file}：climate 需要 tile 卡片模板`);
+        if (g.card.entity !== undefined || g.card.name !== undefined || g.card.icon_tap_action !== undefined) fail(`${file}：卡片实体、名称和电源动作由目标 HA 自动生成，请勿写入模板`);
+        if (g.card.features !== undefined && (!Array.isArray(g.card.features) || !g.card.features.every(object))) fail(`${file}：卡片 features 必须是对象列表`);
+      } else if (Object.keys(g).some(k => k !== 'type')) {
+        fail(`${file}：active_devices 仅接受 type，设备和分组由目标 HA 自动生成`);
+      }
     }
+    if (doc.resources !== undefined && !Array.isArray(doc.resources)) fail(`${file}：resources 必须为文件路径列表`);
+    const resources = (doc.resources || []).map(path => {
+      if (typeof path !== 'string' || !/^resources\/[a-z0-9-]+\.js$/.test(path)) fail(`${file}：资源必须是 resources/ 下的小写 JS 文件`);
+      const source = resolve(directory, path);
+      if (!realpathSync(source).startsWith(realpathSync(directory) + '/')) fail(`${file}：资源路径越界`);
+      try { execFileSync(process.execPath, ['--check', source], { stdio: 'pipe', timeout: 15000 }); }
+      catch { fail(`${file}：卡片 JavaScript 语法检查失败：${path}`); }
+      const content = readFileSync(source);
+      const hash = createHash('sha256').update(content).digest('hex');
+      return { file: source, name: basename(source), hash, content,
+        url: `/local/crestron/${basename(source)}?v=${hash}` };
+    });
+    if (doc.generator?.type === 'active_devices' && !resources.some(r => r.name === 'active-devices-card.js')) fail(`${file}：已开启设备页面缺少卡片资源`);
     if (urls.has(d.url_path)) fail(`${file}：重复 url_path ${d.url_path}`);
     urls.add(d.url_path);
-    return { file, dashboard: { show_in_sidebar: true, require_admin: false, ...d }, config: doc.config,
+    return { file, dashboard: { show_in_sidebar: true, require_admin: false, ...d }, config: doc.config, resources,
       ...(doc.generator === undefined ? {} : { generator: doc.generator }) };
   });
 }
@@ -91,7 +111,7 @@ const isClimate = row => typeof row.entity_id === 'string' && row.entity_id.star
 const visible = row => !row.disabled_by && !row.hidden_by;
 
 // 等待启动及实体加载完成；接口失败直接报错，不能把缺失数据当成空页面覆盖。
-export async function climateSnapshot(api, log = console.log, waitSeconds = 120,
+async function entitySnapshot(api, matches, label, log = console.log, waitSeconds = 120,
   pause = ms => new Promise(resolvePause => setTimeout(resolvePause, ms)), now = Date.now) {
   const deadline = now() + waitSeconds * 1000;
   for (;;) {
@@ -104,14 +124,24 @@ export async function climateSnapshot(api, log = console.log, waitSeconds = 120,
         'config/area_registry/list', 'config/floor_registry/list', 'get_states',
       ].map(type => api.call(type)));
       if (![entities, devices, areas, floors, states].every(Array.isArray)) fail('HA 返回的注册表或状态列表无效');
-      const loaded = new Set(states.filter(isClimate).map(row => row.entity_id));
-      missing = entities.filter(row => isClimate(row) && visible(row) && !loaded.has(row.entity_id));
+      const loaded = new Set(states.filter(matches).map(row => row.entity_id));
+      missing = entities.filter(row => matches(row) && visible(row) && !loaded.has(row.entity_id));
       if (!missing.length) return { entities, devices, areas, floors, states };
     }
-    if (now() >= deadline) fail(`等待空调实体超时${missing.length ? `，仍有 ${missing.length} 个未加载` : '，HA 尚未完成启动'}；页面未修改`);
-    log(`等待 HA 完成启动及空调实体加载${missing.length ? `（剩余 ${missing.length} 个）` : ''}...`);
+    if (now() >= deadline) fail(`等待${label}实体超时${missing.length ? `，仍有 ${missing.length} 个未加载` : '，HA 尚未完成启动'}；页面未修改`);
+    log(`等待 HA 完成启动及${label}实体加载${missing.length ? `（剩余 ${missing.length} 个）` : ''}...`);
     await pause(2000);
   }
+}
+
+export const climateSnapshot = (api, ...args) => entitySnapshot(api, isClimate, '空调', ...args);
+// 卡片直接读取浏览器当前 HA 连接，不把现场实体清单固化在页面内。
+export function buildActiveDevicesDashboard(item) {
+  const config = structuredClone(item.config);
+  config.views[0].sections = [{ type: 'grid', column_span: 3, cards: [
+    { type: 'custom:crestron-active-devices', grid_options: { columns: 'full', rows: 'auto' } },
+  ] }];
+  return config;
 }
 
 // 只生成配置，不调用设备服务；现场名称和实体 ID 仅保留在内存与 HA 中。
@@ -239,7 +269,9 @@ async function readConfig(api, url) {
   catch (err) { if (err instanceof HaError && err.code === 'config_not_found') return null; throw err; }
 }
 
-export async function deployDashboards(items, api, ask, backup, log = console.log, waitSeconds = 120) {
+export async function deployDashboards(items, api, ask, backup, log = console.log, waitSeconds = 120, installResources = async items => {
+  if (items.some(item => item.resources?.length)) fail('缺少卡片资源部署器');
+}) {
   const dashboards = await api.call('lovelace/dashboards/list');
   const panels = await api.call('get_panels');
   const planned = [];
@@ -258,22 +290,33 @@ export async function deployDashboards(items, api, ask, backup, log = console.lo
     selected.push(plan);
   }
   // 全部动态页面生成成功后才开始备份/写入；跳过的页面不读取设备数据。
-  const dynamic = selected.filter(plan => plan.item.generator);
-  if (dynamic.length) {
+  const climates = selected.filter(plan => plan.item.generator?.type === 'climate');
+  if (climates.length) {
     const snapshot = await climateSnapshot(api, log, waitSeconds);
-    for (const plan of dynamic) {
+    for (const plan of climates) {
       plan.item = { ...plan.item, config: buildClimateDashboard(plan.item, snapshot) };
-      const sections = plan.item.config.views[0].sections;
-      log(`已生成空调页面：${sections.length} 个楼层分区，${sections.reduce((n, s) => n + s.cards.length - 1, 0)} 张卡片`);
+      log(`已生成空调页面：${plan.item.config.views[0].sections.length} 个楼层分区`);
     }
   }
-  let created = 0, overwritten = 0;
-  for (const { item, old, previous } of selected) {
+  for (const plan of selected.filter(plan => plan.item.generator?.type === 'active_devices')) {
+    plan.item = { ...plan.item, config: buildActiveDevicesDashboard(plan.item) };
+    log('已准备实时设备页面：新增设备、状态和位置由浏览器自动更新');
+  }
+  async function assertUnchanged({ item, old, previous }) {
     const url = item.dashboard.url_path;
     // 用户确认期间可能编辑页面，写入前再次检查，避免覆盖刚发生的修改。
     const latest = (await api.call('lovelace/dashboards/list')).find(d => d.url_path === url);
     if (!isDeepStrictEqual(latest, old) || (old && !isDeepStrictEqual(await readConfig(api, url), previous))) fail(`${url} 在确认期间发生变化，停止部署，请重新检查`);
     if (!old && (await api.call('get_panels'))[url]) fail(`${url} 已被其他页面占用`);
+  }
+  // 资源也属于覆盖内容，用户等待期间的页面修改必须在资源写入前检查。
+  for (const plan of selected) await assertUnchanged(plan);
+  await installResources(selected.map(plan => plan.item));
+  let created = 0, overwritten = 0;
+  for (const plan of selected) {
+    const { item, old, previous } = plan;
+    const url = item.dashboard.url_path;
+    await assertUnchanged(plan);
     const backupPath = await backup(url, { dashboard: old || null, config: previous });
     log(`备份：${backupPath}`);
     if (!old) await api.call('lovelace/dashboards/create', item.dashboard);
@@ -329,6 +372,81 @@ ln "$partial" '${file}'
     } catch { fail(`无法保存服务器备份：${file}，已停止该页面写入；请检查 SSH、磁盘空间和权限`); }
     return file;
   };
+}
+
+// 只允许写项目专用资源目录；旧文件和资源注册信息随本次页面一并备份。
+export function remoteResource(command, directory) {
+  remoteBackup(command, directory); // 复用连接及备份路径校验。
+  return async resource => {
+    if (!/^[a-z0-9-]+\.js$/.test(resource.name)
+      || !/^[a-f0-9]{64}$/.test(resource.hash)
+      || createHash('sha256').update(resource.content).digest('hex') !== resource.hash) fail('卡片资源无效');
+    const target = `/homeassistant/www/crestron/${resource.name}`;
+    const script = `set -eu
+umask 077
+for path in /homeassistant/www /homeassistant/www/crestron '${target}' '${directory}/resources'; do
+    test ! -L "$path" || { echo '资源路径不能是符号链接' >&2; exit 1; }
+done
+mkdir -p '${directory}/resources'
+mkdir -p /homeassistant/www/crestron
+chmod 755 /homeassistant/www/crestron
+test ! -e '${directory}/resources/${resource.name}'
+test ! -e '${directory}/resources/${resource.name}.absent'
+if test -e '${target}'; then
+    test -f '${target}'
+    cp -p '${target}' '${directory}/resources/${resource.name}'
+else
+    touch '${directory}/resources/${resource.name}.absent'
+fi
+partial=$(mktemp /homeassistant/www/crestron/.upload.XXXXXX)
+trap 'rm -f -- "$partial"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$partial"
+actual=$(sha256sum "$partial")
+test "\${actual%% *}" = '${resource.hash}'
+chmod 644 "$partial"
+mv "$partial" '${target}'
+`;
+    try {
+      execFileSync(command[0], [...command.slice(1), script], {
+        input: resource.content, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch { fail(`卡片上传失败：${resource.name}；请检查服务器权限、空间和备份 ${directory}`); }
+  };
+}
+
+export async function deployResources(items, api, backup, upload, log = console.log) {
+  const resources = new Map();
+  for (const item of items) for (const resource of item.resources || []) {
+    const previous = resources.get(resource.name);
+    if (previous && previous.hash !== resource.hash) fail(`资源名称冲突：${resource.name}`);
+    resources.set(resource.name, resource);
+  }
+  if (!resources.size) return;
+  const config = await api.call('get_config');
+  if (config.safe_mode || config.recovery_mode) fail('HA 处于安全/恢复模式，不能部署卡片资源');
+  if ((await api.call('lovelace/info')).resource_mode !== 'storage') fail('卡片自动部署需要 HA 使用存储模式管理仪表盘资源，请先在 HA 中调整资源配置');
+  const previous = await api.call('lovelace/resources');
+  const plans = [...resources.values()].map(resource => {
+    const path = resource.url.split('?')[0];
+    const matches = previous.filter(row => row.url.split('?')[0] === path);
+    if (matches.length > 1) fail(`HA 中重复注册了资源 ${path}，请先整理`);
+    return { resource, old: matches[0] };
+  });
+  await backup('card-resources', { resources: previous });
+  for (const { resource, old } of plans) {
+    const latest = (await api.call('lovelace/resources')).filter(row => row.url.split('?')[0] === resource.url.split('?')[0]);
+    if (!isDeepStrictEqual(latest, old ? [old] : [])) fail('资源注册在部署期间发生变化，已停止');
+    await upload(resource);
+    if (!old || old.url !== resource.url || old.type !== 'module') {
+      await api.call(`lovelace/resources/${old ? 'update' : 'create'}`, {
+        ...(old ? { resource_id: old.id } : {}), url: resource.url, res_type: 'module',
+      });
+    }
+    const readback = (await api.call('lovelace/resources')).filter(row => row.url.split('?')[0] === resource.url.split('?')[0]);
+    if (readback.length !== 1 || readback[0].url !== resource.url || readback[0].type !== 'module') fail('资源注册回读不一致，请核对 HA 和本次备份');
+    log(`卡片已上传并注册：${resource.name}`);
+  }
 }
 
 async function authenticate(options, command) {
@@ -401,7 +519,28 @@ export async function main(argv) {
       return result.done ? null : result.value;
     }, text => ui.log(text, 'warning'));
     const result = await deployDashboards(items, api, ask, backup,
-      text => ui.log(text, /^(已覆盖|已创建)/u.test(text) ? 'success' : 'info'), waitSeconds);
+      text => ui.log(text, /^(已覆盖|已创建)/u.test(text) ? 'success' : 'info'), waitSeconds,
+      selected => {
+        const resources = [...new Map(selected.flatMap(item => (item.resources || []).map(r => [r.file, r]))).values()];
+        if (resources.length) {
+          ui.log('准备上传卡片资源');
+          ui.table(['文件', '大小', '最后修改时间（UTC）'], resources.map(resource => {
+            const stat = statSync(resource.file);
+            return [resource.name, `${stat.size.toLocaleString('en-US')} B`,
+              stat.mtime.toISOString().slice(0, 19).replace('T', ' ')];
+          }), [1]);
+        }
+        return deployResources(selected, api, backup, async resource => {
+          await remoteResource(command, options.backup)(resource);
+          const response = await fetch(new URL(resource.url, auth.url), {
+            signal: AbortSignal.timeout(15000), cache: 'no-store', redirect: 'error',
+          });
+          const content = Buffer.from(await response.arrayBuffer());
+          if (!response.ok || createHash('sha256').update(content).digest('hex') !== resource.hash) {
+            fail('卡片已上传但 /local 访问校验失败，页面未保存；请检查 HA 静态资源路由，首次创建 www 后可能需要重启 Core');
+          }
+        }, text => ui.log(text));
+      });
     ui.log('仪表盘部署完成', 'success');
     ui.details([['新建', result.created], ['覆盖', result.overwritten], ['跳过', result.skipped]]);
   } finally { input?.close(); api.close(); }

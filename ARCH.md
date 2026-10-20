@@ -46,15 +46,18 @@ custom_components/crestron/
 tools/
   xlsx_to_yaml.py   标准库 Excel 解析、校验、设备 YAML 生成
   xlsx_to_automations.py  独立自动化关联生成、注册表匹配、中文报告
-  deploy_automations.py   第二阶段 SSH 注册信息读取、备份、部署及重载
-  deploy_to_ha.sh   单文件启动器、来源下载/快照、交互参数、两步编排
-  deploy_devices.py      第一步设备生成、SSH/SCP 上传、页面、Core 检查及重启
+  deploy_automations.py   自动化 SSH 注册信息读取、备份、部署及重载
+  deploy_to_ha.sh   单文件启动器、来源下载/快照、交互参数、三工具编排
+  deploy_devices.py      设备生成、SSH/SCP 上传、Core 检查及重启
+  deploy_dashboards.py   独立页面入口、资源预检、连接与备份上下文
   deploy_common.py       Python 入口复用启动器、SSH 参数、日期备份、HTTP 探测
   list_ha_entities.py    只读实体检索、设备位置解析、彩色中文对齐表格/TSV
   clear_deleted_devices.py 停止 Core、备份并清空已删除设备/实体记录、恢复运行状态
-  deploy_dashboards.mjs  JSON 校验、覆盖交互、HA WebSocket 页面部署
+  deploy_dashboards.mjs  模板/资源校验、覆盖交互、HA WebSocket 页面与资源部署
+  test_ha_light.py       单灯现场观察（实际开关设备）
+docs/EXCEL.md      工作簿详细填写规则；tools/README.md 为简明工具用法
 tests/             unittest；HA 替身和本地 TCP 测试
-dashboard/         受 Git 管理的完整仪表盘 JSON（元信息与 config）
+dashboard/         通用仪表盘 JSON 模板及 resources/ 自定义实时卡片
 sample.xlsx        四类设备示例
 automations_manual_template.yaml  开关双向同步、人在控制的自动化源模板
 local/             被 Git 忽略的现场表格及生成配置
@@ -340,7 +343,7 @@ builder 单独调用时可能返回 None；用户入口先汇总错误，存在�
 
 ### GitHub / 本地安装与更新
 
-`deploy_to_ha.sh` 由本地 Bash 编排，`--install` 为默认模式，`--update` 要求远端组件已有 manifest，默认不上传设备 YAML；设备生成和自动化生成独立询问，回车/EOF 都为否，显式参数覆盖交互。来源默认 local，显式 --source local 与 --branch 互斥；仅指定 --branch 隐含 github，GitHub 默认分支 master，不读取本地 Git 分支。
+`deploy_to_ha.sh` 由本地 Bash 编排，`--install` 为默认模式，`--update` 要求远端组件已有 manifest，默认不上传设备 YAML；设备生成和自动化生成独立询问，回车默认 Yes，EOF 为否，显式参数覆盖交互。来源默认 local，显式 --source local 与 --branch 互斥；仅指定 --branch 隐含 github，GitHub 默认分支 master，不读取本地 Git 分支。
 
 无参数先显示“1. 本地目录（默认）、2. GitHub”，本地根目录由脚本位置 tools/.. 推断，再询问连接参数。入口可单独下载，无须相邻 Python 文件：不存在本地项目 manifest 时，交互运行直接列 GitHub 分支；带参数且未指定来源/分支时转为 github/master，显式 local 缺源码则报错。独立启动的持久输入/输出目录为 Shell 所在目录/local，而不是脚本上一级或临时源码目录。选 GitHub 时调用 `/repos/<owner>/<repo>/branches?per_page=100&page=N`，逐页读到少于 100 项，显示全部分支供编号选择；有 master 时默认 master，否则第一项。空列表、请求/解析失败或输入结束时停止，不静默选择其他来源。显式命令行模式不读取分支列表。
 
@@ -348,9 +351,9 @@ GitHub 来源通过 curl 调用 GitHub Git refs API，将分支解析为 40 位�
 
 本地来源以 `SCRIPT_DIR/..` 为项目根，不要求 Git 仓库，不使用调用者的工作目录；校验必需文件后，以 Python 递归复制当前目录内容到临时快照，因此包含未提交修改和新增文件。按名称排除 `.git`、`local`、`__pycache__`、`.mypy_cache`、`.pytest_cache`、`.ruff_cache`、`.venv`、`venv`、`node_modules`、`.env`、`.env.*`、`crestron.yaml` 和 `.pyc/.pyo` 文件，不解释 `.gitignore`；未排除的链接和特殊文件直接拒绝。临时目录即使位于项目内也不复制自身。副本完成后使用该副本部署；复制期间应避免同时修改源码，复制不是文件系统原子快照。本地快照编号为 UTC 时间加随机 UUID 片段，不伪装成 Git 提交。
 
-组件、Excel 转换器、两个 Python 部署工具、deploy_common.py、自动化模板及页面工具均指向所选源码的临时副本。Shell 自身只负责源码准备、交互及调用两步工具，不再次执行下载的同名脚本；缺失公共模块或所需步骤工具时在连接 HA 前报错，不回退本地代码。项目模式中，用户 Excel、生成 YAML 仍定位到项目 `local/`；页面备份通过 SSH 写入 HA 服务器；`--dashboard-dir` 可显式使用本地页面。全部模式均需 curl/Python，页面模式另需 Node 22+。源码不存在 dashboard 时，完整部署提示跳过；仅页面模式报错。
+组件、Excel 转换器、三个 Python 部署工具、deploy_common.py、自动化模板及页面工具均指向所选源码的临时副本。Shell 自身只负责源码准备、交互及调用三个子工具，不再次执行下载的同名脚本；缺失公共模块或所需步骤工具时在连接 HA 前报错，不回退本地代码。项目模式中，用户 Excel、生成 YAML 仍定位到项目 `local/`；页面备份通过 SSH 写入 HA 服务器；`--dashboard-dir` 可显式使用本地页面。全部模式均需 curl/Python，页面模式另需 Node 22+。源码不存在 dashboard 时，完整部署提示跳过；仅页面模式报错。
 
-完整部署顺序：下载 GitHub 源码或复制本地源码并校验 → 校验页面及远端备份参数支持 → 按选项生成/检查本地 YAML → SSH 连接与更新前置检查 → 确定恢复探测地址并检查远端 curl → 创建服务器日期备份目录 → 压缩并校验旧组件备份 → 上传清除 crestron.yaml/pyc 缓存后的组件与可选设备 YAML → `ha core check` → `ha core restart` → HTTP API 恢复探测 → 等待实体加载、动态生成页面 → 页面备份与部署 → 可选自动化第二阶段。不上传整份源码、工具、文档、测试或示例配置，不创建新的 `crestron-source` 存档。下载、解压、组件副本和阶段结果只放本机 `STAGE_ROOT`，通过 EXIT trap 清理，INT/TERM 转为退出；强制杀死进程或断电仍可能留下本机临时目录。
+完整部署顺序：下载 GitHub 源码或复制本地源码并校验 → 校验页面及远端备份参数支持 → 按选项生成/检查本地 YAML → SSH 连接与更新前置检查 → 确定恢复探测地址并检查远端 curl → 创建服务器日期备份目录 → 压缩并校验旧组件备份 → 上传清除 crestron.yaml/pyc 缓存后的组件与可选设备 YAML → `ha core check` → `ha core restart` → HTTP API 恢复探测 → 等待实体加载、动态生成页面 → 页面备份与部署 → 可选自动化关联。不上传整份源码、工具、文档、测试或示例配置，不创建新的 `crestron-source` 存档。下载、解压、组件副本和阶段结果只放本机 `STAGE_ROOT`，通过 EXIT trap 清理，INT/TERM 转为退出；强制杀死进程或断电仍可能留下本机临时目录。
 
 组件使用传统 SCP（`-O`），上传具名的 `crestron` 目录至组件父目录，不使用被 SCP 拒绝的 `目录/.`。远端仅保留正式运行文件和备份。`deploy_common.create_backup()` 使用服务器 `date` 一次取出日期和时间，以 `mktemp -d` 创建 `/homeassistant/crestron-backups/YYYY-MM-DD/HHMMSS-随机编号/`，同一次部署只创建一次，权限受 `umask 077` 保护，并校验返回路径后再拼入后续命令。
 
@@ -358,35 +361,40 @@ GitHub 来源通过 curl 调用 GitHub Git refs API，将分支解析为 40 位�
 
 只重启 Core 服务，不执行主机重启。使用 `ha core info --raw-json` 的端口/SSL 和 SSH 目标主机，或 HA_URL/`--ha-url` 得到 `/api/` 地址。上传前确认远端有 curl；重启后通过 SSH 在服务器端执行 curl，不使用部署电脑的 HTTP 代理。自定义 URL 必须能从服务器访问；用 Python `shlex.quote` 引用 URL，兼容远端 POSIX shell，保留 TLS 证书验证。每轮 curl 限时 5 秒、间隔 2 秒，SSH 沿用连接超时并设置 `ServerAliveInterval=5`、`ServerAliveCountMax=1`。只有 SSH/curl 退出码为 0 且 HTTP 为 200/401 才视为恢复。显示地址、等待时长、状态和失败详情；默认等待 120 秒，`--restart-timeout` 可调，实际退出可能多一个包含 SSH 连接的探测周期。该检查不证明 HA 完全启动、Crestron 连接成功或实体可用。
 
-失败会阻止后续步骤；组件配置检查失败不重启，页面运行时生成/部署失败发生在 Core 重启之后，组件已生效，但不会进入自动化第二阶段。组件采用覆盖复制，不清理上游已删除文件。已有组件备份与页面逐项备份，但没有跨组件/页面事务或自动回滚；历史源码存档与备份目录也不自动清理。`--dashboard-only` 准备源码后提前分支，只备份和部署页面，不生成/上传 YAML 或检查/重启 Core；`--skip-dashboard` 不要求 Node.js。
+失败会阻止后续步骤；组件配置检查失败不重启，页面运行时生成/部署失败发生在 Core 重启之后，组件已生效，但不会进入自动化阶段。组件采用覆盖复制，不清理上游已删除文件。已有组件备份与页面逐项备份，但没有跨组件/页面事务或自动回滚；历史源码存档与备份目录也不自动清理。`--dashboard-only` 准备源码后提前分支，只备份和部署页面，不生成/上传 YAML；首次缺少 www 时按用户确认初始化并重启 Core，常规页面更新不重启；`--skip-dashboard` 不要求 Node.js。
 
-安装与更新统一由 `deploy_to_ha.sh` 编排。`--devices-only` 只执行第一步，`--automations-only` 只执行第二步；两者互斥。两个 Python 公开入口调用 `deploy_common.launch()`，携带对应步骤选项进入相邻 Shell，以复用完全相同的源码准备和交互；Shell 随后用内部 `--prepared` 参数调用所选源码的工具，避免重复下载或递归。独立 Python 运行需要完整项目；单文件安装只需 Shell。
+安装与更新统一由 `deploy_to_ha.sh` 编排。`--devices-only` 只部署组件/设备，`--dashboard-only` 只部署页面，`--automations-only` 只部署自动化；三者互斥。三个 Python 公开入口调用 `deploy_common.launch()`，携带对应步骤选项进入相邻 Shell，以复用完全相同的源码准备和交互；Shell 随后用内部 `--prepared` 参数调用所选源码的工具，避免重复下载或递归。独立 Python 运行需要完整项目；单文件安装只需 Shell。
 
-`deploy_devices.py` 负责页面预检、设备生成、SSH 检查、组件日期压缩备份、SCP、Core 检查/重启及 HTTP 等待。第一步成功后在 STAGE_ROOT 写 device-result.json，仅含 backup_dir、ha_url；自动化工具通过内部 --context 读取，复用同次备份和探测地址。文件不含凭据，第一步失败不会调用第二步。`deploy_common.py` 管理 SSH/SCP 参数、环境密码、服务器日期目录和 HTTP 探测；源码下载集中在 Shell，两个公开入口均复用它。HA_SSH_PASSWORD / SSHPASS 仅经环境传递，阶段结果不记录密码；显式 --key 清除环境密码。第一步组件副本也放在 STAGE_ROOT 内，随入口退出清理。
+`deploy_devices.py` 只负责设备生成、SSH 检查、组件日期压缩备份、SCP、Core 检查/重启及 HTTP 等待；重启前创建 `www`，使 HA 注册静态资源路由。成功后在 STAGE_ROOT 写 device-result.json，仅含 backup_dir、ha_url。页面和自动化工具通过内部 --context 读取，共用备份目录和地址；前一步失败时 Shell 的 errexit 阻止后续调用。
+
+`deploy_dashboards.py` 负责 Node 版本和模板/资源预检、连接、备份上下文以及 Node 后端调用。Shell 在设备写入前先调用该工具 --check（不连接 HA），设备成功后再执行部署。独立页面部署通常不重启；模板包含资源且 HA 不存在 www 时，先明确询问（默认 Yes、EOF 取消），配置检查通过后建目录并重启/等待 HTTP，再部署。若 www 已存在但 HA 启动时尚未注册 /local，资源 HTTP 校验会停止并提示重启；不会伪报成功。
+
+`deploy_common.py` 管理 SSH/SCP、环境密码、服务器日期目录和 HTTP 探测；三个公开入口均复用 Shell 的来源下载。HA_SSH_PASSWORD / SSHPASS 仅经环境传递，阶段结果不记录密码；显式 --key 清除环境密码。设备组件副本也放在 STAGE_ROOT 内，随入口退出清理。
+
 
 运行环境要求以目标 HA 版本为准；转换器的独立 Python 要求不能替代 HA Core 的 Python 要求。
 
 ### 部署终端输出与交互
 
-单文件 Shell 自带 `ui_log/ui_heading/ui_read`，不依赖下载后的文件；Python 两步工具复用 `deploy_common.message/heading/details/ask_yes_no`，Node 页面工具使用同文件内的 `terminalUi()`，保持来源下载与单文件安装的独立性。状态标签均为两个汉字，详情采用标签/值两列；Python/Node 先按中文显示宽度补齐再上色。仅真实 TTY、TERM 非 dumb 且未设置 NO_COLOR 时输出 ANSI；重定向日志保持纯文本。第三方程序原始输出保持原样。
+单文件 Shell 自带 `ui_log/ui_heading/ui_read`，不依赖下载后的文件；Python 部署工具复用 `deploy_common.message/heading/details/ask_yes_no`，Node 页面工具使用同文件内的 `terminalUi()`，保持来源下载与单文件安装的独立性。状态标签均为两个汉字，详情采用标签/值两列；Python/Node 先按中文显示宽度补齐再上色。仅真实 TTY、TERM 非 dumb 且未设置 NO_COLOR 时输出 ANSI；重定向日志保持纯文本。第三方程序原始输出保持原样。
 
 Shell 询问写 stderr，函数 stdout 只返回来源/路径/yes/no，避免颜色污染命令替换。所有部署 yes/no 询问回车默认 Yes，包括设备/关联重新生成、设备安装上传、自动化上传和页面覆盖；显式 n/skip 参数仍可跳过，EOF 始终不视为确认。更新模式继续默认不上传设备 YAML，需要 --upload-yaml 明确开启；这属于模式选项，不是询问默认值。仪表盘保留 All yes/All no，EOF 等同本次剩余已有页面 All no；新页面按原规则创建。Shell ask_yes_no 默认 yes；Python 公共 ask_yes_no 默认参数仍为 False，由部署上传调用显式传入 True，不改变清理注册表等工具的默认确认行为。三个入口的阶段标题格式统一；管道输入的询问补换行，避免提示与后续状态挤在同一行。
 
-### 第二阶段自动化部署
+### 自动化部署
 
 关联终端清单由 `deploy_automations.show_associations()` 读取已匹配的映射生成，按控制端分组，不拆解报告字符串。控制端的位置/名称通过 `Registry.describe()` 与原报告共用规则；被控端使用 Excel 名称/位置，实体 ID 使用已验证的 HA 映射。表格按 Unicode 显示宽度对齐并转义控制字符，完整保留 ID；生成 YAML 顶部仍保存原文字报告。开关组和多传感器规则分别汇总说明。
 
 所有 `tools/*deploy*` 入口统一文件展示：组件和设备 YAML 使用 `deploy_common.local_files/file_table` 列出实际上传文件的字节数和 UTC 修改时间，SCP 使用 `-q` 关闭进度/速度，继续检查退出码。组件复制及 SCP 保留时间；自动化压缩包为文件写入真实生成时间（自动化使用本地成品 mtime，新增 include 配置使用生成时间），避免 tar 默认时间戳 0。页面经 API 保存而非 SCP，Node 表格明确展示本地模板大小和修改时间，不把模板大小当作动态页面大小。传输完成后才输出完成状态；第三方失败信息仍按原流程报告。
 
-`python3 tools/deploy_automations.py` 为独立公开入口，与 Shell 支持相同的 --source、--branch、--host、--user、--key、--xlsx 等参数。原 `-- ...SSH命令` 底层接口保留，便于离线注册表导出。`--generate-automations` 启用第二阶段；`--automations-only` 独立执行它，跳过组件/设备上传、仪表盘和 Core 重启。`--automation-yaml` 指定本地成品路径，默认在设备 YAML 同目录；`--upload-automations` 是明确覆盖授权，默认生成后询问（回车上传并覆盖，EOF 不上传），`--skip-upload-automations` 仅生成。所选源码必须包含生成器、辅助部署工具和模板，缺失时第一阶段写入前停止；不会混用另一分支工具。
+`python3 tools/deploy_automations.py` 为独立公开入口，与 Shell 支持相同的 --source、--branch、--host、--user、--key、--xlsx 等参数。原 `-- ...SSH命令` 底层接口保留，便于离线注册表导出。`--generate-automations` 启用自动化阶段；`--automations-only` 独立执行它，跳过组件/设备上传、仪表盘和 Core 重启。`--automation-yaml` 指定本地成品路径，默认在设备 YAML 同目录；`--upload-automations` 是明确覆盖授权，默认生成后询问（回车上传并覆盖，EOF 不上传），`--skip-upload-automations` 仅生成。所选源码必须包含生成器、辅助部署工具和模板，缺失时第一阶段写入前停止；不会混用另一分支工具。
 
-第二阶段通过 SSH 只读四类 .storage 注册表，并经 HA REST 读取实时状态；新实体缺失/未加载时每 5 秒重读，最多等 restart-timeout，逐次输出缺失项。无效配置和禁用实体直接停止。HTTP 请求在远端 curl 执行，不经过本机代理。认证优先管理员 HA_TOKEN，否则复用有效所有者浏览器 refresh_token 换取临时令牌，沿用仪表盘认证方式；curl 配置、令牌与请求内容走 SSH 标准输入，仅存内存。没有依赖 SSH 附加组件的 Supervisor Core API 权限。读取成功和注册完成不等于主控反馈完整，unavailable 实体仍可被引用。
+自动化阶段通过 SSH 只读四类 .storage 注册表，并经 HA REST 读取实时状态；新实体缺失/未加载时每 5 秒重读，最多等 restart-timeout，逐次输出缺失项。无效配置和禁用实体直接停止。HTTP 请求在远端 curl 执行，不经过本机代理。认证优先管理员 HA_TOKEN，否则复用有效所有者浏览器 refresh_token 换取临时令牌，沿用仪表盘认证方式；curl 配置、令牌与请求内容走 SSH 标准输入，仅存内存。没有依赖 SSH 附加组件的 Supervisor Core API 权限。读取成功和注册完成不等于主控反馈完整，unavailable 实体仍可被引用。
 
 生成并展示报告后询问上传。目标为 `/homeassistant/automations_manual.yaml`；保留现有 `automation manual: !include automations_manual.yaml`，缺失则追加独立引用，复杂或冲突的引用停止并要求手工整理，不重写整份主配置。固定自动化 id 为 `crestron_manual_associations`，重载后按该 id 确认实体正常加载；保留 HA 记录的启停状态，不通过自动化部署发送设备控制命令。重载启用自动化后，后续真实事件可能按新规则控制设备。
 
-独立第二步在用户确认上传后才创建日期备份目录；完整流程复用第一步目录。写入前后使用原文件 SHA256 复核并拒绝符号链接，先备份 configuration.yaml 和旧 automations_manual.yaml 到本次日期目录的 `automation/`（首次用 manual-was-absent 标记不存在），再将本地生成的固定文件名压缩包经 SSH 标准输入发送到服务器临时目录。替换、`ha core check` 成功后删除临时目录；正常异常退出/检查失败恢复第二步原文件，备份保留，强制杀死进程不保证恢复。通过普通 HA API 调用 automation.reload，无需第二次 Core 重启；重载失败明确报告“文件已上传但重载未确认”，保留备份，不盲目重复请求。脚本确认完成后回读实时状态检查自动化实体。第一阶段不受第二阶段回滚影响；跨阶段无事务，校验期间仍存在外部并发修改窗口。
+独立自动化工具在用户确认上传后才创建日期备份目录；完整流程复用第一步目录。写入前后使用原文件 SHA256 复核并拒绝符号链接，先备份 configuration.yaml 和旧 automations_manual.yaml 到本次日期目录的 `automation/`（首次用 manual-was-absent 标记不存在），再将本地生成的固定文件名压缩包经 SSH 标准输入发送到服务器临时目录。替换、`ha core check` 成功后删除临时目录；正常异常退出/检查失败恢复自动化原文件，备份保留，强制杀死进程不保证恢复。通过普通 HA API 调用 automation.reload，无需第二次 Core 重启；重载失败明确报告“文件已上传但重载未确认”，保留备份，不盲目重复请求。脚本确认完成后回读实时状态检查自动化实体。组件和页面不受自动化回滚影响；跨阶段无事务，校验期间仍存在外部并发修改窗口。
 
-`tests/test_xlsx_to_automations.py` 覆盖真实工作簿、品牌无关映射、注册表身份、楼层字段、缺失/禁用/重复、文本安全和输出保护；`tests/test_deploy_automations.py` 在本机执行实际远端写入 shell，覆盖备份、首次安装、检查失败恢复、并发修改和清理，另测试凭据仅经标准输入。部署回归使用真实两个步骤入口及本地替身，覆盖单文件 Shell 下载后部署、默认本地/独立 Python 两种来源、缺工具时连接前停止、两步顺序、仅关联模式、第一步失败阻止第二步、备份共享和失败传播。现场 Excel 与只读注册表的 `--check` 已通过，尚未部署或验证真实联动。
+`tests/test_xlsx_to_automations.py` 覆盖真实工作簿、品牌无关映射、注册表身份、楼层字段、缺失/禁用/重复、文本安全和输出保护；`tests/test_deploy_automations.py` 在本机执行实际远端写入 shell，覆盖备份、首次安装、检查失败恢复、并发修改和清理，另测试凭据仅经标准输入。部署回归使用三个真实子工具入口及本地替身，覆盖单文件 Shell 下载后部署、默认本地/独立 Python 两种来源、缺工具时连接前停止、三步顺序、仅关联模式、前一步失败阻止后续步骤、备份共享和失败传播。现场 Excel 与只读注册表的 `--check` 已通过，尚未部署或验证真实联动。
 
 ### 空调仪表盘
 
@@ -400,7 +408,7 @@ Shell 询问写 stderr，函数 stdout 只返回来源/路径/yes/no，避免颜
 
 `deploy_dashboards.mjs` 使用 Node.js 22+ 内置 fetch/WebSocket，无第三方依赖。所有 JSON 文件在连接前做结构与重复 url_path 检查，不包含完整前端卡片 schema 校验。认证优先用 HA_TOKEN；否则通过沿用 SSH 认证参数的子进程读取现有所有者会话，经 `/auth/token` 换取临时令牌。端口/SSL 通过 `ha core info --raw-json` 获取，HA_URL 可覆盖地址；凭据只在环境或进程内存中流转。
 
-部署流程：读取 `lovelace/dashboards/list` 与 `get_panels` → 拒绝内置/YAML 地址冲突 → 读取旧配置 → 收集全部覆盖决定 → 读取一次实时快照并生成所有选中的动态页面（失败则不写任何页面） → 每项写入前再次确认元信息及配置未变化 → 经 SSH 写服务器备份 → 必要时创建页面 → `lovelace/config/save` → 回读比对。按 url_path 匹配，不按标题匹配；覆盖保留旧页面元信息。确认与写入之间的复核不是服务端原子比较更新，仍存在很短的并发窗口。All yes/no 只影响本次已有项，新项继续创建；EOF 按 All no 处理。
+部署流程：读取 `lovelace/dashboards/list` 与 `get_panels` → 拒绝内置/YAML 地址冲突 → 读取旧配置 → 收集全部覆盖决定 → 读取空调实时快照、生成选中页面配置 → 上传并注册选中页面所需资源 → 每项写入前再次确认元信息及配置未变化 → 经 SSH 写服务器备份 → 必要时创建页面 → `lovelace/config/save` → 回读比对。按 url_path 匹配，不按标题匹配；覆盖保留旧页面元信息。确认与写入之间的复核不是服务端原子比较更新，仍存在很短的并发窗口。All yes/no 只影响本次已有项，新项继续创建；EOF 按 All no 处理。
 
 页面备份在本次服务器备份目录的 `dashboard/<url_path>.json`，包含 `{dashboard, config}`；新页面两字段为 null。Node 工具仅接受 `--remote-backup-dir`，shell 在上传前通过 `--check` 同时检验所选来源的页面工具是否支持该参数；旧工具拒绝参数时停止，需更新分支或跳过页面。`remoteBackup()` 校验备份路径和页面名，通过现有 SSH 命令的标准输入传输 JSON，内容不拼入 shell 命令，不写本地持久备份。远端使用 `umask 077` 和 `mktemp` 写临时文件，完成后以硬链接创建最终文件，已有文件会报错，EXIT trap 清理临时文件；SSH 最长等待 30 秒。备份成功才写入页面，失败立即终止，不自动重试写入或回滚；创建成功但保存失败可能留下空页面，需要核对远端后处理。页面通过 HA API 保存，不直接修改运行中的 `.storage`，不调用设备控制服务。后续 UI 编辑不会自动同步到仓库 JSON；本地旧备份仍作为历史文件保留。
 
@@ -408,7 +416,33 @@ Shell 询问写 stderr，函数 stdout 只返回来源/路径/yes/no，避免颜
 
 公开源码只保留通用页面模板和虚构示例；现场工作簿、生成配置及注册表导出放在被忽略的 local/，备份保存在私有环境。当前仓库提交身份使用 GitHub noreply 邮箱。历史脱敏包含旧现场工作簿、页面布局、文档地址及本项目维护者的个人提交身份，保留其他贡献者署名。历史重写会改变相关提交编号；其他工作副本应重新克隆或谨慎迁移未提交改动，避免合并回旧历史。
 
+### 已开启设备仪表盘
+
+`dashboard/dashboard-active-devices.json` 保存通用 generator 和空 sections 视图，`resources` 声明 `resources/active-devices-card.js`。生成结果只含 `custom:crestron-active-devices`，不固化任何现场实体。单独部署它无需读取现场实体快照，允许零设备。空调页面仍使用部署时快照，不改变其零空调/启动等待保护。
+
+卡片为自包含浏览器 ES module，无 npm/HACS 依赖。`set hass` 使用 HA 前端状态推送，新增、删除、开关状态立即反映；`RegistryWatch` 先订阅 entity/device/area/floor_registry_updated，再读取四类注册表。刷新期间再有事件则补读，旧结果不显示；每 30 秒轮询兜底，连接 ready 时立即刷新，断开或读取失败清空可操作范围并显示错误。离开页面取消计时器和订阅，忽略在途结果；事件订阅不可用时继续轮询。通过当前浏览器会话认证，不保存令牌。参见 [HA 自定义卡片接口](https://contributors.home-assistant.io/frontend/custom-ui/card/)。
+
+`activeRows()` 从所有集成的 hass.states 选择支持域，排除隐藏、禁用、配置/诊断实体；无注册记录但有实时状态的设备仍可显示。实体 area_id 优先于设备位置，按楼层 ID、房间 ID 分组，重名不合并，按楼层 level、位置名称、类型、设备名称自然排序，未分配位置放末尾。一个实体一行，不根据名称猜测是否同一物理设备。
+
+`POWER_TYPES` 仅包含 light、climate、switch、fan；light/switch/fan 为 on，climate 为 heat/cool/heat_cool/auto/dry/fan_only。switch 额外要求实时 attributes.device_class 为 outlet，不根据名称猜测，也不把无 entity_category 的设备功能开关当插座。其他实体域全部排除，表示设备开启状态，不等于功率测量。
+
+布局使用响应式 CSS 网格：楼层卡片 → 房间 → 类型 → 单行设备，名称省略时悬浮显示完整名称/实体 ID，点击打开 hass-more-info。用 textContent 填充名称，避免名称成为 HTML。只构建当前开启设备的分组，空分组自动消失；保留键盘焦点。顶部按钮点击时重新读取当前可见开启的灯光/空调，仅调用 turn_off 并明确指定 ID；空列表不调用服务，禁止空 target 或 all。忙碌时禁用重复请求，错误明确显示；列表隐藏依赖设备反馈，不伪造关闭状态。
+
+### 卡片资源上传与缓存
+
+`loadDashboards()` 校验 resources 为 `resources/<小写文件名>.js`，拒绝越界真实路径和不存在文件；计算 SHA-256。Node 只处理用户选中页面的资源，去重同名文件，冲突拒绝。HA resource_mode 须为 storage，安全/恢复模式拒绝；通过官方 [Lovelace 资源接口](https://github.com/home-assistant/core/blob/2026.10.1/homeassistant/components/lovelace/resources.py) 读取/创建/更新，不改运行中的 .storage。
+
+写入前备份全部资源注册信息到 `dashboard/card-resources.json`，逐资源复查目标注册项未变化；旧 JS 备份至 `dashboard/resources/<文件名>`（不存在则记录 .absent），已存在的备份不覆盖。SSH 标准输入上传到 `/homeassistant/www/crestron/` 临时文件，SHA-256 校验后 chmod 644、原子 rename；正常失败清理临时文件，正式目录只保留当前文件。拒绝资源路径符号链接。文件信息显示大小和 UTC mtime，无速度输出。
+
+随后从本机 HTTP 下载 `/local/crestron/<文件名>?v=<SHA256>` 并比较内容摘要，确认服务可访问且字节正确，再注册 module URL、回读校验，最后保存页面。版本参数避免浏览器继续用旧缓存；已加载的 Custom Element 无法重新定义，更新后需刷新浏览器。首次创建 www 的路由限制依据 [HA frontend 初始化](https://github.com/home-assistant/core/blob/2026.10.1/homeassistant/components/frontend/__init__.py)。
+
+资源上传/注册/页面保存之间没有跨步骤事务；失败停止，不自动回滚，可能留下已更新资源，需按报告核对和使用备份恢复。资源本身只包含通用代码，通过 /local 可访问，禁止写入令牌、现场清单或其他私人资料。跳过页面不上传它独有的资源；首次 www 初始化是独立确认的预备步骤。
+
+Node 回归覆盖动态发现、位置/名字更新、状态筛选、同名分组、关闭目标与错误、订阅/轮询/重连/卸载、刷新竞态、资源备份/上传/注册/失败与缓存版本。部署回归覆盖独立工具两种来源、单 Shell 自举、三工具顺序/共享备份、只设备不部署页面、首次资源目录确认。真实 HA 页面和移动端布局仍需部署后确认。
+
 ## 验证方法
+
+实时仪表盘与三工具拆分已通过 613 项 Python、46 项 Node 测试及类型/语法检查。2026-10-20 收窄为灯光、空调、插座、风扇后，47 项 Node 测试通过；已使用独立页面工具部署到 HA，资源 HTTP 摘要、注册信息及页面回读校验成功，旧版本保存在服务器日期备份目录。此次未重启 Core、未调用设备服务；真实浏览器主题、移动端布局和现场关闭效果仍待用户验证。
 
 `tools/test_ha_light.py` 为单灯现场观察入口，复用 `deploy_common.Connection` 和 `deploy_automations.Api/remote`。仅接受一个完整 `light` 实体 ID，通过 SSH 标准输入提交 JSON 服务请求；认证不落盘。初始开启时先关灯并核对反馈；倒计时后调用无亮度参数的 turn_on，观察实时状态，再在 finally 中调用 turn_off 并回读。结束目标为关闭，不承诺恢复测试前开启状态；中断/网络失败时关灯也可能失败，应检查实物。脚本不会安装本地组件，因此结果只说明服务器现有代码的行为，不能证明尚未部署的时序方案有效。现场在直接同值版本执行一次时，开启反馈未确认，结束关闭已确认，亮度记忆未变；实物结果待用户确认。
 
@@ -432,4 +466,4 @@ bash -n tools/deploy_to_ha.sh
 
 位置测试覆盖重复导入、旧区域迁移、跨楼层重名、带数字名称冲突、大小写/空格规范化、已有区域归属、实体区域覆盖清除、身份与自定义名称保留、无效配置隔离、存储失败和 setup 顺序。注册表使用替身测试，不操作现场 HA。
 
-页面部署的 Node 测试覆盖动态模板、位置继承/覆盖、不同品牌风速、能力筛选、未加载/隐藏/停用实体、空数据与 API 错误保护、四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用 GitHub、SSH/SCP、Node 替身，验证安装/更新/仅页面路径、默认及指定分支、交互分支分页/默认值/非法输入/EOF、本地路径推断/副本稳定性/文件排除/源码缺失/符号链接、固定提交下载、仅运行文件上传、下载转换器、配置保留、压缩包校验、备份失败、配置检查失败阻止重启、重启/恢复失败阻止页面写入、页面失败阻止第二阶段及恢复超时。SCP 回归另外使用本机真实 scp 的发送端/接收端，经匿名管道验证目录上传，覆盖隐藏文件、空格/中文文件名和两种源码来源；未安装 scp 时该组测试跳过。备份回归在本机临时目录执行真实远端 shell，验证按日期独立建目录、tar 压缩包包含原 YAML、备份/校验失败阻止覆盖、失败清理和页面 JSON 备份先于写入，包含权限、特殊字符和防覆盖。测试不访问 GitHub 或现场服务器。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。
+页面部署的 Node 测试覆盖动态模板、位置继承/覆盖、不同品牌风速、能力筛选、未加载/隐藏/停用实体、空数据与 API 错误保护、四种覆盖选择、EOF、新旧页面混合、备份/保存失败、并发修改、配置回读、地址冲突及 WebSocket 认证/断连；shell 的 unittest 使用 GitHub、SSH/SCP、Node 替身，验证安装/更新/仅页面路径、默认及指定分支、交互分支分页/默认值/非法输入/EOF、本地路径推断/副本稳定性/文件排除/源码缺失/符号链接、固定提交下载、仅运行文件上传、下载转换器、配置保留、压缩包校验、备份失败、配置检查失败阻止重启、重启/恢复失败阻止页面写入、页面失败阻止自动化阶段及恢复超时。SCP 回归另外使用本机真实 scp 的发送端/接收端，经匿名管道验证目录上传，覆盖隐藏文件、空格/中文文件名和两种源码来源；未安装 scp 时该组测试跳过。备份回归在本机临时目录执行真实远端 shell，验证按日期独立建目录、tar 压缩包包含原 YAML、备份/校验失败阻止覆盖、失败清理和页面 JSON 备份先于写入，包含权限、特殊字符和防覆盖。测试不访问 GitHub 或现场服务器。CI 单独使用 Node 22 检查页面和部署逻辑。这些测试不操作现场设备，也不代替浏览器布局检查。

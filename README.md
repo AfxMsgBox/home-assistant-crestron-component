@@ -47,28 +47,29 @@ bash tools/deploy_to_ha.sh --update --source local --host HA_HOST --user root --
   crestron: !include custom_components/crestron/crestron.yaml
   ```
 
-部署分两步：
+部署按三个工具依次执行：
 
-1. **设备配置**：从 Excel 生成 `crestron.yaml`，按选择上传；备份组件、检查配置，重启 Home Assistant 服务并等待 HTTP 恢复，再生成并部署页面。
-2. **自动化关联（可选）**：读取 Excel 和 HA 注册信息，等待涉及的实体注册并加载，按模板生成 `automations_manual.yaml`。列出双方的楼层、房间、名称和实体 ID，确认上传后备份旧文件、检查配置并重载自动化，无需再次重启。
+1. **设备**（`deploy_devices.py`）：生成并按选择上传 `crestron.yaml`，备份组件、检查配置，重启 Core 并等待 HTTP 恢复。
+2. **页面**（`deploy_dashboards.py`）：生成空调页面，部署已开启设备页面及其自定义卡片资源。
+3. **自动化（可选）**（`deploy_automations.py`）：读取 Excel 和 HA 注册信息，展示关联，生成并按选择上传自动化，检查配置并重载，无需再次重启。
 
-入口脚本依次调用 `deploy_devices.py` 和 `deploy_automations.py`，也可分别运行，方便调试；两个 Python 入口使用相同的来源、连接参数，并复用 Shell 下载流程。第二步依赖设备已导入 HA。默认等待 120 秒，可用 `--restart-timeout 240` 调整。HTTP 和自动化接口均通过 SSH 在服务器执行，避免本机代理影响；实体存在不代表主控已在线。
+总入口统一准备所选来源的源码，再调用三个子工具；各工具也能单独运行。自动化需设备先在 HA 注册。默认每阶段等待 120 秒，可用 `--restart-timeout 240` 调整。HTTP 恢复和自动化接口通过 SSH 在服务器执行；页面部署需本机可访问 HA 网页。
 
 ```bash
-# 完整两步：从本地源码部署，生成/上传设备，随后生成自动化并询问是否上传
+# 完整部署：从本地源码部署，生成/上传设备，随后生成自动化并询问是否上传
 bash tools/deploy_to_ha.sh --source local --host HA_HOST --user root --key \
   --xlsx local/HA设备接口配置表.xlsx --generate-yaml --upload-yaml --generate-automations
 
-# 单独第一步：部署设备及仪表盘，检查并重启 HA
+# 只部署组件和设备，检查并重启 HA
 python3 tools/deploy_devices.py --host HA_HOST --user root --key \
   --xlsx local/HA设备接口配置表.xlsx --upload-yaml
 
-# 单独第二步：设备已导入，只更新自动化关联，不重启 HA
+# 设备已导入，只更新自动化关联，不重启 HA
 python3 tools/deploy_automations.py --host HA_HOST --user root --key \
   --xlsx local/HA设备接口配置表.xlsx
 ```
 
-Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某一步。自动化默认输出到设备 YAML 同目录，可用 `--automation-yaml FILE` 指定。生成报告也保存在成品顶部注释中。`--skip-upload-automations` 只生成本地文件；`--upload-automations` 表示已确认上传并覆盖服务器文件，省略该参数则生成后询问，回车默认上传并覆盖；输入结束时不上传。自动化阶段需服务器 `jq`，认证使用管理员 `HA_TOKEN` 或已有的有效所有者浏览器会话。
+Shell 入口加 `--devices-only`、`--dashboard-only` 或 `--automations-only` 可单独执行对应步骤。自动化默认输出到设备 YAML 同目录，可用 `--automation-yaml FILE` 指定。生成报告也保存在成品顶部注释中。`--skip-upload-automations` 只生成本地文件；`--upload-automations` 表示已确认上传并覆盖服务器文件，省略该参数则生成后询问，回车默认上传并覆盖；输入结束时不上传。自动化阶段需服务器 `jq`，认证使用管理员 `HA_TOKEN` 或已有的有效所有者浏览器会话。
 
 默认输入和输出使用项目的 `local/`；单文件启动时使用 Shell 所在目录的 `local/`，不会保存到临时下载目录。Excel 文件仍由你提供。
 
@@ -80,10 +81,10 @@ Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某�
 /homeassistant/crestron-backups/2026-10-10/153000-随机编号/
   crestron.tar.gz          旧组件及其中的设备 YAML（首次安装无此文件）
   dashboard/页面地址.json   页面修改前的配置
-  automation/             第二步修改前的自动化文件和 configuration.yaml
+  automation/             自动化修改前的文件和 configuration.yaml
 ```
 
-组件压缩备份校验通过后才上传新组件；页面备份成功后才保存该页面。失败会停止后续步骤；第一步已写入的组件和页面不会自动回滚，第二步文件替换或配置检查失败会恢复该步原文件。历史源码存档和旧备份不会自动删除。
+组件压缩备份校验通过后才上传新组件；页面备份成功后才保存该页面。失败会停止后续步骤；已写入的组件和页面不会自动回滚，自动化文件替换或配置检查失败会恢复该步原文件。历史源码存档和旧备份不会自动删除。
 
 ### 仪表盘
 
@@ -91,7 +92,28 @@ Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某�
 
 空调页面包含所有品牌已加载、未停用且未隐藏的 `climate` 实体；位置以实体设置优先，其次继承设备位置，缺失位置归入“未分配”。完整安装会先重启并等待实体加载，再生成页面；没有空调或加载超时会停止页面部署，不覆盖旧页面，仅安装其他设备时使用 `--skip-dashboard`。调整设备或位置后重新部署页面即可更新；页面不会自行新增卡片。
 
-`dashboard/` 中每个 JSON 包含 `dashboard` 元信息与 `config` 页面配置。空调模板另含 `generator`，普通静态页面仍可直接填写完整 `config`。部署递归扫描所有 JSON，按 `url_path` 判断是否已存在；覆盖已有页面会替换整个页面配置，保留原页面元信息。
+#### 已开启设备页面
+
+[dashboard/dashboard-active-devices.json](dashboard/dashboard-active-devices.json) 提供“已开启设备”页面，覆盖所有集成，按 **楼层 → 房间 → 类型** 显示紧凑列表。只显示灯光、空调、插座和风扇。插座须由 HA 标记为 `device_class: outlet`，普通功能开关不纳入；Excel 插座转换器已设置此标记。不显示扫地机、媒体播放器、热水器等其他类型及配置/诊断实体。未分配位置的设备单独分组，隐藏或禁用的实体不列入。
+
+设备开启后自动出现，关闭后自动隐藏，空房间和空楼层也隐藏。空调使用当前模式判断开启，包括已到温度而暂停制热的情况。未知、不可用状态不显示。这里依据 HA 的设备状态，不通过功率传感器判断实际耗电。
+
+顶部 **关闭全屋空调 / 关闭全屋灯光** 按钮一次关闭点击时本页面列出的对应开启实体；不切换制冷或制热模式，不修改亮度。没有对应设备时按钮不执行动作。点击设备行进入 HA 详情进行单独控制。设备反馈关闭后才从列表消失。
+
+页面使用随项目部署的自定义卡片，无需 HACS。**新设备、实体改名、位置调整自动更新，无需重新部署**。状态通过 HA 前端实时更新，位置通过注册表事件刷新，并每 30 秒补查。断线/权限错误会显示提示，连接恢复后自动重试。
+
+```bash
+# 单独部署页面；无参数运行则逐步提示
+python3 tools/deploy_dashboards.py --source local --host HA_HOST --user root --key
+```
+
+通常不重启 HA。首次单独部署时若不存在 `www` 目录，会询问是否初始化并重启 Core，使 `/local` 资源路由生效；完整安装会提前创建目录。部署完刷新已打开的浏览器。
+
+此命令会处理 `dashboard/` 下全部页面；已有空调页面不想更新时，在它的覆盖询问中输入 `n`。使用 GitHub 来源时，所选分支须已包含新模板和对应部署工具。
+
+#### 页面部署与覆盖
+
+`dashboard/` 中每个 JSON 包含 `dashboard` 元信息与 `config` 页面配置。空调和已开启设备模板另含 `generator`；自定义卡片文件在 `resources` 中声明，由工具自动上传并注册（HA 资源需使用存储模式）。普通静态页面可直接填写完整 `config`。部署递归扫描所有 JSON，按 `url_path` 判断是否已存在；覆盖已有页面会替换整个页面配置，保留原页面元信息。
 
 | 选择 | 含义 |
 |---|---|
@@ -102,10 +124,10 @@ Shell 入口加 `--devices-only` 或 `--automations-only` 也能单独执行某�
 
 覆盖询问默认 Yes，输入 `n` 可跳过；输入结束时按 All no 跳过剩余已有页面。
 
-新页面仍会创建，并备份其原先不存在的记录。页面备份保存到服务器本次部署目录的 `dashboard/` 下；仅部署页面时也创建独立的日期备份目录。网页中的修改不会自动同步回仓库文件，确认覆盖后会被重新生成的配置替换。生成的实体 ID 和名称只用于 HA 页面，不写回仓库；服务器备份也包含现场配置，请保留在私有环境。
+新页面仍会创建，并备份其原先不存在的记录。页面备份保存到服务器本次部署目录的 `dashboard/` 下；旧卡片在 `dashboard/resources/`，资源注册信息在 `dashboard/card-resources.json`；仅部署页面时也创建独立的日期备份目录。网页中的修改不会自动同步回仓库文件，确认覆盖后会被重新生成的配置替换。生成的实体 ID 和名称只用于 HA 页面，不写回仓库；服务器备份也包含现场配置，请保留在私有环境。
 
 ```bash
-# 仅部署仪表盘，不重启 HA
+# 仅部署仪表盘（常规更新无需重启）
 bash tools/deploy_to_ha.sh --branch dev --host HA_HOST --user root --key --dashboard-only
 
 # 查看完整参数
@@ -143,11 +165,11 @@ join 必须与主控程序一致：数字 join 为 `1–4096`，模拟和串行 
 | 窗帘 | 楼层、房间、名称、开、关、停止 | 类型、位置 | 暂不支持 |
 | 空调 | 楼层、房间、名称、开、关 | 模式、风速、温度、室温 | HA关联开关实体ID；暂不支持人在关联 |
 
-第一行是表头，列顺序不限。join 列填整数编号，例如 `414`，不是 `a414` 或当前温度。空行忽略；普通设备行的楼层、房间、名称不能为空。旧空调表需要补上 **名称** 列，例如填写“空调”。详细填写规则见 [Excel 指南](tools/README.md)。
+第一行是表头，列顺序不限。join 列填整数编号，例如 `414`，不是 `a414` 或当前温度。空行忽略；普通设备行的楼层、房间、名称不能为空。旧空调表需要补上 **名称** 列，例如填写“空调”。详细填写规则见 [Excel 指南](docs/EXCEL.md)。
 
 **关联列填写 HA 实体 ID，不是 join 编号或 device_id**；品牌不限。`HA关联开关实体ID` 填可远程控制并反馈状态的 `switch.xxx`，`HA关联人在实体ID` 填报告有人/无人的 `binary_sensor.xxx`。一个单元格内每行一个 ID（例如 Alt+Enter 换行），留空表示不关联；同一 ID 填在多条设备行中可控制多台设备。不要改表头，也不要用逗号拼接 ID。样表包含单个、多开关、多传感器、共用控制源及留空示例。
 
-先核对接口、生成并导入 `crestron.yaml`；设备在 HA 中注册后，再读取同一工作簿和 HA 注册表，生成 `automations_manual.yaml`。设备转换器不会自动生成关联。只修改关联列时，只需重新执行部署第二步。
+先核对接口、生成并导入 `crestron.yaml`；设备在 HA 中注册后，再读取同一工作簿和 HA 注册表，生成 `automations_manual.yaml`。设备转换器不会自动生成关联。只修改关联列时，只需重新执行自动化部署工具。
 
 ```bash
 # 先检查，不写文件
@@ -160,7 +182,7 @@ python3 tools/xlsx_to_automations.py 你的设备表.xlsx --check-xlsx
 python3 tools/xlsx_to_yaml.py 你的设备表.xlsx local/crestron.yaml
 ```
 
-`--check-xlsx` 只检查填写格式和模板；实体是否存在、启用及加载，需要第二步读取目标 HA 注册表后才能确认。
+`--check-xlsx` 只检查填写格式和模板；实体是否存在、启用及加载，需要自动化工具读取目标 HA 注册表后才能确认。
 
 转换提示和生成 YAML 的注释使用中文，位置显示为“空调表第13行”。有错误时整次生成失败，原输出文件保持不变。成功生成会覆盖整个目标文件，默认端口为 `10200`；需自行检查端口，并合并手写的其他平台配置、`to_joins` 和 `from_joins`。
 
@@ -197,7 +219,7 @@ python3 tools/xlsx_to_automations.py local/HA设备接口配置表.xlsx \
 # 加 --check 只检查并输出关联清单，不写文件
 ```
 
-生成的文件是单条自动化，可在 HA 单条自动化 YAML 编辑器粘贴。部署工具上传到 `/homeassistant/automations_manual.yaml`，检查并按需添加 `automation manual: !include automations_manual.yaml`；保留其他自动化文件。配置检查失败会恢复第二步修改前的文件；重载失败会明确报告并保留备份。模板中各占位区域旁有完整手填示例，原模板不能直接导入 HA。尚需现场验证实际联动效果。
+生成的文件是单条自动化，可在 HA 单条自动化 YAML 编辑器粘贴。部署工具上传到 `/homeassistant/automations_manual.yaml`，检查并按需添加 `automation manual: !include automations_manual.yaml`；保留其他自动化文件。配置检查失败会恢复自动化部署前的文件；重载失败会明确报告并保留备份。模板中各占位区域旁有完整手填示例，原模板不能直接导入 HA。尚需现场验证实际联动效果。
 
 ## 4. 日常使用与修改配置
 

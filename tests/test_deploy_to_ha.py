@@ -221,7 +221,7 @@ for source in sources:
             'test/old_test.py': '# development only',
             'tests/test_climate.py': '# development only',
         }
-        for name in ('deploy_common.py', 'deploy_devices.py'):
+        for name in ('deploy_common.py', 'deploy_devices.py', 'deploy_dashboards.py'):
             files['tools/' + name] = (ROOT / 'tools' / name).read_text()
         if dashboards:
             files.update({'tools/deploy_dashboards.mjs': '// downloaded helper',
@@ -332,7 +332,7 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
     def test_automation_skipped_when_user_declines(self):
         result, log = self.run_script('--update', input_text='n\nn\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('已跳过第二步', result.stdout)
+        self.assertIn('已跳过自动化关联', result.stdout)
         self.assertFalse(any(line.startswith('automation-stage2') for line in log))
 
     def test_local_snapshot_includes_worktree_and_excludes_runtime_files(self):
@@ -825,7 +825,7 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertFalse(list(self.directory.glob('crestron-ha-deploy.*')))
 
     def test_missing_downloaded_deployment_tools_stops_before_ssh(self):
-        for name in ('deploy_devices.py', 'deploy_common.py'):
+        for name in ('deploy_devices.py', 'deploy_common.py', 'deploy_dashboards.py'):
             with self.subTest(name=name):
                 self.make_archive(omit='tools/' + name)
                 result, log = self.run_script('--update')
@@ -853,6 +853,43 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('/git/ref/heads/feature%2F', self.log.read_text())
         self.assertEqual((self.directory / 'capture/component/climate.py').read_text(), '# downloaded climate\n')
+
+    def test_python_dashboard_entry_downloads_source_without_device_or_automation_steps(self):
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/deploy_dashboards.py'),
+                                 '--source', 'github', '--branch', 'feature/dashboard',
+                                 '--host', 'ha.example', '--user', 'root', '--key'],
+                                env=self.env, input='', text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text()
+        self.assertIn('/git/ref/heads/feature%2Fdashboard', log)
+        self.assertLess(log.index('/tar.gz/'), log.index('ssh '))
+        self.assertIn('--remote-backup-dir', log)
+        self.assertNotIn('ha core restart', log)
+        self.assertNotIn('scp ', log)
+        self.assertNotIn('automation-stage2', log)
+
+    def test_python_dashboard_entry_without_arguments_prompts_and_defaults_to_local(self):
+        root, _ = self.make_local_source()
+        result = subprocess.run([sys.executable, '-B', str(root / 'tools/deploy_dashboards.py')],
+                                env=self.env, input='\nha.example\n\n\n', text=True,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text()
+        self.assertNotIn('github.com', log)
+        self.assertNotIn('ha core restart', log)
+        self.assertNotIn('是否从 Excel', result.stdout + result.stderr)
+        self.assertIn('--remote-backup-dir', log)
+
+    def test_device_only_never_runs_dashboard_backend(self):
+        result, log = self.run_script('--devices-only', '--update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any('deploy_dashboards' in line for line in log))
+        self.assertTrue(any('ha core restart' in line for line in log))
+
+    def test_only_flags_are_mutually_exclusive_before_download(self):
+        result, log = self.run_script('--devices-only', '--dashboard-only')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(log, [])
 
     def test_python_automation_entry_downloads_and_only_runs_second_step(self):
         xlsx = self.automation_sources()
@@ -914,7 +951,11 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertEqual(automation.read_text(), 'generated associations')
         stage = next(i for i, line in enumerate(log) if line.startswith('automation-stage2'))
         restart = next(i for i, line in enumerate(log) if 'ha core restart' in line)
+        dashboard = next(i for i, line in enumerate(log)
+                         if '--remote-backup-dir' in line and '--check' not in line)
         self.assertLess(restart, stage)
+        self.assertLess(restart, dashboard)
+        self.assertLess(dashboard, stage)
         self.assertNotIn('\033', result.stdout + result.stderr)
 
     def test_password_reaches_python_connection_without_entering_command_log(self):
