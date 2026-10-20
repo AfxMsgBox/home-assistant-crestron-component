@@ -172,19 +172,16 @@ def build_light(row):
     灯光工作表生成 light 实体，类型由信号能力决定，
     而非「功能」标签：
       - 亮度 + 色温 -> color_temp（双色温）
-      - 仅亮度      -> brightness（单色温）
+      - 亮度        -> brightness（单色温），可附加完整开/关
       - 仅开 + 关   -> onoff（只开关）
 
-    混合控制、只有色温、开关不成对或无控制能力时返回 None；完整转换入口会报错并中止生成。
+    只有色温、开关不成对或无控制能力时返回 None；完整转换入口会报错并中止生成。
     """
     bri = _to_int(row.get("亮度"))
     cct = _to_int(row.get("色温"))
     on = _to_int(row.get("开"))
     off = _to_int(row.get("关"))
-    has_analog_control = bri is not None or cct is not None
-    has_digital_control = on is not None or off is not None
-
-    if has_analog_control and has_digital_control:
+    if (on is None) != (off is None):
         return None
 
     if bri is not None:
@@ -197,6 +194,9 @@ def build_light(row):
         }
         if cct is not None:
             ent["color_temp_join"] = cct
+        if on is not None:
+            ent["on_join"] = on
+            ent["off_join"] = off
         _add_device_metadata(ent, row, f"light_{bri}", name)
         return "light", ent
     if cct is None and on is not None and off is not None:
@@ -520,11 +520,7 @@ def _row_errors(sheet_name, row):
         color_temp = _to_int(row.get("色温"))
         on = _to_int(row.get("开"))
         off = _to_int(row.get("关"))
-        if (brightness is not None or color_temp is not None) and (
-            on is not None or off is not None
-        ):
-            errors.append("模拟量控制（亮度/色温）不能与数字量控制（开/关）混填")
-        elif color_temp is not None and brightness is None:
+        if color_temp is not None and brightness is None:
             errors.append("填写色温时必须同时填写亮度")
         elif (on is None) != (off is None):
             errors.append("开和关必须成对填写")

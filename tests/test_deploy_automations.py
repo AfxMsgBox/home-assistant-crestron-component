@@ -47,7 +47,8 @@ class AutomationDeployTests(unittest.TestCase):
                 raise d.generator.AssociationError('模拟远端失败')
             return result.stdout
         with patch.object(d, 'remote', side_effect=execute):
-            d.upload(['ssh'], self.backup, 'new manual\n', self.config, old_manual, new)
+            d.upload(['ssh'], self.backup, 'new manual\n', self.config, old_manual, new,
+                     content_mtime=1704067200)
         return new
 
     def test_backup_install_and_cleanup(self):
@@ -59,6 +60,28 @@ class AutomationDeployTests(unittest.TestCase):
         self.assertEqual((backup / 'automations_manual.yaml').read_bytes(), b'old manual')
         self.assertFalse(list(self.ha.glob('.crestron-automation.*')))
         self.assertEqual((self.ha / 'automations_manual.yaml').stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.ha / 'automations_manual.yaml').stat().st_mtime, 1704067200)
+        self.assertGreater((self.ha / 'configuration.yaml').stat().st_mtime, 1704067200)
+
+    def test_association_table_preserves_source_locations_and_excel_target_names(self):
+        xlsx = self.root / 'test.xlsx'
+        workbook(xlsx)
+        rows, snapshot = d.generator.read_associations(xlsx), registry()
+        sm, om, _ = d.generator.build_maps(rows, snapshot)
+        with patch('sys.stdout', new=io.StringIO()) as output:
+            d.show_associations(rows, snapshot, sm, om)
+        text = output.getvalue()
+        self.assertIn('床头面板 左键', text)
+        self.assertIn('灯带', text)
+        self.assertNotIn('自定义灯', text)
+        self.assertIn('未分配楼层', text)
+        self.assertIn('全部无人持续 30 秒关闭', text)
+        self.assertEqual(text.count('light.renamed'), 3)
+        for source in ('switch.button', 'switch.other', 'binary_sensor.presence'):
+            lines = text.splitlines()
+            index = next(i for i, line in enumerate(lines) if source in line)
+            self.assertEqual(d.common.display_width(lines[index].split(source)[0]),
+                             d.common.display_width(lines[index + 1].split('light.renamed')[0]))
 
     def test_first_install_records_absence(self):
         self.run_upload(None)
@@ -104,6 +127,11 @@ class AutomationDeployTests(unittest.TestCase):
             raise EOFError
         self.assertFalse(d.ask_upload(False, True, read=eof))
         self.assertTrue(d.ask_upload(True, True, read=lambda _: 'y'))
+        self.assertTrue(d.ask_upload(True, False, read=lambda _: ''))
+        self.assertTrue(d.ask_upload(False, True, read=lambda _: ''))
+        replies = iter(['不确定', 'n'])
+        with patch('sys.stdout', new=io.StringIO()):
+            self.assertFalse(d.ask_upload(True, False, read=lambda _: next(replies)))
 
     def test_api_credentials_only_in_stdin_and_reload_endpoint(self):
         seen = []

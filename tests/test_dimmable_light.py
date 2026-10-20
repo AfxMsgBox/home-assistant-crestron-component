@@ -62,6 +62,7 @@ _install_stubs()
 light_mod = load("light")
 # Keep the test fast: collapse the re-assert hold to a no-op delay.
 light_mod.OFF_REASSERT_SECONDS = 0
+OPEN_DELAY_SECONDS = light_mod.ON_RESET_SECONDS
 light_mod.ON_RESET_SECONDS = 0
 
 
@@ -69,6 +70,17 @@ class FakeHub:
     def __init__(self):
         self.analog = {}
         self.sent_analog = []  # (join, value) commands sent to the wire
+        self.digital = {}
+        self.sent_digital = []
+
+    def get_digital(self, join):
+        return self.digital.get(join, False)
+
+    def has_digital(self, join):
+        return join in self.digital
+
+    def set_digital(self, join, value):
+        self.sent_digital.append((join, value))
 
     def get_analog(self, join):
         return self.analog.get(join, 0)
@@ -219,6 +231,15 @@ class BrightnessMemoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_record_defaults_to_full_brightness(self):
         await self.light.async_turn_on()
         self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 65535)])
+
+    async def test_off_seeds_memory_before_zero_without_prior_callback(self):
+        self.hub.analog[20] = 23456
+        await self.light.async_turn_off()
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 23456)
+        await self.feedback(0)
+        self.hub.sent_analog.clear()
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 23456)])
 
     async def test_restart_while_off_restores_memory_without_turning_light_on(self):
         await self.feedback(23456)
@@ -466,6 +487,335 @@ class TurnOnSequenceTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     await task
                 self.assertEqual(self.hub.sent_analog, before)
+
+
+class DigitalPowerDimmingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.hub = FakeHub()
+        self.light = light_mod.CrestronLight(self.hub, {
+            "name": "调光灯", "brightness_join": 20, "color_temp_join": 21,
+            "on_join": 30, "off_join": 31,
+        })
+        await self.light.async_added_to_hass()
+
+    async def feedback(self, on, off, brightness=32768):
+        self.hub.analog[20] = brightness
+        self.hub.digital.update({30: on, 31: off})
+        await self.light.process_callback("d30", str(on))
+
+    async def test_digital_feedback_overrides_nonzero_or_zero_brightness(self):
+        await self.feedback(False, True)
+        self.assertFalse(self.light.is_on)
+        self.assertEqual(self.light.brightness, 128)
+        await self.feedback(True, False, brightness=0)
+        self.assertTrue(self.light.is_on)
+
+    async def test_missing_or_ambiguous_power_never_falls_back_to_brightness(self):
+        self.hub.analog[20] = 65535
+        self.assertIsNone(self.light.is_on)
+        await self.feedback(True, True)
+        self.assertIsNone(self.light.is_on)
+        await self.feedback(False, True)
+        await self.feedback(False, False)
+        self.assertFalse(self.light.is_on)
+        await self.feedback(True, False)
+        await self.feedback(True, True)
+        self.assertTrue(self.light.is_on)
+
+    async def test_on_restores_brightness_off_only_pulses_and_waits_for_feedback(self):
+        await self.feedback(False, True)
+        await self.light.async_turn_on()
+        self.assertFalse(self.light.is_on)
+        await self.feedback(True, False)
+        await self.light.async_turn_off()
+        self.assertTrue(self.light.is_on)
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 32768)])
+        self.assertEqual(self.hub.sent_digital,
+                         [(31, True), (31, False)])
+
+    async def test_reset_is_held_for_tenth_second_before_restoring_memory(self):
+        await self.feedback(False, True)
+
+        async def wait(seconds):
+            self.assertEqual(seconds, 0.1)
+            self.assertEqual(self.hub.sent_analog, [(20, 0)])
+            # 模拟主控在等待期间回传零；目标记忆仍应保留。
+            self.hub.analog[20] = 0
+            await self.light.process_callback("a20", "0")
+            self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 32768)
+
+        with patch.object(light_mod, "ON_RESET_SECONDS", OPEN_DELAY_SECONDS):
+            with patch.object(light_mod.asyncio, "sleep", wait):
+                await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 32768)])
+
+    async def test_missing_or_zero_saved_level_opens_at_full_without_power_on(self):
+        for controls in ({"on_join": 30, "off_join": 31}, {"switch_join": 32}):
+            for saved in (None, 0):
+                with self.subTest(controls=controls, saved=saved):
+                    hub = FakeHub()
+                    light = light_mod.CrestronLight(hub, {
+                        "name": "灯", "brightness_join": 20, **controls})
+                    light._last_state = types.SimpleNamespace(
+                        state="off", attributes={"last_nonzero_brightness": saved})
+                    await light.async_added_to_hass()
+                    await light.async_turn_off()
+                    self.assertEqual(hub.sent_analog, [])
+                    hub.sent_digital.clear()
+                    await light.async_turn_on()
+                    self.assertEqual(hub.sent_digital, [])
+                    self.assertEqual(hub.sent_analog, [(20, 0), (20, 65535)])
+                    self.assertEqual(light.extra_state_attributes["last_nonzero_brightness"], 65535)
+
+    async def test_saved_nonzero_level_survives_zero_feedback_and_power_cycle(self):
+        self.light._last_state = types.SimpleNamespace(
+            state="off", attributes={"last_nonzero_brightness": 23456})
+        await self.light.async_added_to_hass()
+        await self.feedback(False, True, brightness=0)
+        await self.light.process_callback("a20", "0")
+        await self.light.async_turn_on()
+        await self.light.async_turn_off()
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 23456)])
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 23456)
+
+    async def test_off_seeds_memory_without_changing_current_brightness(self):
+        await self.feedback(True, False, brightness=23456)
+        await self.light.async_turn_off()
+        await self.feedback(False, True, brightness=0)
+        await self.light.process_callback("a20", "0")
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 23456)])
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 23456)
+
+    async def test_explicit_dimming_while_off_uses_only_analog(self):
+        await self.feedback(False, True)
+        await self.light.async_turn_on(brightness=64, color_temp_kelvin=4000)
+        self.assertEqual(self.hub.sent_analog,
+                         [(20, 0),
+                          (20, round(64 / 255 * 65535)), (21, 4000)])
+        self.assertEqual(self.hub.sent_digital, [])
+        self.assertFalse(self.light.is_on)
+
+    async def test_already_on_dimming_and_color_do_not_pulse_power(self):
+        await self.feedback(True, False)
+        await self.light.async_turn_on(brightness=128)
+        await self.light.async_turn_on(color_temp_kelvin=4500)
+        self.assertEqual(self.hub.sent_digital, [])
+        self.assertEqual(self.hub.sent_analog, [(20, 32896), (21, 4500)])
+
+    async def test_zero_brightness_uses_power_off_without_erasing_memory(self):
+        await self.light.async_turn_on(brightness=64)
+        self.hub.sent_analog.clear()
+        self.hub.sent_digital.clear()
+        await self.light.async_turn_on(brightness=0)
+        self.assertEqual(self.hub.sent_analog, [])
+        self.assertEqual(self.hub.sent_digital, [(31, True), (31, False)])
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"],
+                         round(64 / 255 * 65535))
+
+    async def test_held_switch_and_dedicated_feedback_priority(self):
+        light = light_mod.CrestronLight(self.hub, {
+            "name": "灯", "brightness_join": 20, "switch_join": 32,
+            "state_join": 33,
+        })
+        self.hub.analog[20] = 65535
+        self.hub.digital[32] = True
+        self.assertIsNone(light.is_on)
+        self.hub.digital[33] = False
+        self.assertFalse(light.is_on)
+        await light.async_turn_on()
+        await light.async_turn_off()
+        self.assertEqual(self.hub.sent_digital, [(32, False)])
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 65535)])
+        self.assertEqual(light._callback_joins(), ["a20", "d33"])
+        without_state = light_mod.CrestronLight(self.hub, {
+            "name": "灯", "brightness_join": 20, "switch_join": 32})
+        self.assertTrue(without_state.is_on)
+        self.hub.digital[32] = False
+        self.assertFalse(without_state.is_on)
+
+    async def test_callback_joins_and_unique_id_stay_consistent(self):
+        self.assertEqual(self.light._callback_joins(), ["a20", "a21", "d30", "d31"])
+        self.assertEqual(self.light._attr_unique_id, make_light(self.hub)._attr_unique_id)
+
+    async def test_power_pulses_serialize_and_release_on_cancellation(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold(seconds):
+            entered.set()
+            await release.wait()
+
+        with patch.object(light_mod.asyncio, "sleep", hold):
+            first = asyncio.create_task(self.light.async_turn_off())
+            await entered.wait()
+            second = asyncio.create_task(self.light.async_turn_off())
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            release.set()
+            await second
+        self.assertEqual(self.hub.sent_digital,
+                         [(31, True), (31, False), (31, True), (31, False)])
+
+    async def test_removal_drops_queued_power_command(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold(seconds):
+            entered.set()
+            await release.wait()
+
+        with patch.object(light_mod.asyncio, "sleep", hold):
+            first = asyncio.create_task(self.light.async_turn_off())
+            await entered.wait()
+            second = asyncio.create_task(self.light.async_turn_on(brightness=128))
+            await self.light.async_will_remove_from_hass()
+            release.set()
+            await first
+            await second
+        self.assertEqual(self.hub.sent_digital, [(31, True), (31, False)])
+        self.assertEqual(self.hub.sent_analog, [])
+
+    async def test_new_off_cancels_queued_analog_on_and_color(self):
+        # 模拟上一条命令占用锁；更新的关灯应淘汰排队中的开灯及色温。
+        await self.light._power_command_lock.acquire()
+        first = asyncio.create_task(self.light.async_turn_on(
+            brightness=102, color_temp_kelvin=4000))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(self.light.async_turn_off())
+        await asyncio.sleep(0)
+        self.light._power_command_lock.release()
+        await asyncio.gather(first, second)
+        self.assertEqual(self.hub.sent_analog, [])
+        self.assertEqual(self.hub.sent_digital, [(31, True), (31, False)])
+
+    async def test_bulk_on_resets_then_restores_each_memory_without_digital_on(self):
+        lights = []
+        expected = []
+        for index in range(10):
+            join = 100 + index
+            light = light_mod.CrestronLight(self.hub, {
+                "name": f"灯{index}", "brightness_join": join,
+                "on_join": 200 + index * 2, "off_join": 201 + index * 2})
+            level = 5000 + index * 4000
+            light._last_state = types.SimpleNamespace(
+                state="off", attributes={"last_nonzero_brightness": level})
+            await light.async_added_to_hass()
+            self.hub.digital.update({200 + index * 2: False, 201 + index * 2: True})
+            lights.append(light)
+            expected.extend([(join, 0), (join, level)])
+        await asyncio.gather(*(light.async_turn_on() for light in lights))
+        self.assertCountEqual(self.hub.sent_analog, expected)
+        self.assertEqual(self.hub.sent_digital, [])
+
+    async def test_lowest_and_full_memory_survive_zero_before_on(self):
+        for level in (1, 65535):
+            with self.subTest(level=level):
+                await self.feedback(False, True, brightness=0)
+                self.light._remember_brightness(level)
+                self.hub.sent_analog.clear()
+                await self.light.async_turn_on()
+                self.assertEqual(self.hub.sent_analog, [(20, 0), (20, level)])
+                self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], level)
+
+    async def test_new_off_stops_delayed_on_and_color_without_erasing_memory(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold(seconds):
+            entered.set()
+            await release.wait()
+
+        await self.feedback(False, True, brightness=0)
+        with patch.object(light_mod.asyncio, "sleep", hold):
+            first = asyncio.create_task(self.light.async_turn_on(
+                brightness=102, color_temp_kelvin=4000))
+            await entered.wait()
+            self.hub.analog[20] = 0
+            await self.light.process_callback("a20", "0")
+            self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 26214)
+            second = asyncio.create_task(self.light.async_turn_off())
+            ready = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(ready.set_result, None)
+            await ready
+            release.set()
+            await asyncio.gather(first, second)
+        self.assertEqual(self.hub.sent_analog, [(20, 0)])
+        self.assertEqual(self.hub.sent_digital, [(31, True), (31, False)])
+        self.assertEqual(self.light.extra_state_attributes["last_nonzero_brightness"], 26214)
+
+    async def test_cancel_or_remove_stops_delayed_on(self):
+        for cancel in (True, False):
+            with self.subTest(cancel=cancel):
+                hub = FakeHub()
+                light = light_mod.CrestronLight(hub, {
+                    "name": "灯", "brightness_join": 20,
+                    "on_join": 30, "off_join": 31})
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def hold(seconds):
+                    entered.set()
+                    await release.wait()
+
+                with patch.object(light_mod.asyncio, "sleep", hold):
+                    task = asyncio.create_task(light.async_turn_on(brightness=102))
+                    await entered.wait()
+                    if cancel:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                    else:
+                        await light.async_will_remove_from_hass()
+                        release.set()
+                        await task
+                self.assertEqual(hub.sent_analog, [(20, 0)])
+
+    async def test_on_after_off_restores_even_if_digital_feedback_is_still_on(self):
+        await self.feedback(True, False, brightness=26214)
+        await self.light.async_turn_off()
+        self.assertTrue(self.light.is_on)
+        await self.light.async_turn_on()
+        self.assertEqual(self.hub.sent_analog, [(20, 0), (20, 26214)])
+        self.assertEqual(self.hub.sent_digital, [(31, True), (31, False)])
+
+    async def test_panel_reopens_after_confirmed_off_then_dimming_does_not_reset(self):
+        await self.feedback(True, False, brightness=26214)
+        await self.light.async_turn_off()
+        await self.feedback(False, True, brightness=0)
+        await self.feedback(True, False, brightness=26214)
+        await self.light.async_turn_on(brightness=128)
+        self.assertEqual(self.hub.sent_analog, [(20, 32896)])
+
+    async def test_controller_with_full_brightness_on_button_reopens_at_memory(self):
+        class Hub(ChangeDrivenHub):
+            def set_digital(self, join, value):
+                super().set_digital(join, value)
+                if value:
+                    self.actual_level = 65535 if join == 30 else 0
+
+        hub = Hub()
+        light = light_mod.CrestronLight(hub, {
+            "name": "灯", "brightness_join": 20, "on_join": 30, "off_join": 31})
+
+        async def feedback():
+            hub.analog[20] = hub.actual_level
+            hub.digital.update({30: hub.actual_level > 0, 31: hub.actual_level == 0})
+            await light.process_callback("a20", str(hub.actual_level))
+            await light.process_callback("d30", str(hub.actual_level > 0))
+
+        await light.async_turn_on()
+        await feedback()
+        await light.async_turn_on(brightness=102)
+        await feedback()
+        self.assertEqual(hub.actual_level, 26214)
+        await light.async_turn_off()
+        await feedback()
+        self.assertEqual(hub.command_level, 26214)
+        self.assertFalse(light.is_on)
+        await light.async_turn_on()
+        await feedback()
+        self.assertEqual(hub.actual_level, 26214)
+        self.assertTrue(light.is_on)
+        self.assertEqual(light.extra_state_attributes["last_nonzero_brightness"], 26214)
+        self.assertNotIn((30, True), hub.sent_digital)
 
 
 if __name__ == "__main__":

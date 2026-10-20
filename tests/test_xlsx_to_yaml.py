@@ -149,12 +149,17 @@ class LightTests(unittest.TestCase):
             g.build_light(light_row(名称="错误灯", 开="1"))
         )
 
-    def test_mixed_analog_and_digital_control_is_skipped(self):
-        self.assertIsNone(
-            g.build_light(
-                light_row(名称="歧义灯", 亮度="1", 开="1", 关="2")
-            )
-        )
+    def test_dimmable_with_power_joins_keeps_identity_and_controls(self):
+        for extra in ({}, {"色温": "201"}):
+            with self.subTest(extra=extra):
+                _, ent = g.build_light(light_row(
+                    名称="调光灯", 亮度="1", 开="1", 关="2", **extra))
+                self.assertEqual(ent["brightness_join"], 1)
+                self.assertEqual((ent["on_join"], ent["off_join"]), (1, 2))
+                self.assertEqual(ent["device_id"], "light_1")
+
+    def test_dimmable_with_half_power_pair_is_skipped(self):
+        self.assertIsNone(g.build_light(light_row(名称="灯", 亮度="1", 开="2")))
 
     def test_placeholder_skipped(self):
         self.assertIsNone(g.build_light(light_row(名称="x", 功能="//")))
@@ -372,15 +377,14 @@ class ValidationTests(unittest.TestCase):
         row["亮度"] = "1025"
         self.assertIn("亮度: 必须在 1–1024 范围内", g._row_errors("灯光", row))
 
-    def test_mixed_light_controls_have_specific_error(self):
+    def test_dimmable_power_pair_is_valid_but_half_pair_is_rejected(self):
         errors = g._row_errors(
             "灯光",
             light_row(名称="歧义灯", 亮度="20", 开="10", 关="11"),
         )
-        self.assertIn(
-            "模拟量控制（亮度/色温）不能与数字量控制（开/关）混填",
-            errors,
-        )
+        self.assertEqual(errors, [])
+        self.assertIn("开和关必须成对填写", g._row_errors(
+            "灯光", light_row(名称="灯", 亮度="20", 开="10")))
 
     def test_required_cover_joins_reported(self):
         errors = g._row_errors(

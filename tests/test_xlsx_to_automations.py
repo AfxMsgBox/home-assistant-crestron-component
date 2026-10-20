@@ -174,10 +174,25 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn('switch.button', content)
         self.assertNotIn('无法识别', content)
 
+    def test_dimmable_power_joins_survive_generation_and_match_existing_entity(self):
+        workbook(self.xlsx, rows=[
+            ['B2', '车库', '灯带', '2', '30', '31', 'switch.button', ''],
+        ])
+        device_output = self.root / 'crestron.yaml'
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.devices.generate(str(self.xlsx), str(device_output))
+        ent = yaml.safe_load(device_output.read_text())['light'][0]
+        self.assertEqual((ent['brightness_join'], ent['on_join'], ent['off_join']),
+                         (2, 30, 31))
+        self.assertEqual(ent['device_id'], 'light_2')
+        sm, _, _ = g.build_maps(g.read_associations(self.xlsx), registry())
+        self.assertEqual(sm['switch.button']['light_entity_ids'], ['light.renamed'])
+
     def test_identity_matches_integration_contract(self):
         from loader import load
         uid = load('unique_ids')
         for platform, config in [('light', {'brightness_join': 2}),
+                                 ('light', {'brightness_join': 2, 'on_join': 30, 'off_join': 31}),
                                  ('light', {'on_join': 3}),
                                  ('switch', {'on_join': 4}),
                                  ('climate', {'on_join': 5})]:

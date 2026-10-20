@@ -1,14 +1,52 @@
 #!/usr/bin/env node
 // 部署 HA 原生仪表盘，需要 Node.js 22+，无需安装 npm 依赖。
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { createInterface } from 'node:readline';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fail = message => { throw new Error(message); };
+
+// 与 Shell/Python 使用相同的状态标签；重定向日志不写 ANSI 控制码。
+export function terminalUi(stream = process.stdout) {
+  const paint = (text, code) => stream.isTTY && !('NO_COLOR' in process.env) && process.env.TERM !== 'dumb'
+    ? `\x1b[${code}m${text}\x1b[0m` : text;
+  const width = text => [...String(text)].reduce((n, c) => {
+    const cp = c.codePointAt(0);
+    return n + (/\p{Mark}/u.test(c) ? 0 : cp >= 0x2e80 && cp <= 0xa4cf || cp >= 0xac00 && cp <= 0xd7a3
+      || cp >= 0xff01 && cp <= 0xff60 || cp >= 0x1f300 && cp <= 0x1faff ? 2 : 1);
+  }, 0);
+  return {
+    log(text, level = 'info') {
+      const [label, code] = { info: ['信息', '36'], step: ['进行', '1;34'], success: ['完成', '32'],
+        warning: ['警告', '33'], error: ['错误', '31'] }[level];
+      stream.write(`${paint(`[${label}]`, code)} ${text}\n`);
+    },
+    heading(text) { stream.write(`\n${paint(`── ${text} ──`, '1;34')}\n`); },
+    details(rows) {
+      const size = Math.max(0, ...rows.map(([key]) => width(key)));
+      for (const [key, value] of rows) stream.write(`       ${paint(key + ' '.repeat(size - width(key)), '36')} : ${value}\n`);
+    },
+    table(headers, values, right = []) {
+      const clean = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/gu,
+        c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+      const rows = [headers, ...values].map(row => row.map(clean));
+      const widths = headers.map((_, i) => Math.max(...rows.map(row => width(row[i]))));
+      rows.forEach((row, index) => {
+        const line = row.map((value, i) => {
+          const pad = ' '.repeat(widths[i] - width(value));
+          return right.includes(i) ? pad + value : value + pad;
+        }).join('  ').trimEnd();
+        stream.write('  ' + (index ? line : paint(line, '1;36')) + '\n');
+        if (!index) stream.write('  ' + paint(widths.map(size => '─'.repeat(size)).join('  '), '36') + '\n');
+      });
+    },
+    prompt(text) { stream.write(paint('[选择]', '1;33') + ' ' + text); },
+  };
+}
 
 export function loadDashboards(directory) {
   const files = [];
@@ -123,15 +161,15 @@ export function overwritePrompt(readLine, log = console.log) {
   return async name => {
     if (all !== undefined) return all;
     for (;;) {
-      const answer = await readLine(`已存在 ${name}，是否覆盖？[y 覆盖 / n 跳过 / All yes 全部覆盖 / All no 全部跳过，默认 n] `);
+      const answer = await readLine(`已存在 ${name}，是否覆盖？[Y/n / All yes / All no，默认 Y] `);
       if (answer === null) {
         all = false;
         log('输入结束，跳过当前及后续已有页面；新页面仍会创建。');
         return false;
       }
       switch (answer.trim().toLowerCase().replace(/\s+/g, ' ')) {
-        case 'y': return true;
-        case '': case 'n': return false;
+        case '': case 'y': case 'yes': case '是': return true;
+        case 'n': case 'no': case '否': return false;
         case 'all yes': all = true; return true;
         case 'all no': all = false; return false;
         default: log('请输入 y（覆盖）、n（跳过）、All yes（全部覆盖）或 All no（全部跳过）。');
@@ -319,6 +357,7 @@ jq -ce '.data as $d | ($d.users | map(select(.is_owner and .is_active)) | first 
 }
 
 export async function main(argv) {
+  const ui = terminalUi();
   const options = {};
   let command = [];
   for (let i = 0; i < argv.length; i++) {
@@ -333,7 +372,7 @@ export async function main(argv) {
   const waitSeconds = Number(options.wait ?? 120);
   if (!Number.isInteger(waitSeconds) || waitSeconds < 1 || waitSeconds > 9999) fail('--wait-seconds 必须在 1..9999 之间');
   const items = loadDashboards(options.dir);
-  if (options.check || !items.length) { console.log(`仪表盘配置检查通过：${items.length} 个页面`); return; }
+  if (options.check || !items.length) { ui.log(`仪表盘配置检查通过：${items.length} 个页面`, 'success'); return; }
   if (!options.backup) fail('必须指定 --remote-backup-dir');
   const backup = remoteBackup(command, options.backup);
   if (typeof WebSocket !== 'function') fail('部署仪表盘需要 Node.js 22 或更新版本');
@@ -343,19 +382,31 @@ export async function main(argv) {
   let input;
   try {
     await api.ready;
+    ui.heading('部署仪表盘');
+    ui.details([['页面数量', items.length], ['备份目录', options.backup]]);
+    ui.log('页面模板文件（动态页面按目标 HA 实体生成）');
+    ui.table(['文件', '大小', '最后修改时间（UTC）'], items.map(item => {
+      const stat = statSync(item.file);
+      return [relative(options.dir, item.file), `${stat.size.toLocaleString('en-US')} B`,
+        stat.mtime.toISOString().slice(0, 19).replace('T', ' ')];
+    }), [1]);
+    ui.log('覆盖选择：回车或 y 覆盖，n 跳过；All yes 全部覆盖，All no 全部跳过。');
     // 首次提问时才读取标准输入，避免提前消耗用户输入。
     let iterator;
     const ask = overwritePrompt(async prompt => {
       if (!input) { input = createInterface({ input: process.stdin, crlfDelay: Infinity }); iterator = input[Symbol.asyncIterator](); }
-      process.stdout.write(prompt);
+      ui.prompt(prompt);
       const result = await iterator.next();
+      if (!process.stdin.isTTY) process.stdout.write('\n');
       return result.done ? null : result.value;
-    });
-    const result = await deployDashboards(items, api, ask, backup, console.log, waitSeconds);
-    console.log(`仪表盘部署完成：新建 ${result.created}，覆盖 ${result.overwritten}，跳过 ${result.skipped}`);
+    }, text => ui.log(text, 'warning'));
+    const result = await deployDashboards(items, api, ask, backup,
+      text => ui.log(text, /^(已覆盖|已创建)/u.test(text) ? 'success' : 'info'), waitSeconds);
+    ui.log('仪表盘部署完成', 'success');
+    ui.details([['新建', result.created], ['覆盖', result.overwritten], ['跳过', result.skipped]]);
   } finally { input?.close(); api.close(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main(process.argv.slice(2)).catch(err => { console.error(`错误：${err.message}`); process.exitCode = 1; });
+  main(process.argv.slice(2)).catch(err => { terminalUi(process.stderr).log(`错误：${err.message}`, 'error'); process.exitCode = 1; });
 }

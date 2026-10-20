@@ -130,10 +130,17 @@ class LightCapabilityTests(unittest.TestCase):
         """state_join alone yields crestron_light_onoff_None and no control."""
         self._invalid({"name": "灯", "state_join": 50})
 
-    def test_mixed_analog_and_digital_control_rejected(self):
-        self._invalid(
+    def test_dimmable_with_digital_power_accepted(self):
+        self._valid(
             {"name": "灯", "brightness_join": 1, "on_join": 2, "off_join": 3}
         )
+        self._valid({"name": "灯", "brightness_join": 1, "switch_join": 2})
+        self._valid({"name": "灯", "brightness_join": 1, "color_temp_join": 201,
+                     "on_join": 2, "off_join": 3, "state_join": 4})
+
+    def test_dimmable_still_requires_complete_power_pair(self):
+        self._invalid({"name": "灯", "brightness_join": 1, "on_join": 2})
+        self._invalid({"name": "灯", "brightness_join": 1, "off_join": 3})
 
 
 class EmptyCollectionTests(unittest.TestCase):

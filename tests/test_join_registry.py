@@ -61,6 +61,18 @@ class ConflictTests(unittest.TestCase):
         }
         self.assertEqual(reg.find_conflicts(config), [])
 
+    def test_dimmable_on_join_is_read_only_but_off_is_still_writable(self):
+        config = {"light": [{"name": "调光灯", "brightness_join": 20,
+                              "on_join": 30, "off_join": 31}]}
+        usage = reg.collect_join_usage(config)
+        self.assertFalse(usage[("d", 30)][0].writes)
+        self.assertTrue(usage[("d", 31)][0].writes)
+        self.assertTrue(usage[("a", 20)][0].writes)
+        config["to_joins"] = [{"join": "d30", "entity_id": "switch.example"}]
+        self.assertEqual(reg.find_conflicts(config), [])
+        config["to_joins"][0]["join"] = "d31"
+        self.assertEqual(len(reg.find_conflicts(config)), 1)
+
     def test_to_joins_colliding_with_entity_command_join(self):
         config = {
             "switch": [{"name": "排气扇", "switch_join": 65}],

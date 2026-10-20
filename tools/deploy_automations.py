@@ -158,8 +158,10 @@ success=yes
 '''
 
 
-def upload(command, backup, content, old_config, old_manual, new_config):
+def upload(command, backup, content, old_config, old_manual, new_config, *, content_mtime=None):
     data = io.BytesIO()
+    now = int(time.time())
+    entries = []
     with tarfile.open(fileobj=data, mode='w:gz') as archive:
         files = {'automations_manual.yaml': content.encode()}
         if new_config != old_config:
@@ -167,19 +169,47 @@ def upload(command, backup, content, old_config, old_manual, new_config):
         for name, value in files.items():
             info = tarfile.TarInfo(name)
             info.size, info.mode = len(value), 0o600
+            info.mtime = int(content_mtime) if name == 'automations_manual.yaml' and content_mtime is not None else now
+            entries.append((name, info.size, info.mtime))
             archive.addfile(info, io.BytesIO(value))
     script = install_script(backup, old_config, old_manual, new_config != old_config)
+    common.message('正在上传自动化配置并检查 HA 配置', 'step')
+    common.file_table(entries)
     remote(command, script, data.getvalue(), timeout=180)
 
 
-def ask_upload(existing, add_include, read=input):
+def show_associations(rows, snapshot, switch_map, occupancy_map):
+    """从匹配后的映射生成表格，不解析报告句子，也不重新推断实体 ID。"""
+    registry = generator.Registry(snapshot)
+    targets = {registry.target(row): row['config'] for row in rows}
+    groups = [('开关双向关联', '控制开关', switch_map), ('人在控制', '人在传感器', occupancy_map)]
+    names = {'light': '灯光', 'switch': '插座', 'climate': '空调'}
+    all_targets = set()
+    for title, role, mapping in groups:
+        for source, config in sorted(mapping.items()):
+            ids = sorted(eid for values in config.values() for eid in values)
+            all_targets.update(ids)
+            common.heading(f'{title} · {len(ids)} 台设备')
+            records = [(role, *registry.describe(source), source)]
+            for eid in ids:
+                cfg = targets[eid]
+                records.append(('被控' + names[eid.split('.')[0]], cfg['floor'], cfg['room'], cfg['name'], eid))
+            common.table(('角色', '楼层', '房间', '名称', '实体 ID'), records)
+    common.details([('控制开关', len(switch_map)), ('人在传感器', len(occupancy_map)),
+                    ('被控设备', len(all_targets))])
+    if switch_map:
+        common.message('开关双向同步：任意被控设备开启算开，全部关闭才算关。')
+    if occupancy_map:
+        common.message('人在控制：同一设备关联的传感器任意有人开启，全部无人持续 30 秒关闭。')
+    if not all_targets:
+        common.message('未填写有效关联；上传后会移除该文件中的旧关联。', 'warning')
+
+
+def ask_upload(existing, add_include, read=None):
     changes = '覆盖服务器已有 automations_manual.yaml' if existing else '上传新的 automations_manual.yaml'
     if add_include:
         changes += '，并添加 configuration.yaml 引用'
-    try:
-        return read(f'{changes}，检查后重载自动化，是否继续？[y/N] ').strip().lower() in ('y', 'yes', '是')
-    except EOFError:
-        return False
+    return common.ask_yes_no(f'{changes}，检查后重载自动化，是否继续？', default=True, read=read)
 
 
 def main(argv=None):
@@ -212,7 +242,9 @@ def main(argv=None):
         raise generator.AssociationError('注册表导出路径不能覆盖输入或自动化文件')
     api = Api(command, args.ha_url)
     deadline = time.monotonic() + args.wait_seconds
-    print('正在读取 HA 注册表并等待关联实体完成注册/加载...', flush=True)
+    common.heading('第二步：生成并部署自动化关联')
+    common.details([('工作簿', args.xlsx), ('自动化输出', args.output)])
+    common.message('正在读取 HA 注册表并等待关联实体完成注册/加载...', 'step')
     while True:
         snapshot = read_registry(command, api)
         try:
@@ -221,30 +253,31 @@ def main(argv=None):
         except generator.RegistryPending as error:
             if time.monotonic() >= deadline:
                 raise generator.AssociationError(f'等待实体超时，未覆盖自动化；请检查第一阶段设备导入：\n{error}') from error
-            print(f'{error}\n5 秒后重试...', flush=True)
+            common.message(f'{error}\n       5 秒后重试...', 'warning')
             time.sleep(min(5, max(0, deadline - time.monotonic())))
     content = generator.render_template(template, switch_map, occupancy_map, report)
-    print('\n关联清单：')
-    for line in report:
-        print('  ' + line)
+    common.heading('关联清单')
+    show_associations(rows, snapshot, switch_map, occupancy_map)
     generator.atomic_write(args.output, content)
-    print(f'已生成 {args.output}，关联清单也已保存在文件顶部注释中。')
+    common.message(f'已生成 {args.output}，关联清单也已保存在文件顶部注释中。', 'success')
     if args.export_registry:
         generator.atomic_write(args.export_registry, json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n')
     if args.upload == 'no':
-        print('已按选项跳过上传。')
+        common.message('已按选项跳过上传。')
         return 0
     old_config = read_optional(command, CONFIG)
     old_manual = read_optional(command, MANUAL)
     new_config = include_config(old_config)
     if args.upload == 'ask' and not ask_upload(old_manual is not None, new_config != old_config):
-        print('已保留本地生成文件，跳过服务器自动化修改。')
+        common.message('已保留本地生成文件，跳过服务器自动化修改。')
         return 0
     if not args.backup_dir:
         # 独立第二步在确认上传后才创建备份；完整流程复用第一步的目录。
         args.backup_dir = common.create_backup(command)
-    upload(command, args.backup_dir, content, old_config, old_manual, new_config)
-    print(f'文件已上传，配置检查通过；备份：{args.backup_dir}/automation/')
+    upload(command, args.backup_dir, content, old_config, old_manual, new_config,
+           content_mtime=Path(args.output).stat().st_mtime)
+    common.message('文件已上传，配置检查通过', 'success')
+    common.details([('备份目录', f'{args.backup_dir}/automation/')])
     try:
         api.request('api/services/automation/reload', post=True)
     except (generator.AssociationError, ValueError, subprocess.TimeoutExpired) as error:
@@ -253,7 +286,9 @@ def main(argv=None):
     installed = [s for s in states if s.get('attributes', {}).get('id') == 'crestron_manual_associations']
     if len(installed) != 1 or installed[0].get('state') not in ('on', 'off'):
         raise generator.AssociationError('重载请求完成，但未确认自动化实体正常加载；请查看 HA 日志，勿重复创建')
-    print(f"自动化部署完成：{installed[0]['entity_id']}，状态 {'启用' if installed[0]['state'] == 'on' else '停用（保留原状态）'}。")
+    common.message('自动化部署完成', 'success')
+    common.details([('实体 ID', installed[0]['entity_id']),
+                    ('状态', '启用' if installed[0]['state'] == 'on' else '停用（保留原状态）')])
     return 0
 
 
@@ -293,5 +328,5 @@ if __name__ == '__main__':
     try:
         raise SystemExit(entry())
     except (generator.AssociationError, common.DeployError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-        print(f'[中止] {error}', file=sys.stderr)
+        common.message(f'[中止] {error}', 'error', file=sys.stderr)
         raise SystemExit(1)

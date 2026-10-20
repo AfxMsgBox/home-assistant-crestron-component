@@ -1,6 +1,7 @@
 """两步部署共用的启动、SSH、服务器备份和 HTTP 恢复检查。仅使用标准库。"""
 
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -9,11 +10,80 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 
 class DeployError(Exception):
     """可直接展示给用户的部署错误。"""
+
+
+def styled(text, code, stream=None):
+    """只在终端启用颜色；日志文件和 NO_COLOR 环境保持纯文本。"""
+    stream = sys.stdout if stream is None else stream
+    if stream.isatty() and 'NO_COLOR' not in os.environ and os.environ.get('TERM') != 'dumb':
+        return f'\033[{code}m{text}\033[0m'
+    return text
+
+
+def message(text, level='info', *, file=None):
+    stream = sys.stdout if file is None else file
+    label, code = {'info': ('信息', '36'), 'step': ('进行', '1;34'),
+                   'success': ('完成', '32'), 'warning': ('警告', '33'),
+                   'error': ('错误', '31')}[level]
+    print(f'{styled("[" + label + "]", code, stream)} {text}', file=stream, flush=True)
+
+
+def heading(text):
+    print('\n' + styled(f'── {text} ──', '1;34'), flush=True)
+
+
+def display_width(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in 'WF' else 1
+               for c in str(text))
+
+
+def details(rows):
+    """先按中文显示宽度补齐标签，再上色，避免 ANSI 码影响对齐。"""
+    rows = list(rows)
+    width = max((display_width(label) for label, _ in rows), default=0)
+    for label, value in rows:
+        key = str(label) + ' ' * (width - display_width(label))
+        print(f'       {styled(key, "36")} : {value}', flush=True)
+
+
+def table(headers, rows, *, right=()):
+    """按显示宽度对齐，控制字符转为可见文本，完整保留名称和 ID。"""
+    def cell(value):
+        return ''.join(c if c.isprintable() else repr(c)[1:-1] for c in str(value))
+
+    rows = [[cell(value) for value in row] for row in [headers, *rows]]
+    widths = [max(display_width(row[i]) for row in rows) for i in range(len(headers))]
+    for index, row in enumerate(rows):
+        cells = []
+        for i, value in enumerate(row):
+            padding = ' ' * (widths[i] - display_width(value))
+            cells.append(padding + value if i in right else value + padding)
+        line = '  '.join(cells).rstrip()
+        print('  ' + (styled(line, '1;36') if index == 0 else line), flush=True)
+        if index == 0:
+            print('  ' + styled('  '.join('─' * width for width in widths), '36'), flush=True)
+
+
+def file_table(entries):
+    """entries 为 (文件名, 字节数, 修改时间戳)，统一使用 UTC，避免时区歧义。"""
+    table(('文件', '大小', '最后修改时间（UTC）'),
+          [(name, f'{size:,} B', datetime.fromtimestamp(mtime, timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
+           for name, size, mtime in entries], right=(1,))
+
+
+def local_files(paths, *, base=None):
+    entries = []
+    for path in paths:
+        path = Path(path)
+        stat = path.stat()
+        entries.append((path.relative_to(base) if base else path.name, stat.st_size, stat.st_mtime))
+    file_table(entries)
 
 
 def launch(stage, argv):
@@ -46,17 +116,26 @@ def require(program):
         raise DeployError(f'找不到 {program} 命令')
 
 
-def ask_yes_no(prompt):
+def ask_yes_no(prompt, *, default=False, read=None):
+    native_input = read is None
+    read = input if read is None else read
+    hint = '[Y/n]' if default else '[y/N]'
     while True:
         try:
-            answer = input(prompt + ' [y/N] ').strip().lower()
+            answer = read(styled('[选择]', '1;33') + f' {prompt} {hint} ').strip().lower()
         except EOFError:
+            if native_input and not sys.stdin.isatty():
+                print(flush=True)
             return False
+        if native_input and not sys.stdin.isatty():
+            print(flush=True)
+        if not answer:
+            return default
         if answer in ('y', 'yes', '是'):
             return True
-        if answer in ('', 'n', 'no', '否'):
+        if answer in ('n', 'no', '否'):
             return False
-        print('请输入 y（是）或 n（否）。', flush=True)
+        message('请输入 y（是）或 n（否），回车使用提示中的默认值。', 'warning')
 
 
 class Connection:
@@ -87,14 +166,15 @@ class Connection:
         self.host = args.host
         self.target = f'{args.user}@{args.host}'
         self.ssh = prefix + ['ssh', '-p', str(args.port), *options, self.target]
-        self.scp = prefix + ['scp', '-O', '-P', str(args.port), *options]
+        # -q 关闭进度百分比、速度和预计耗时；失败仍检查退出码并报告。
+        self.scp = prefix + ['scp', '-q', '-O', '-P', str(args.port), *options]
 
     def remote(self, script, *, capture=False, timeout=180, message='SSH 操作失败'):
         return run([*self.ssh, script], capture=capture, timeout=timeout,
                    message=message, env=self.env)
 
     def check(self):
-        print(f'正在测试 SSH 连接：{self.target}', flush=True)
+        message(f'正在测试 SSH 连接：{self.target}', 'step')
         self.remote('test -d /homeassistant')
 
 
@@ -114,7 +194,8 @@ def create_backup(command, env=None):
     path = run([*command, script], capture=True, timeout=45, env=env,
                message='无法创建服务器备份目录').strip()
     validate_backup(path)
-    print(f'本次服务器备份目录：{path}', flush=True)
+    message('已创建本次服务器备份目录', 'success')
+    details([('备份目录', path)])
     return path
 
 
@@ -140,7 +221,8 @@ def core_url(connection, override=''):
 def wait_for_http(connection, url, seconds):
     url = url.rstrip('/') + '/api/'
     command = "curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' -- " + shlex.quote(url)
-    print(f'正在通过 SSH 在服务器端检查 Home Assistant HTTP 接口：{url}（最长等待 {seconds} 秒）', flush=True)
+    message('正在通过 SSH 在服务器端检查 Home Assistant HTTP 接口', 'step')
+    details([('探测地址', url), ('最长等待', f'{seconds} 秒')])
     start = time.monotonic()
     while True:
         probe = subprocess.run([*connection.ssh[:-1], '-o', 'ServerAliveInterval=5',
@@ -148,9 +230,10 @@ def wait_for_http(connection, url, seconds):
                                capture_output=True, text=True, env=connection.env, timeout=30)
         status = probe.stdout.strip()
         if probe.returncode == 0 and status in ('200', '401'):
+            message(f'Home Assistant HTTP 接口已恢复（HTTP {status}）', 'success')
             return
         elapsed = time.monotonic() - start
-        print(f'已等待 {int(elapsed)}/{seconds} 秒，HTTP 状态：{status or "无响应"}，检查退出码：{probe.returncode}', flush=True)
+        message(f'已等待 {int(elapsed):>3}/{seconds} 秒，HTTP 状态：{status or "无响应"}，检查退出码：{probe.returncode}')
         if probe.stderr:
             print(probe.stderr, file=sys.stderr, flush=True)
         if elapsed >= seconds:
@@ -162,8 +245,8 @@ def cli(entry):
     try:
         return entry()
     except (DeployError, OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f'错误：{error}', file=sys.stderr)
+        message(f'错误：{error}', 'error', file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print('已取消部署。', file=sys.stderr)
+        message('已取消部署。', 'warning', file=sys.stderr)
         return 130

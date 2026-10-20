@@ -133,7 +133,8 @@ class Registry:
         self.check_entity(eid, row['location'])
         return eid
 
-    def label(self, eid):
+    def describe(self, eid):
+        """返回独立的位置和名称字段，供文本报告及部署表格共用。"""
         entry = self.entities.get(eid, {})
         device = self.devices.get(entry.get('device_id'), {})
         area_id = entry.get('area_id') or device.get('area_id')
@@ -147,7 +148,10 @@ class Registry:
             if prefix and prefix != name:
                 name = f'{prefix} {name}'
         name = ' '.join(str(name).split())
-        return f"{floor.get('name') or '未分配楼层'} / {area.get('name') or '未分配房间'} / {name} [{eid}]"
+        return floor.get('name') or '未分配楼层', area.get('name') or '未分配房间', name
+
+    def label(self, eid):
+        return ' / '.join(self.describe(eid)) + f' [{eid}]'
 
 
 def build_maps(rows, snapshot):

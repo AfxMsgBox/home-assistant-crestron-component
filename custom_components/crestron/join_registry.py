@@ -146,6 +146,10 @@ class Usage(NamedTuple):
 def _entity_usages(platform: str, config: dict[str, Any]) -> Iterable[Usage]:
     writes = _WRITE_FIELDS.get(platform, frozenset())
     reads = _READ_FIELDS.get(platform, frozenset())
+    if platform == "light" and config.get("brightness_join") is not None:
+        # 调光灯通过模拟量开灯，数字 on_join 只保留反馈用途。
+        writes = writes - {"on_join"}
+        reads = reads | {"on_join"}
     entity_name = config.get("name", "<unnamed>")
     device_name = config.get("device_name")
     if device_name and device_name != entity_name:

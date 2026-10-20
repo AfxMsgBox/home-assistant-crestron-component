@@ -4,6 +4,47 @@
 
 set -Eeuo pipefail
 
+# 单文件启动阶段不依赖其他源码；与 Python/Node 保持同样的状态样式。
+ui_log() {
+    local level=$1 label code color='' reset=''
+    shift
+    case "${level}" in
+        info) label=信息; code=36 ;;
+        step) label=进行; code='1;34' ;;
+        success) label=完成; code=32 ;;
+        warning) label=警告; code=33 ;;
+        error) label=错误; code=31 ;;
+    esac
+    if [[ -t 1 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then
+        color=$'\033['"${code}m"; reset=$'\033[0m'
+    fi
+    printf '%s[%s]%s %s\n' "${color}" "${label}" "${reset}" "$*"
+}
+
+ui_heading() {
+    local color='' reset=''
+    if [[ -t 1 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then
+        color=$'\033[1;34m'; reset=$'\033[0m'
+    fi
+    printf '\n%s── %s ──%s\n' "${color}" "$*" "${reset}"
+}
+
+ui_read() {
+    local variable=$1 prompt=$2 secret=${3:-false} color='' reset='' status=0
+    if [[ -t 2 && ${TERM:-} != dumb && ! -v NO_COLOR ]]; then
+        color=$'\033[1;33m'; reset=$'\033[0m'
+    fi
+    # 提示只走 stderr，避免污染 $(...) 中的来源、路径和 yes/no 返回值。
+    printf '%s[选择]%s %s' "${color}" "${reset}" "${prompt}" >&2
+    if [[ "${secret}" == true ]]; then
+        read -r -s "${variable}" || status=$?
+    else
+        read -r "${variable}" || status=$?
+    fi
+    [[ -t 0 ]] || printf '\n' >&2
+    return "${status}"
+}
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 LOCAL_PROJECT=false
@@ -102,7 +143,7 @@ YAML 选项：
 没有本地项目时自动选择 GitHub；完整源码下载并检查后才运行两个 Python 部署步骤。
 选择 GitHub 后分页读取全部分支，按编号选择（有 master 时默认 master，否则第一项）。
 再询问服务器地址、用户名和密码，密码留空使用 SSH 密钥。
-未指定选项时分别询问是否重新生成设备文件、自动化关联；回车或输入结束默认否。
+未指定选项时分别询问是否重新生成设备文件、自动化关联；回车默认 Yes，输入结束则跳过。
 第二步在设备重启生效后读取注册表，输出可读关联清单，确认上传后备份、检查并重载自动化。
 GitHub 模式下载所选分支最新提交；local 模式复制当前工作区，包含未提交和新增源码，
 排除 .git、local/、虚拟环境、缓存、.env 文件和 crestron.yaml；无需 git。
@@ -113,7 +154,11 @@ GitHub 模式下载所选分支最新提交；local 模式复制当前工作区�
 示例命令中的 HA_HOST 请替换为实际服务器地址。
 组件、转换器、自动化模板及工具、页面工具均来自所选源码。默认部署其中 dashboard/ 下所有 JSON 页面。
 已有页面可选 y（覆盖）、n（跳过）、All yes（全部覆盖）、All no（全部跳过）；
-回车默认为 n，输入结束时跳过所有剩余已有页面。新页面仍会创建。
+所有 yes/no 询问回车默认 Yes，包括重新生成设备/自动化、上传 YAML 和页面覆盖；输入 n 跳过。
+已有页面也支持 All yes / All no；输入结束时跳过所有剩余已有页面。新页面仍会创建。
+终端输出带颜色和对齐信息；设置 NO_COLOR=1 或重定向日志时自动关闭颜色。
+关联清单按控制端分组，按角色、楼层、房间、名称、实体 ID 对齐。
+上传文件列出大小和最后修改时间（UTC），不显示传输速度；页面显示本地模板文件信息。
 页面部署需要本机 Node.js 22+ 和可访问的 HA 网页地址。可用 HA_TOKEN 环境变量
 提供管理员令牌；否则经 SSH 读取目标 HA 现有所有者会话换取临时令牌。
 
@@ -145,7 +190,7 @@ EOF
 }
 
 die() {
-    printf '错误：%s\n' "$*" >&2
+    ui_log error "错误：$*" >&2
     exit 1
 }
 
@@ -339,21 +384,21 @@ prompt_required() {
     local prompt=$1
     local result=""
     while [[ -z "${result}" ]]; do
-        read -r -p "${prompt}" result || die "输入结束，请用参数提供服务器地址"
+        ui_read result "${prompt}" || die "输入结束，请用参数提供服务器地址"
     done
     printf '%s' "${result}"
 }
 
 ask_yes_no() {
     local prompt=$1
-    local default=${2:-no}
+    local default=${2:-yes}
     local answer=""
     local hint="[y/N]"
     [[ "${default}" == "yes" ]] && hint="[Y/n]"
 
     while true; do
-        if ! read -r -p "${prompt} ${hint} " answer; then
-            printf '%s' "${default}"
+        if ! ui_read answer "${prompt} ${hint} "; then
+            printf 'no'
             return
         fi
         answer=${answer:-${default}}
@@ -367,7 +412,7 @@ ask_yes_no() {
                 return
                 ;;
             *)
-                printf '请输入 y（是）或 n（否）。\n' >&2
+                ui_log warning '请输入 y（是）或 n（否）。' >&2
                 ;;
         esac
     done
@@ -390,7 +435,7 @@ if invalid:
 print(quote(branch, safe=''))
 PY
     ) || die "无法解析分支名"
-    printf '正在获取 GitHub 分支：%s（%s）\n' "${BRANCH}" "${mode_label}"
+    ui_log step "正在获取 GitHub 分支：${BRANCH}（${mode_label}）"
     curl -fLsS --connect-timeout 10 --max-time 120 --retry 2 \
         "https://api.github.com/repos/${OWNER_REPO}/git/ref/heads/${encoded_branch}" \
         -o "${STAGE_ROOT}/ref.json" || die "获取分支失败，请检查网络及 --branch（默认 master）；尚未上传文件"
@@ -404,7 +449,7 @@ if ref.get('ref') != 'refs/heads/' + sys.argv[2] or not re.fullmatch('[0-9a-f]{4
 print(sha)
 PY
     ) || die "无法确认 GitHub 提交"
-    printf '正在下载提交：%s\n' "${SOURCE_SHA}"
+    ui_log step "正在下载提交：${SOURCE_SHA}"
     curl -fLsS --connect-timeout 10 --max-time 120 --retry 2 \
         "https://codeload.github.com/${OWNER_REPO}/tar.gz/${SOURCE_SHA}" \
         -o "${STAGE_ROOT}/source.tar.gz" || die "源码下载失败；尚未上传文件"
@@ -462,7 +507,8 @@ select_github_branch() {
     local page=1 answer index default=1
     local branches=() batch=()
     command -v curl >/dev/null 2>&1 || die "读取 GitHub 分支需要 curl"
-    printf '正在读取 GitHub 全部分支：%s\n' "${OWNER_REPO}"
+    ui_heading 'GitHub 分支选择'
+    ui_log step "正在读取 GitHub 全部分支：${OWNER_REPO}"
     while true; do
         curl -fLsS --connect-timeout 10 --max-time 120 --retry 2 \
             "https://api.github.com/repos/${OWNER_REPO}/branches?per_page=100&page=${page}" \
@@ -488,11 +534,11 @@ PY
     done
     (( ${#branches[@]} > 0 )) || die "GitHub 仓库没有可选分支"
     for index in "${!branches[@]}"; do
-        printf '  %d. %s\n' "$((index + 1))" "${branches[index]}"
+        printf '  %3d. %s\n' "$((index + 1))" "${branches[index]}"
         [[ "${branches[index]}" != master ]] || default=$((index + 1))
     done
     while true; do
-        read -r -p "请选择分支编号 [${default}：${branches[default-1]}]：" answer \
+        ui_read answer "请选择分支编号 [${default}：${branches[default-1]}]：" \
             || die "输入结束，未选择 GitHub 分支"
         answer=${answer:-${default}}
         if [[ "${answer}" =~ ^[0-9]{1,6}$ ]]; then
@@ -502,31 +548,32 @@ PY
                 return
             fi
         fi
-        printf '请输入列表中的分支编号。\n' >&2
+        ui_log warning '请输入列表中的分支编号。' >&2
     done
 }
 
 select_source() {
     local answer
     if [[ "${LOCAL_PROJECT}" == false ]]; then
-        printf '未检测到本地项目，使用 GitHub 来源。\n'
+        ui_log info '未检测到本地项目，使用 GitHub 来源。'
         SOURCE_KIND=github
         select_github_branch
         return
     fi
-    printf '请选择部署来源：\n  1. 本地目录：%s（默认）\n  2. GitHub：%s\n' "${REPO_ROOT}" "${OWNER_REPO}"
+    ui_heading '请选择部署来源'
+    printf '    1. 本地目录 : %s（默认）\n    2. GitHub   : %s\n' "${REPO_ROOT}" "${OWNER_REPO}"
     while true; do
-        read -r -p '来源编号 [1]：' answer || die "输入结束，未选择部署来源"
+        ui_read answer '来源编号 [1]：' || die "输入结束，未选择部署来源"
         case "${answer:-1}" in
             1) SOURCE_KIND=local; return ;;
             2) SOURCE_KIND=github; select_github_branch; return ;;
-            *) printf '请输入 1 或 2。\n' >&2 ;;
+            *) ui_log warning '请输入 1 或 2。' >&2 ;;
         esac
     done
 }
 
 snapshot_local_source() {
-    printf '正在准备本地源码：%s\n' "${REPO_ROOT}"
+    ui_log step "正在准备本地源码：${REPO_ROOT}"
     SOURCE_ROOT="${STAGE_ROOT}/source/local"
     SOURCE_ID=$(python3 - "${REPO_ROOT}" "${SOURCE_ROOT}" "${STAGE_ROOT}" <<'PY'
 from datetime import datetime, timezone
@@ -581,7 +628,7 @@ if (( ORIGINAL_ARGC == 0 )) || { (( ORIGINAL_ARGC == 1 )) && [[ "${DEVICES_ONLY}
     INTERACTIVE=true
     select_source
 elif [[ "${LOCAL_PROJECT}" == false && "${SOURCE_WAS_SET}" == false && "${BRANCH_WAS_SET}" == false ]]; then
-    printf '未检测到本地项目，使用 GitHub master。\n'
+    ui_log info '未检测到本地项目，使用 GitHub master。'
     SOURCE_KIND=github
 fi
 
@@ -590,13 +637,13 @@ if [[ -z "${HOST}" ]]; then
 fi
 
 if [[ -z "${SSH_USER}" ]]; then
-    read -r -p "SSH 用户名 [root]：" SSH_USER
+    ui_read SSH_USER "SSH 用户名 [root]："
     SSH_USER=${SSH_USER:-root}
 fi
 
 # 无参数时询问密码；带参数时按显式密码、环境变量、密钥的顺序选择登录方式。
 if [[ "${INTERACTIVE}" == true ]]; then
-    read -r -s -p "SSH 密码（留空使用密钥登录）：" PASSWORD
+    ui_read PASSWORD "SSH 密码（留空使用密钥登录）：" true
     printf '\n'
     PASSWORD_WAS_SET=true
 elif [[ "${PASSWORD_WAS_SET}" == false ]]; then
@@ -639,11 +686,11 @@ if [[ -n "${PASSWORD}" ]] && ! command -v sshpass >/dev/null 2>&1; then
 fi
 
 if [[ -z "${GENERATE_YAML}" ]]; then
-    GENERATE_YAML="$(ask_yes_no '是否从 Excel 重新生成设备文件 crestron.yaml（会覆盖本地输出文件）？' no)"
+    GENERATE_YAML="$(ask_yes_no '是否从 Excel 重新生成设备文件 crestron.yaml（会覆盖本地输出文件）？')"
 fi
 
 if [[ -z "${GENERATE_AUTOMATIONS}" ]]; then
-    GENERATE_AUTOMATIONS="$(ask_yes_no '是否重新生成自动化关联（设备生效后读取 Excel 和 HA 注册表）？' no)"
+    GENERATE_AUTOMATIONS="$(ask_yes_no '是否重新生成自动化关联（设备生效后读取 Excel 和 HA 注册表）？')"
 fi
 if [[ -z "${AUTOMATION_YAML}" ]]; then
     AUTOMATION_YAML="$(dirname -- "${YAML_PATH}")/automations_manual.yaml"
@@ -653,10 +700,10 @@ if [[ "${GENERATE_YAML}" == yes || "${GENERATE_AUTOMATIONS}" == yes ]]; then
     if [[ -z "${XLSX_PATH}" ]]; then
         DEFAULT_XLSX="$(find_default_xlsx)"
         if [[ -n "${DEFAULT_XLSX}" ]]; then
-            read -r -p "xlsx 文件路径 [${DEFAULT_XLSX}]：" XLSX_PATH
+            ui_read XLSX_PATH "xlsx 文件路径 [${DEFAULT_XLSX}]："
             XLSX_PATH=${XLSX_PATH:-${DEFAULT_XLSX}}
         else
-            read -r -p "xlsx 文件路径（local 目录中未找到 .xlsx）：" XLSX_PATH
+            ui_read XLSX_PATH "xlsx 文件路径（local 目录中未找到 .xlsx）："
             [[ -n "${XLSX_PATH}" ]] || die "必须提供 xlsx 文件路径"
         fi
     fi
@@ -684,6 +731,10 @@ CONNECTION=(--host "${HOST}" --user "${SSH_USER}" --port "${SSH_PORT}")
 [[ -z "${IDENTITY_FILE}" ]] || CONNECTION+=(--identity "${IDENTITY_FILE}")
 [[ -z "${HA_URL}" ]] || CONNECTION+=(--ha-url "${HA_URL}")
 RESULT_FILE="${STAGE_ROOT}/device-result.json"
+ui_heading '部署概览'
+# 标签均为四个汉字，与 Python/Node 的详情列对齐。
+printf '       源码来源 : %s\n       部署编号 : %s\n       目标主机 : %s\n       登录用户 : %s\n' \
+    "${SOURCE_LABEL}" "${SOURCE_ID}" "${HOST}" "${SSH_USER}"
 
 if [[ "${AUTOMATIONS_ONLY}" == false ]]; then
     DEVICE_OPTIONS=(--prepared "${CONNECTION[@]}" --source-root "${SOURCE_ROOT}"
@@ -700,13 +751,12 @@ if [[ "${AUTOMATIONS_ONLY}" == false ]]; then
     python3 -B "${DEVICE_DEPLOYER}" "${DEVICE_OPTIONS[@]}"
 fi
 if [[ "${GENERATE_AUTOMATIONS}" == yes ]]; then
-    printf '\n第二步：生成并部署自动化关联\n'
     AUTOMATION_OPTIONS=(--prepared "${CONNECTION[@]}" --xlsx "${XLSX_PATH}"
         --output "${AUTOMATION_YAML}" --template "${AUTOMATION_TEMPLATE}"
         --wait-seconds "${RESTART_TIMEOUT}" --upload "${UPLOAD_AUTOMATIONS}")
     [[ ! -f "${RESULT_FILE}" ]] || AUTOMATION_OPTIONS+=(--context "${RESULT_FILE}")
     python3 -B "${AUTOMATION_DEPLOYER}" "${AUTOMATION_OPTIONS[@]}"
 else
-    printf '已跳过第二步：自动化关联生成。\n'
+    ui_log info '已跳过第二步：自动化关联生成。'
 fi
-printf '部署完成：%s / %s。\n' "${SOURCE_LABEL}" "${SOURCE_ID}"
+ui_log success "部署完成：${SOURCE_LABEL} / ${SOURCE_ID}。"

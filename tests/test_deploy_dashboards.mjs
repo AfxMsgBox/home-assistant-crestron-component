@@ -4,9 +4,50 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup, buildClimateDashboard, climateSnapshot } from '../tools/deploy_dashboards.mjs';
+import { deployDashboards, overwritePrompt, loadDashboards, HaError, HaClient, normalizeUrl, remoteBackup, buildClimateDashboard, climateSnapshot, terminalUi } from '../tools/deploy_dashboards.mjs';
+
+test('deployment UI aligns Chinese labels and respects TTY and NO_COLOR', () => {
+  const original = { term: process.env.TERM, noColor: process.env.NO_COLOR };
+  let output = '';
+  const stream = { isTTY: true, write: text => { output += text; } };
+  try {
+    process.env.TERM = 'xterm-256color';
+    delete process.env.NO_COLOR;
+    terminalUi(stream).log('部署完成', 'success');
+    assert.match(output, /\x1b\[32m/);
+    process.env.NO_COLOR = '';
+    output = '';
+    terminalUi(stream).log('部署完成', 'success');
+    assert.doesNotMatch(output, /\x1b/);
+    delete process.env.NO_COLOR;
+    stream.isTTY = false;
+    output = '';
+    terminalUi(stream).details([['页面数量', 2], ['SSH', 'root@example']]);
+    const lines = output.trimEnd().split('\n');
+    const width = s => [...s].reduce((n, c) => n + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+    assert.equal(width(lines[0].split(' : ')[0]), width(lines[1].split(' : ')[0]));
+    assert.doesNotMatch(output, /\x1b/);
+  } finally {
+    if (original.term === undefined) delete process.env.TERM; else process.env.TERM = original.term;
+    if (original.noColor === undefined) delete process.env.NO_COLOR; else process.env.NO_COLOR = original.noColor;
+  }
+});
 
 // 用本地临时目录模拟 SSH 服务器，执行真实的远端备份 shell，不连接现场。
+test('file table aligns Chinese names, sizes and timestamps without terminal control characters', () => {
+  let output = '';
+  terminalUi({ isTTY: false, write: text => { output += text; } }).table(
+    ['文件', '大小', '最后修改时间（UTC）'],
+    [['中文.json', '6 B', '2024-01-01 00:00:00'],
+      ['a\n.json', '2,048 B', '2024-01-01 00:00:00']], [1]);
+  const lines = output.trimEnd().split('\n');
+  assert.equal(lines.length, 4);
+  assert.match(output, /a\\x0a.json/);
+  const width = s => [...s].reduce((n, c) => n + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+  assert.equal(width(lines[2].split('2024-01-01')[0]), width(lines[3].split('2024-01-01')[0]));
+  assert.doesNotMatch(output, /\x1b/);
+});
+
 function remoteFixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'crestron-backup-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -106,13 +147,15 @@ for (const [input, overwritten, skipped] of [['All yes', 2, 0], [' All   NO ', 0
   });
 }
 
-test('invalid answers repeat; Enter is n; EOF means all no', async () => {
-  const a = answers(['yes', '', null]);
-  assert.equal(await a.ask('one'), false);
+test('invalid answers repeat; Enter is yes; EOF means all no', async () => {
+  const a = answers(['maybe', '', null]);
+  assert.equal(await a.ask('one'), true);
   assert.equal(await a.ask('two'), false);
   assert.equal(await a.ask('three'), false);
   assert.equal(a.prompts.length, 3);
   assert.equal(await answers(['n', 'y']).ask('one'), false);
+  assert.equal(await answers(['yes']).ask('one'), true);
+  assert.equal(await answers(['no']).ask('one'), false);
 });
 
 test('a new invocation resets All yes state', async () => {

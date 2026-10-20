@@ -418,8 +418,8 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         result, log = self.run_script(script=script, interactive=True,
                                      input_text='wrong\n1\nha.example\nroot\n\nn\nn\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('2. GitHub：', result.stdout)
-        self.assertIn('1. 本地目录：' + str(root), result.stdout)
+        self.assertIn('2. GitHub   : ', result.stdout)
+        self.assertIn('1. 本地目录 : ' + str(root), result.stdout)
         self.assertFalse(any('github.com' in line for line in log))
 
     def test_interactive_github_lists_branches_and_defaults_to_master(self):
@@ -807,7 +807,7 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         result, log = self.run_script(script=script, interactive=True,
                                      input_text='\nha.example\nroot\n\nn\nn\nn\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('1. 本地目录：' + str(root), result.stdout)
+        self.assertIn('1. 本地目录 : ' + str(root), result.stdout)
         self.assertFalse(any(line.startswith('curl ') for line in log))
 
     def test_standalone_interactive_downloads_before_running_any_step(self):
@@ -886,6 +886,36 @@ if os.environ.get('FAIL_AUTOMATIONS'): sys.exit(1)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(result.stdout.index('正在生成 YAML'), result.stdout.index('是否上传'))
         self.assertEqual((self.directory / 'capture/yaml').read_text(), 'downloaded converter output')
+
+    def test_device_upload_enter_defaults_to_yes(self):
+        output = self.directory / 'device.yaml'
+        output.write_text('local device configuration')
+        result, log = self.run_script('--devices-only', '--skip-generate-yaml',
+                                    '--yaml', str(output), input_text='\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('[Y/n]', result.stdout)
+        self.assertEqual((self.directory / 'capture/yaml').read_text(), 'local device configuration')
+        self.assertNotIn('\033', result.stdout + result.stderr)
+        self.assertTrue(all('-q' in line.split() for line in log if line.startswith('scp ')))
+        self.assertIn('最后修改时间（UTC）', result.stdout)
+        self.assertIn(' B ', result.stdout)
+
+    def test_enter_generates_both_files_and_uploads_devices(self):
+        xlsx = self.automation_sources()
+        output = self.directory / 'device.yaml'
+        automation = self.directory / 'automatic.yaml'
+        result, log = self.run_script('--yaml', str(output),
+                                      '--automation-yaml', str(automation),
+                                      input_text=f'\n\n{xlsx}\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count('[Y/n]'), 2)
+        self.assertEqual(output.read_text(), 'downloaded converter output')
+        self.assertEqual((self.directory / 'capture/yaml').read_text(), output.read_text())
+        self.assertEqual(automation.read_text(), 'generated associations')
+        stage = next(i for i, line in enumerate(log) if line.startswith('automation-stage2'))
+        restart = next(i for i, line in enumerate(log) if 'ha core restart' in line)
+        self.assertLess(restart, stage)
+        self.assertNotIn('\033', result.stdout + result.stderr)
 
     def test_password_reaches_python_connection_without_entering_command_log(self):
         shim = self.directory / 'sshpass'
